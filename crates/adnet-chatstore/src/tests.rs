@@ -1331,7 +1331,15 @@ fn error_recoverability_matches_documented_table() {
             ErrorClass::Fatal,
         ),
         (crate::error::ChatStoreError::Lock, ErrorClass::Fatal),
-        (crate::error::ChatStoreError::Json("x".into()), ErrorClass::Fatal),
+        (
+            // Build a real `serde_json::Error` from a malformed
+            // payload so the constructor type-checks; the `?` from
+            // a real parse is fine here.
+            crate::error::ChatStoreError::Json(
+                serde_json::from_str::<serde_json::Value>("not a number at all {").unwrap_err(),
+            ),
+            ErrorClass::Fatal,
+        ),
     ];
 
     for (err, expected) in cases {
@@ -1379,11 +1387,20 @@ fn startup_rejects_newer_schema_version() {
     // First open — creates the schema_version table.
     let _first = ChatStorage::new(cfg.clone()).unwrap();
     // Force the on-disk version ahead of what this build supports.
+    // The `version` column is the primary key, so we INSERT a new
+    // row with version > SCHEMA_VERSION and then delete the original
+    // — that's the only way to push the stored version above what
+    // this build supports without re-architecting the schema.
     {
         let p = dir.path().join("exodus_chat.db");
         let conn = rusqlite::Connection::open(&p).unwrap();
         conn.execute(
-            "UPDATE schema_version SET version = ?1",
+            "DELETE FROM schema_version WHERE version = ?1",
+            rusqlite::params![SCHEMA_VERSION as i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?1, 0)",
             rusqlite::params![(SCHEMA_VERSION + 1) as i64],
         )
         .unwrap();
