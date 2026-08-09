@@ -21,6 +21,71 @@ crates/
 └── adnet-cli        # `adnet` command-line demo
 ```
 
+## iroh backend (opt-in, `--features iroh`)
+
+ADNet ships two parallel backends for transport / gossip / blob storage:
+
+| Layer       | Default backend                       | `--features iroh` backend                                       |
+|-------------|---------------------------------------|-----------------------------------------------------------------|
+| Transport   | `quinn` + `rustls` (`QuicTransport`)  | `iroh::Endpoint` (`IrohTransport`) — QUIC w/ NAT traversal + DERP relay |
+| Gossip      | In-process broadcast                  | `iroh-gossip` (`IrohGossipTransport`) — HyParView + PlumTree    |
+| Blob store  | Disk-backed directory layout          | `iroh-blobs::store::fs::FsStore` — Bao-verified streams         |
+| Runtime     | `adnet-node::Node`                    | `adnet-node::IrohRuntime` — wires `iroh::Router` (blobs + gossip ALPN) |
+
+The `iroh` feature cascades: `adnet-node --features iroh` turns it on
+in `adnet-transport`, `adnet-gossip`, and `adnet-blobstore`. You can
+also enable it on a single crate (e.g. `cargo test -p adnet-transport
+--features iroh`).
+
+### What you gain with `--features iroh`
+
+- **NAT traversal**: rendezvous / hole-punching via iroh's relay
+  (`iroh-relay`, DERP protocol) — no manual port forwarding.
+- **Pkarr address discovery**: signed DNS records (`pkarr`) let peers
+  publish a stable address that resolves to current direct + relay
+  endpoints.
+- **Bao-verified blob transfer**: every byte streamed from a peer is
+  hash-checked against the BLAKE3 ticket, so partial / corrupt downloads
+  are detected at the application layer.
+- **HyParView + PlumTree gossip**: a proper P2P pub/sub overlay instead
+  of in-process broadcast.
+- **ALPN multiplexing**: `iroh::Router` accepts `iroh_blobs::ALPN` and
+  `iroh_gossip::ALPN` over a single QUIC connection — no separate ports.
+
+### Build-time cost
+
+Enabling `--features iroh` pulls in `iroh`, `iroh-base`, `iroh-blobs`,
+`iroh-gossip`, `iroh-relay`, `iroh-docs`, and `pkarr` (roughly 150+
+transitive crates, several heavy `aws-lc-rs` / `quinn` / `rustls` paths).
+The workspace now pins `rust-version = "1.91"` and `edition = "2024"` to
+match `iroh 1.0.x`. Expect:
+
+- **First cold build**: ~5–10 min on a modern laptop (depends on
+  network for crate downloads and toolchain upgrade).
+- **Incremental rebuilds**: a few seconds for trait-only edits, tens
+  of seconds for changes inside `iroh.rs` / `iroh_runtime.rs`.
+- **Test compile**: `cargo test --features iroh -p adnet-transport`
+  pays the full cost on the first run; subsequent runs are cheap.
+
+If you only want the default backend, **don't** pass `--features iroh`
+— the default build (`cargo build --workspace`) stays around the
+~1 min cold build.
+
+### Quick try
+
+```bash
+# Default (no iroh) — pure quinn-based transport
+cargo build --workspace
+cargo test  --workspace
+
+# With iroh backend — adds NAT traversal, DERP, Bao-verified blobs
+cargo build --workspace --features iroh
+cargo test  --workspace --features iroh
+
+# Compile-check the iroh-only modules without rebuilding everything
+cargo check -p adnet-node --features iroh
+```
+
 ## Crate dependency graph
 
 ```
