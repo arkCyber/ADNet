@@ -1,0 +1,28 @@
+/target
+**/*.rs.bk
+**/*.rs.bak
+**/*.rs.orig
+Cargo.lock.bak
+.DS_Store
+*.swp
+*.swo
+
+# Local data dirs produced by examples / tests
+*.tmp
+/tmp-adnet-*
+
+# Runtime data produced by `adnet-node` / `adnet-cli`
+/.adnet-data/
+/tmp-adnet/
+
+# Proptest regression artifacts (only at the workspace root — keep them
+# inside individual crates so test stability is preserved across clones)
+/proptest-regressions/
+
+# Editor / IDE
+.idea/
+.vscode/
+*.iml
+
+# Backup / unrelated directories
+Exodus@src-backup/

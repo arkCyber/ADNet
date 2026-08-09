@@ -1,0 +1,30 @@
+//! `adnet-workspace` — per-node shared folder for P2P file exchange.
+//!
+//! Ported from `Exodus@src-backup/.../exodus_workspace.rs`. Files are
+//! grouped into three folders:
+//!
+//! - `shared/` — files published to peers.
+//! - `inbox/`  — files received from peers.
+//! - `outbox/` — staged outbound copies.
+//!
+//! A JSON manifest (`workspace.json`) tracks every shared file. Peers
+//! discover manifest entries via the gossip topic returned by
+//! [`workspace_room_topic`].
+
+#![forbid(unsafe_code)]
+#![deny(unused_must_use)]
+
+mod workspace;
+
+pub use workspace::{
+    split_name_ext, Workspace, WorkspaceFileEntry, WorkspaceManifest, DIR_INBOX, DIR_OUTBOX,
+    DIR_SHARED, WORKSPACE_ROOM_ID,
+};
+
+/// Gossip topic name used to announce workspace manifest updates.
+///
+/// Mirrors the `adnet-room-{room}` convention used by the rest of the
+/// stack (`adnet-gossip::topic`).
+pub fn workspace_room_topic() -> String {
+    format!("adnet-room-{WORKSPACE_ROOM_ID}")
+}

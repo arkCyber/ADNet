@@ -1,0 +1,41 @@
+[package]
+name        = "adnet-chatstore"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "SQLite-backed persistence for group / direct chat messages, friends, sequences and read receipts. Ported from Exodus@src-backup chat_storage.rs and exodus-hub-server/src/manager.rs."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace members --------------------------------------------------------
+adnet-types = { workspace = true }
+
+# Async runtime / utilities -----------------------------------------------
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+
+# Serialization ------------------------------------------------------------
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+bincode     = { workspace = true }
+
+# Time / IDs ---------------------------------------------------------------
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+rand        = { workspace = true }
+
+# Crypto / integrity -------------------------------------------------------
+sha2        = { workspace = true }
+
+# Compression (sync API — same as the original exodus-hub-server) ----------
+zstd        = "0.13"
+
+# SQLite — bundled so the crate has no system dependency -------------------
+rusqlite   = { version = "0.32", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

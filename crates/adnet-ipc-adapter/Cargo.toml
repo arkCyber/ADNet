@@ -1,0 +1,33 @@
+[package]
+name        = "adnet-ipc-adapter"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "JSON-RPC adapter that exposes an adnet-node::Node over Unix socket — bridges `Node` API methods to JSON-RPC and `subscribe_room` events to notifications."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-node      = { workspace = true }
+adnet-ipc       = { workspace = true }
+adnet-types     = { workspace = true }
+tokio           = { workspace = true }
+async-trait     = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+anyhow          = { workspace = true }
+tracing         = { workspace = true }
+chrono          = { workspace = true }
+
+[dev-dependencies]
+tempfile  = { workspace = true }
+futures   = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Examples are intentionally not declared here. The `examples/`
+# directory is empty and the [[example]] blocks that previously
+# referenced `daemon.rs` / `tui_smoke.rs` were removed when those
+# files were deleted; re-add [[example]] entries when those
+# example programs are reintroduced.

@@ -1,0 +1,40 @@
+[package]
+name        = "adnet-identity"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+authors     = { workspace = true }
+description = "ADNet identity: EVM-style wallets, signatures, and static end-to-end encryption envelopes."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace-internal
+adnet-types = { workspace = true }
+
+# Crypto primitives — kept narrow to avoid pulling in alloy/ethers.
+secp256k1 = { version = "0.29", features = ["global-context", "rand", "recovery", "serde"] }
+sha3      = "0.10"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+x25519-dalek = { version = "3.0", features = ["static_secrets"] }
+aes-gcm   = "0.10"
+hkdf      = "0.12"
+sha2      = { workspace = true }
+blake3    = { workspace = true }
+rand      = { workspace = true }
+
+# Serialization / encoding
+serde      = { workspace = true }
+serde_json = { workspace = true }
+hex        = { workspace = true }
+
+# Errors
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

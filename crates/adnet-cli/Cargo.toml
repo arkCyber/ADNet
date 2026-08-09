@@ -1,0 +1,31 @@
+[package]
+name        = "adnet-cli"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "ADNet CLI — demo command-line entrypoint."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "adnet"
+path = "src/main.rs"
+
+[dependencies]
+adnet-types     = { workspace = true }
+adnet-blobstore = { workspace = true }
+adnet-gossip    = { workspace = true }
+adnet-mesh      = { workspace = true }
+adnet-transport = { workspace = true }
+adnet-node      = { workspace = true }
+tokio           = { workspace = true }
+clap            = { workspace = true }
+anyhow          = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+tracing         = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono          = { workspace = true }
+hex             = { workspace = true }

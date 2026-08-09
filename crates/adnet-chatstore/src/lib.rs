@@ -1,0 +1,52 @@
+//! `adnet-chatstore` — SQLite-backed persistence for chat data.
+//!
+//! This crate is a port (and a clean-room rewrite) of two related SQLite
+//! storage modules from the legacy codebase:
+//!
+//! 1. `Exodus/src-backup/src-tauri/src/microservice/chat_storage.rs`
+//!    — per-user friend lists, direct messages, group messages,
+//!    per-(user,target) sequence tracking and message receipts.
+//! 2. `Exodus/src-backup/exodus-hub-server/src/manager.rs`
+//!    — canonical hub server storage: users, conversations,
+//!    group membership, sender-side sequence generation, pending
+//!    offline messages, sync, and zstd+bincode compression for
+//!    bulk history transfer.
+//!
+//! # Design
+//!
+//! - One SQLite file per node, opened with `journal_mode=WAL` so the
+//!   IPC layer can read concurrently with gossip writes.
+//! - All state is keyed by `user_id` (or `sender_id`) so multiple local
+//!   users can coexist on a single node.
+//! - Data types are the typed records from [`adnet_types::group_chat`] —
+//!   no `String` / `i64` / `Vec<u8>` "stringly typed" persistence leaks.
+//! - Async API on top of a synchronous SQLite handle (the executor
+//!   dispatches blocking calls onto `tokio::task::spawn_blocking`).
+//!   This matches the `exodus-hub-server` model and avoids pulling in
+//!   the whole `tokio` runtime machinery on a per-connection basis.
+//!
+//! # Errors
+//!
+//! All public functions return [`ChatStoreError`], which is a thin
+//! `thiserror` enum. `std::sync::Mutex` poisoning is normalised to a
+//! regular `ChatStoreError::Lock` so callers don't have to deal with
+//! `Result<_, MutexGuardErr>` plumbing.
+
+#![forbid(unsafe_code)]
+#![deny(unused_must_use)]
+
+pub mod error;
+pub mod im;
+pub mod schema;
+pub mod storage;
+
+pub use error::{ChatStoreError, Result};
+pub use im::{
+    ChatType, Conversation, GroupMember, ImManager, Message, MessageReceipt, PendingMessage,
+    SenderSequence, SyncRequest, SyncResponse, User, UserSequence, MAX_SEQUENCE,
+};
+pub use schema::SCHEMA_VERSION;
+pub use storage::{ChatStorage, ChatStorageConfig, Friend, MessageAttachment};
+
+#[cfg(test)]
+mod tests;

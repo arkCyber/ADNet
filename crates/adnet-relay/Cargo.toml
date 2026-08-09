@@ -1,0 +1,44 @@
+[package]
+name        = "adnet-relay"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "WAN relay HTTP proxy for ADNet mesh traffic across NAT boundaries."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+axum        = { version = "0.7" }
+reqwest     = { workspace = true }
+tracing     = { workspace = true }
+chrono      = { workspace = true }
+url         = "2"
+hex         = { workspace = true }
+adnet-resilience = { workspace = true }
+adnet-types = { workspace = true }
+
+# Optional billing: when the relay operator enables the `billing` feature,
+# pledge/receipt verification happens locally on this crate without
+# contacting any chain. Settlement is out-of-band (see adnet-token docs).
+adnet-token    = { workspace = true, optional = true }
+adnet-identity = { workspace = true, optional = true }
+
+[features]
+# Default feature set keeps the relay *purely* a forward proxy. Operators
+# who want to accept signed pledges opt in explicitly.
+default = []
+billing = ["dep:adnet-token", "dep:adnet-identity"]
+
+[dev-dependencies]
+tokio     = { workspace = true }
+tempfile  = { workspace = true }
+
+[[example]]
+name = "relay_local_demo"
+path = "examples/relay_local_demo.rs"

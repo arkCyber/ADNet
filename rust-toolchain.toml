@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned to a stable channel wide enough to pull modern deps; bump as
+# `rust-version` in `Cargo.toml` is raised.
+channel = "stable"
+components = ["rustfmt", "clippy"]

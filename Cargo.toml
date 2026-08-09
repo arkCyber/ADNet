@@ -1,0 +1,118 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/adnet-types",
+    "crates/adnet-blobstore",
+    "crates/adnet-gossip",
+    "crates/adnet-mesh",
+    "crates/adnet-resilience",
+    "crates/adnet-transport",
+    "crates/adnet-ipc",
+    "crates/adnet-relay",
+    "crates/adnet-workspace",
+    "crates/adnet-chatstore",
+    "crates/adnet-node",
+    "crates/adnet-cli",
+    "crates/adnet-ipc-adapter",
+    "crates/adnet-identity",
+    "crates/adnet-token",
+]
+
+# Shared metadata used by every workspace member via `{ workspace = true }`.
+[workspace.package]
+version     = "0.1.0"
+# iroh 1.0 requires Rust 1.91 + edition 2024. We need both in order to
+# link `iroh`, `iroh-blobs`, `iroh-gossip`, `iroh-relay`, `iroh-base`,
+# `iroh-docs` as workspace dependencies. The `iroh` feature on
+# `adnet-transport` is the canonical gate: when enabled, callers get
+# NAT-traversal / DERP relay / Pkarr / Bao verification; when disabled,
+# the existing quinn-based QUIC path is preserved.
+edition     = "2024"
+rust-version = "1.91"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/arksong/adnet"
+authors     = ["ADNet Contributors"]
+
+[workspace.dependencies]
+# --- Async runtime / utilities ----------------------------------------------
+tokio       = { version = "1.40", features = ["full"] }
+futures     = "0.3"
+async-trait = "0.1"
+thiserror   = "1.0"
+anyhow      = "1.0"
+
+# --- Serialization ----------------------------------------------------------
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode    = "1.3"
+hex        = "0.4"
+
+# --- Time / IDs / Misc -------------------------------------------------------
+chrono   = { version = "0.4", features = ["serde", "clock"] }
+uuid     = { version = "1.10", features = ["v4", "serde"] }
+tracing  = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- Crypto / content addressing --------------------------------------------
+blake3 = "1.5"
+sha2   = "0.10"
+rand   = "0.8"
+
+# --- Networking (HTTP fallback / QUIC) ---------------------------------------
+reqwest = { version = "0.12", features = ["json", "stream"] }
+quinn   = "0.11"
+rustls  = { version = "0.23", default-features = false, features = ["ring"] }
+rcgen   = "0.13"
+
+# --- CLI ---------------------------------------------------------------------
+clap    = { version = "4.5", features = ["derive"] }
+indicatif = "0.17"
+
+# --- Dev only ----------------------------------------------------------------
+tempfile = "3"
+proptest  = "1.4"
+
+# ---------------------------------------------------------------------------
+# Internal workspace member shorthands
+# ---------------------------------------------------------------------------
+adnet-types      = { path = "crates/adnet-types" }
+adnet-blobstore  = { path = "crates/adnet-blobstore" }
+adnet-gossip     = { path = "crates/adnet-gossip" }
+adnet-mesh       = { path = "crates/adnet-mesh" }
+adnet-resilience = { path = "crates/adnet-resilience" }
+adnet-transport  = { path = "crates/adnet-transport" }
+adnet-ipc        = { path = "crates/adnet-ipc" }
+adnet-relay      = { path = "crates/adnet-relay" }
+adnet-workspace  = { path = "crates/adnet-workspace" }
+adnet-node       = { path = "crates/adnet-node" }
+adnet-identity   = { path = "crates/adnet-identity" }
+adnet-token      = { path = "crates/adnet-token" }
+
+# ---------------------------------------------------------------------------
+# Profile / lints applied workspace-wide
+# ---------------------------------------------------------------------------
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+
+[profile.dev]
+debug = 1
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# ---------------------------------------------------------------------------
+# Build-time opt-in flags consumed by adnet-node (and any other future
+# embedder of adnet-relay). Setting these in `[package.metadata]` lets a
+# downstream Cargo build opt-in to billing without touching the
+# `adnet-node` source: `cargo build -p adnet-node --features
+# workspace-billing`. Member crates then forward the flag to their
+# own feature gates (see `adnet-relay/billing` and `adnet-node/billing`).
+# ---------------------------------------------------------------------------
+[workspace.metadata.adnet]
+billing_supported = true
