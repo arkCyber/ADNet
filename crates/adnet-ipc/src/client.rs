@@ -16,7 +16,7 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;

@@ -220,8 +220,7 @@ pub(super) const INDEX_STATEMENTS: &[&str] = &[
 /// The `schema_version` table is created before everything else so
 /// the migration machinery can detect the on-disk version
 /// independently of the rest of the schema.
-const CREATE_VERSION_TABLE: &str =
-    "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)";
+const CREATE_VERSION_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)";
 
 /// Enable WAL mode and FK enforcement. Call this once per
 /// connection. The PRAGMA statements don't return rows in general
@@ -324,7 +323,9 @@ fn try_add_column(
         Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(err, msg))
             if err.code == rusqlite::ErrorCode::Unknown
-                && msg.as_deref().is_some_and(|m| m.contains("duplicate column")) =>
+                && msg
+                    .as_deref()
+                    .is_some_and(|m| m.contains("duplicate column")) =>
         {
             // Column already present — treat as success.
             Ok(())

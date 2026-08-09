@@ -10,20 +10,20 @@ use adnet_ipc::validation::ValidationPolicy;
 use adnet_mesh::MeshServerHandle;
 use adnet_relay::{RelayConfig, RelayServerHandle};
 use adnet_transport::{
-    derive_node_id_from_cert, OutgoingConnection, SharedTransport, Transport, TransportIdentity,
+    OutgoingConnection, SharedTransport, Transport, TransportIdentity, derive_node_id_from_cert,
 };
 use adnet_types::{
     Announcement, BlobTicket, CdnContentKind, ContentHash, Endpoint, NodeAddr, NodeId, RoomAsset,
     RoomId,
 };
-use adnet_workspace::{Workspace, WorkspaceFileEntry, WORKSPACE_ROOM_ID};
+use adnet_workspace::{WORKSPACE_ROOM_ID, Workspace, WorkspaceFileEntry};
 use anyhow::Result;
 use chrono::Utc;
-use tokio::sync::broadcast;
 use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 #[allow(unused_imports)]
-use {derive_node_id_from_cert as _, OutgoingConnection as _, Transport as _};
+use {OutgoingConnection as _, Transport as _, derive_node_id_from_cert as _};
 
 use crate::state::SwarmIndex;
 
@@ -188,12 +188,8 @@ impl NodeBuilder {
             cfg.apply_local_relay_url();
             if cfg.serve_enabled {
                 let billing_mode = cfg.billing_mode();
-                match adnet_relay::RelayServer::start(
-                    &cfg.serve_bind,
-                    cfg.serve_port,
-                    billing_mode,
-                )
-                .await
+                match adnet_relay::RelayServer::start(&cfg.serve_bind, cfg.serve_port, billing_mode)
+                    .await
                 {
                     Ok(handle) => Some(handle),
                     Err(e) => {
@@ -314,18 +310,14 @@ impl NodeBuilder {
                 let local = cfg.node_id.clone();
                 let policy = cfg.gossip_validation;
                 let sink = Arc::clone(&remote_workspace);
-                let (auto_tx, mut auto_rx) = tokio::sync::mpsc::unbounded_channel::<(
-                    NodeId,
-                    String,
-                )>();
+                let (auto_tx, mut auto_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<(NodeId, String)>();
                 tokio::spawn(async move {
                     loop {
                         match rx.recv().await {
                             Ok(ann) => {
-                                if let Some(name) = ingest_workspace_announcement(
-                                    ann, &local, policy, &sink,
-                                )
-                                .await
+                                if let Some(name) =
+                                    ingest_workspace_announcement(ann, &local, policy, &sink).await
                                 {
                                     // Best-effort delivery: the
                                     // auto-fetch task may have shut
@@ -338,7 +330,10 @@ impl NodeBuilder {
                         }
                     }
                 });
-                info!("[{}] workspace: joined gossip room {room}", cfg.node_id.short());
+                info!(
+                    "[{}] workspace: joined gossip room {room}",
+                    cfg.node_id.short()
+                );
 
                 // Auto-fetch task: pulls bytes for every ingested
                 // entry that came with a ticket. Errors are logged
@@ -358,10 +353,7 @@ impl NodeBuilder {
                                 .flat_map(|(owner, bucket)| {
                                     bucket
                                         .iter()
-                                        .filter(|r| {
-                                            r.ticket.is_some()
-                                                && r.local_path.is_none()
-                                        })
+                                        .filter(|r| r.ticket.is_some() && r.local_path.is_none())
                                         .map(|r| (owner.clone(), r.entry.name.clone()))
                                         .collect::<Vec<_>>()
                                 })
@@ -371,14 +363,11 @@ impl NodeBuilder {
                             // Skip if already fetched (race).
                             {
                                 let g = remote_workspace_for_fetch.lock().await;
-                                if let Some(b) = g.get(&owner) {
-                                    if let Some(r) =
-                                        b.iter().find(|r| r.entry.name == name)
-                                    {
-                                        if r.local_path.is_some() {
-                                            continue;
-                                        }
-                                    }
+                                if let Some(b) = g.get(&owner)
+                                    && let Some(r) = b.iter().find(|r| r.entry.name == name)
+                                    && r.local_path.is_some()
+                                {
+                                    continue;
                                 }
                             }
                             // Resolve inbox dir + ticket + hash.
@@ -387,22 +376,15 @@ impl NodeBuilder {
                                 let Some(bucket) = g.get(&owner) else {
                                     continue;
                                 };
-                                let Some(entry) = bucket
-                                    .iter()
-                                    .find(|r| r.entry.name == name)
+                                let Some(entry) = bucket.iter().find(|r| r.entry.name == name)
                                 else {
                                     continue;
                                 };
                                 let Some(ticket) = entry.ticket.clone() else {
                                     continue;
                                 };
-                                let hash_hex = entry
-                                    .entry
-                                    .content_hash
-                                    .clone()
-                                    .unwrap_or_default();
-                                let safe_name =
-                                    workspace_safe_name(&entry.entry.name);
+                                let hash_hex = entry.entry.content_hash.clone().unwrap_or_default();
+                                let safe_name = workspace_safe_name(&entry.entry.name);
                                 (ticket, hash_hex, safe_name)
                             };
                             let inbox_dir = {
@@ -410,9 +392,7 @@ impl NodeBuilder {
                                 match g.as_ref() {
                                     Some(ws) => ws.inbox_dir(),
                                     None => {
-                                        warn!(
-                                            "workspace: inbox dir vanished mid-fetch"
-                                        );
+                                        warn!("workspace: inbox dir vanished mid-fetch");
                                         continue;
                                     }
                                 }
@@ -454,14 +434,12 @@ impl NodeBuilder {
                                         dest.display(),
                                         job.bytes_done,
                                     );
-                                    let mut g =
-                                        remote_workspace_for_fetch.lock().await;
+                                    let mut g = remote_workspace_for_fetch.lock().await;
                                     if let Some(bucket) = g.get_mut(&owner) {
                                         for r in bucket.iter_mut() {
                                             if r.entry.name == name {
                                                 r.local_path = Some(dest.clone());
-                                                r.fetched_bytes =
-                                                    Some(job.bytes_done);
+                                                r.fetched_bytes = Some(job.bytes_done);
                                             }
                                         }
                                     }
@@ -503,7 +481,13 @@ impl NodeBuilder {
 fn workspace_safe_name(entry_name: &str) -> String {
     entry_name
         .chars()
-        .map(|c| if c == '/' || c == '\\' || c == '\0' { '_' } else { c })
+        .map(|c| {
+            if c == '/' || c == '\\' || c == '\0' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -569,14 +553,8 @@ async fn ingest_workspace_announcement(
         fetched_bytes: None,
     };
     let mut g = sink.lock().await;
-    g.entry(ann.node_id)
-        .or_insert_with(Vec::new)
-        .push(remote);
-    if has_ticket {
-        Some(entry_name)
-    } else {
-        None
-    }
+    g.entry(ann.node_id).or_insert_with(Vec::new).push(remote);
+    if has_ticket { Some(entry_name) } else { None }
 }
 
 /// Public status snapshot exposed via [`Node::info`].
@@ -619,8 +597,7 @@ pub struct RelayEndpointInfo {
     pub port: u16,
 }
 
-pub type IncomingConn =
-    (NodeId, Box<dyn adnet_transport::OutgoingConnection>);
+pub type IncomingConn = (NodeId, Box<dyn adnet_transport::OutgoingConnection>);
 
 /// One remote workspace file, as seen via gossip. The full
 /// `WorkspaceFileEntry` carries `content_hash` as an `Option<String>`
@@ -849,7 +826,11 @@ impl Node {
             .store
             .import_file_sync(src)
             .map_err(|e| anyhow::anyhow!("import_file: {e}"))?;
-        if size as i128 != std::fs::metadata(src).map(|m| m.len() as i128).unwrap_or(-1) {
+        if size as i128
+            != std::fs::metadata(src)
+                .map(|m| m.len() as i128)
+                .unwrap_or(-1)
+        {
             // Size mismatch — bail so the manifest stays consistent.
             anyhow::bail!("size mismatch between src and imported blob");
         }
@@ -896,13 +877,9 @@ impl Node {
 
     /// Snapshot of every remote workspace entry seen via gossip,
     /// grouped by owning node id.
-    pub async fn remote_workspace_entries(
-        &self,
-    ) -> Vec<(NodeId, Vec<RemoteWorkspaceEntry>)> {
+    pub async fn remote_workspace_entries(&self) -> Vec<(NodeId, Vec<RemoteWorkspaceEntry>)> {
         let g = self.remote_workspace.lock().await;
-        g.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+        g.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     /// Flat list of remote entries — handy for the REPL and UI.
@@ -929,9 +906,7 @@ impl Node {
             let e = bucket
                 .iter()
                 .find(|e| e.entry.name == name)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("no remote entry {name} from {}", owner.short())
-                })?;
+                .ok_or_else(|| anyhow::anyhow!("no remote entry {name} from {}", owner.short()))?;
             let t = e
                 .ticket
                 .clone()
@@ -953,10 +928,8 @@ impl Node {
                 .ok_or_else(|| anyhow::anyhow!("workspace disabled"))?;
             ws.resolve_unique_path(&inbox_dir, &safe_name)
         };
-        let hash = ContentHash::from_hex(
-            entry.content_hash.as_deref().unwrap_or(""),
-        )
-        .map_err(|e| anyhow::anyhow!("bad content hash in manifest: {e}"))?;
+        let hash = ContentHash::from_hex(entry.content_hash.as_deref().unwrap_or(""))
+            .map_err(|e| anyhow::anyhow!("bad content hash in manifest: {e}"))?;
         let job = crate::download::fetch_blob(
             Arc::clone(&self.store),
             &hash,
@@ -1036,13 +1009,9 @@ impl Node {
             anyhow::bail!("relay server is disabled in RelayConfig");
         }
         let billing_mode = cfg.billing_mode();
-        let handle = adnet_relay::RelayServer::start(
-            &cfg.serve_bind,
-            cfg.serve_port,
-            billing_mode,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("relay start: {e}"))?;
+        let handle = adnet_relay::RelayServer::start(&cfg.serve_bind, cfg.serve_port, billing_mode)
+            .await
+            .map_err(|e| anyhow::anyhow!("relay start: {e}"))?;
         let url = handle.base_url.clone();
         *guard = Some(handle);
         Ok(url)
@@ -1160,10 +1129,10 @@ impl Node {
         // Local provide: if we already have the blob, advertise our own
         // mesh endpoint as a candidate before any remote peer.
         let mut peers: Vec<BlobTicket> = Vec::new();
-        if self.store.has_complete(hash) {
-            if let Ok(t) = self.make_ticket(hash).await {
-                peers.push(t);
-            }
+        if self.store.has_complete(hash)
+            && let Ok(t) = self.make_ticket(hash).await
+        {
+            peers.push(t);
         }
         peers.extend(self.swarm.lock().await.peers_for(hash));
         peers
@@ -1955,10 +1924,9 @@ mod tests {
             if let Some(r) = flat
                 .iter()
                 .find(|r| r.owner == alice_node && r.entry.name == entry.name)
+                && let (Some(p), Some(n)) = (&r.local_path, r.fetched_bytes)
             {
-                if let (Some(p), Some(n)) = (&r.local_path, r.fetched_bytes) {
-                    break (n, p.clone());
-                }
+                break (n, p.clone());
             }
             if std::time::Instant::now() > deadline {
                 panic!(
@@ -1971,7 +1939,10 @@ mod tests {
         assert!(fetched_path.exists(), "auto-fetched file must exist");
         assert_eq!(fetched_bytes, payload.len() as u64);
         let read = std::fs::read(&fetched_path).unwrap();
-        assert_eq!(read, payload, "fetched bytes must match the original payload");
+        assert_eq!(
+            read, payload,
+            "fetched bytes must match the original payload"
+        );
         assert!(
             fetched_path.starts_with(bob_dir.join("ExodusWorkSpace").join("inbox")),
             "auto-fetched file must live under bob's inbox/, got {}",
@@ -2068,7 +2039,10 @@ mod tests {
         let src = dir.path().join("x.bin");
         std::fs::write(&src, b"x").unwrap();
         let res = node.publish_to_workspace(&src).await;
-        assert!(res.is_err(), "publish_to_workspace must error when disabled");
+        assert!(
+            res.is_err(),
+            "publish_to_workspace must error when disabled"
+        );
         assert!(node.local_workspace_files().await.unwrap().is_empty());
         assert!(node.remote_workspace_flat().await.is_empty());
         node.shutdown().await.unwrap();

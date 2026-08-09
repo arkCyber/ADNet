@@ -495,10 +495,12 @@ fn delete_user_data_purges_everything() {
     // total comes from the four populated tables.
     assert!(purged >= 4);
 
-    assert!(storage
-        .get_direct_messages("a", "dm:a:b")
-        .unwrap()
-        .is_empty());
+    assert!(
+        storage
+            .get_direct_messages("a", "dm:a:b")
+            .unwrap()
+            .is_empty()
+    );
     assert!(storage.get_friends("a").unwrap().is_empty());
     assert!(storage.get_sequence("a", "b", "direct").unwrap().is_none());
     assert!(storage.get_message_receipts("a", "m1").unwrap().is_empty());
@@ -1102,7 +1104,9 @@ fn search_all_direct_messages_spans_chats() {
         msg.stamp_integrity_hash();
         storage.save_direct_message("a", msg).unwrap();
     }
-    let hits = storage.search_all_direct_messages("a", "alpha", 100).unwrap();
+    let hits = storage
+        .search_all_direct_messages("a", "alpha", 100)
+        .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].chat_id, "dm:a:b");
 }
@@ -1131,10 +1135,12 @@ fn delete_chat_messages_removes_only_one_side() {
 
     let removed = storage.delete_chat_messages("a", "dm:a:b").unwrap();
     assert_eq!(removed, 1);
-    assert!(storage
-        .get_direct_messages("a", "dm:a:b")
-        .unwrap()
-        .is_empty());
+    assert!(
+        storage
+            .get_direct_messages("a", "dm:a:b")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         storage.get_direct_messages("b", "dm:a:b").unwrap().len(),
         1,
@@ -1193,9 +1199,11 @@ fn update_friend_status_round_trips() {
             },
         )
         .unwrap();
-    assert!(storage
-        .update_friend_status("a", "b", Some("away"), Some(123))
-        .unwrap());
+    assert!(
+        storage
+            .update_friend_status("a", "b", Some("away"), Some(123))
+            .unwrap()
+    );
     let friend = storage.get_friend("a", "b").unwrap().unwrap();
     assert_eq!(friend.status.as_deref(), Some("away"));
     assert_eq!(friend.last_seen, Some(123));
@@ -1207,7 +1215,11 @@ fn update_friend_status_round_trips() {
     assert!(matches!(err, crate::error::ChatStoreError::Invalid(_)));
 
     // Unknown friend returns false (not an error).
-    assert!(!storage.update_friend_status("a", "ghost", None, None).unwrap());
+    assert!(
+        !storage
+            .update_friend_status("a", "ghost", None, None)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1266,11 +1278,10 @@ async fn im_delete_message_cascades_receipts() {
         .send_message(&conv.id, &alice.id, None, "x", None)
         .await
         .unwrap();
-    mgr.create_message_receipt(&msg.id, &alice.id, 1).await.unwrap();
-    assert_eq!(
-        mgr.get_message_receipts(&msg.id).await.unwrap().len(),
-        1
-    );
+    mgr.create_message_receipt(&msg.id, &alice.id, 1)
+        .await
+        .unwrap();
+    assert_eq!(mgr.get_message_receipts(&msg.id).await.unwrap().len(), 1);
 
     assert!(mgr.delete_message(&msg.id).await.unwrap());
     assert!(mgr.get_message_receipts(&msg.id).await.unwrap().is_empty());
@@ -1314,11 +1325,26 @@ fn error_recoverability_matches_documented_table() {
     use crate::error::ErrorClass;
 
     let cases: Vec<(crate::error::ChatStoreError, ErrorClass)> = vec![
-        (crate::error::ChatStoreError::Validation("x".into()), ErrorClass::UserError),
-        (crate::error::ChatStoreError::Invalid("x".into()), ErrorClass::UserError),
-        (crate::error::ChatStoreError::Constraint("x".into()), ErrorClass::UserError),
-        (crate::error::ChatStoreError::ForeignKey("x".into()), ErrorClass::UserError),
-        (crate::error::ChatStoreError::NotFound("x".into()), ErrorClass::Recoverable),
+        (
+            crate::error::ChatStoreError::Validation("x".into()),
+            ErrorClass::UserError,
+        ),
+        (
+            crate::error::ChatStoreError::Invalid("x".into()),
+            ErrorClass::UserError,
+        ),
+        (
+            crate::error::ChatStoreError::Constraint("x".into()),
+            ErrorClass::UserError,
+        ),
+        (
+            crate::error::ChatStoreError::ForeignKey("x".into()),
+            ErrorClass::UserError,
+        ),
+        (
+            crate::error::ChatStoreError::NotFound("x".into()),
+            ErrorClass::Recoverable,
+        ),
         (
             crate::error::ChatStoreError::SchemaVersion {
                 stored: 1,

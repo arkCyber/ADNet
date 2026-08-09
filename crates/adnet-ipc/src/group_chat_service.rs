@@ -32,13 +32,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use adnet_types::group_chat::{
-    attachment_from_hash, next_group_message_id, DirectChat, DirectMessage, GroupChat, GroupMember,
-    GroupMessage, MessageAttachment, MessageReceipt,
+    DirectChat, DirectMessage, GroupChat, GroupMember, GroupMessage, MessageAttachment,
+    MessageReceipt, attachment_from_hash, next_group_message_id,
 };
 use adnet_types::{ContentHash, NodeId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::server::{JsonRpcServer, JsonRpcServerHandle, RpcHandler};
@@ -225,12 +225,12 @@ impl GroupChatIpcService {
         let entry = messages.entry(group_id.clone()).or_default();
         entry.push(message.clone());
         // Bump the group's last activity and last sequence for diagnostics.
-        if let Ok(mut groups) = Self::lock(&self.groups) {
-            if let Some(g) = groups.get_mut(&group_id) {
-                g.last_activity = message.timestamp.max(g.last_activity);
-                g.last_sequence = g.last_sequence.max(message.sequence);
-                g.message_count = g.message_count.saturating_add(1);
-            }
+        if let Ok(mut groups) = Self::lock(&self.groups)
+            && let Some(g) = groups.get_mut(&group_id)
+        {
+            g.last_activity = message.timestamp.max(g.last_activity);
+            g.last_sequence = g.last_sequence.max(message.sequence);
+            g.message_count = g.message_count.saturating_add(1);
         }
         Ok(message)
     }
@@ -304,11 +304,11 @@ impl GroupChatIpcService {
         let mut messages = Self::lock(&self.direct_messages)?;
         let entry = messages.entry(chat_id.clone()).or_default();
         entry.push(message.clone());
-        if let Ok(mut chats) = Self::lock(&self.direct_chats) {
-            if let Some(c) = chats.get_mut(&chat_id) {
-                c.last_activity = message.timestamp.max(c.last_activity);
-                c.message_count = c.message_count.saturating_add(1);
-            }
+        if let Ok(mut chats) = Self::lock(&self.direct_chats)
+            && let Some(c) = chats.get_mut(&chat_id)
+        {
+            c.last_activity = message.timestamp.max(c.last_activity);
+            c.message_count = c.message_count.saturating_add(1);
         }
         Ok(message)
     }
@@ -446,7 +446,7 @@ pub use adnet_types::group_chat::attachment_from_hash as group_attachment_from_h
 /// want to build messages on this side of the wire without going
 /// through `adnet-types` again.
 pub use adnet_types::group_chat::next_group_message_id as message_id_for;
-pub use adnet_types::{attachment_from_hash_str, AttachmentKind, MessageType};
+pub use adnet_types::{AttachmentKind, MessageType, attachment_from_hash_str};
 
 /// Convenience wrapper that stamps the integrity hash and fills in
 /// `message_id` if empty. Useful for callers that have a [`ContentHash`]

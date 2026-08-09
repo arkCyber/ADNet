@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as TokioMutex;
@@ -247,8 +247,7 @@ impl ImManager {
         schema::configure_connection(&conn)?;
         schema::apply_schema(&mut conn)?;
 
-        let integrity: String =
-            conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         if integrity != "ok" {
             return Err(ChatStoreError::DatabaseCorrupt(integrity));
         }
@@ -872,7 +871,10 @@ impl ImManager {
              WHERE conversation_id = ?1 AND timestamp < ?2",
             params![conversation_id, cutoff_str],
         )?;
-        debug!(conversation_id, cutoff_timestamp, removed, "pruned messages");
+        debug!(
+            conversation_id,
+            cutoff_timestamp, removed, "pruned messages"
+        );
         Ok(removed)
     }
 

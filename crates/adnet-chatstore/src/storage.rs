@@ -29,13 +29,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 pub use adnet_types::group_chat::MessageAttachment;
-use adnet_types::group_chat::{DirectMessage, GroupMessage, MessageReceipt, MAX_SEQUENCE};
-use adnet_types::invariants::{validate_id, validate_name, MessageType};
+use adnet_types::group_chat::{DirectMessage, GroupMessage, MAX_SEQUENCE, MessageReceipt};
+use adnet_types::invariants::{MessageType, validate_id, validate_name};
 
 use crate::error::{ChatStoreError, Result};
 use crate::schema;
@@ -112,8 +112,7 @@ impl ChatStorage {
         // pragma is cheap on healthy databases (a single page
         // checksum) and forces the operator to deal with corruption
         // explicitly rather than via cryptic per-row errors.
-        let integrity: String =
-            conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         if integrity != "ok" {
             return Err(ChatStoreError::DatabaseCorrupt(integrity));
         }
@@ -653,10 +652,7 @@ impl ChatStorage {
              WHERE user_id = ?1 AND content LIKE ?2 ESCAPE '\\'
              ORDER BY sequence DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(
-            params![user_id, pattern, cap],
-            row_to_direct_message,
-        )?;
+        let rows = stmt.query_map(params![user_id, pattern, cap], row_to_direct_message)?;
         let mut messages = rows.collect::<std::result::Result<Vec<_>, _>>()?;
         messages.reverse();
         Ok(messages)

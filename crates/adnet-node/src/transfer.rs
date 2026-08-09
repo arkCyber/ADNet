@@ -22,7 +22,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use adnet_blobstore::BlobStore;
-use adnet_mesh::{fetch_from_mesh, MeshFetchResult};
+use adnet_mesh::{MeshFetchResult, fetch_from_mesh};
 use adnet_types::{BlobTicket, ContentHash, RangeSpec};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};

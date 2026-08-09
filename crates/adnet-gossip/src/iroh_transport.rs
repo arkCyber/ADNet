@@ -58,13 +58,13 @@ use adnet_types::{AnnouncementPayload, NodeId, Topic};
 #[cfg(feature = "iroh")]
 use async_trait::async_trait;
 #[cfg(feature = "iroh")]
-use iroh_gossip::{api::Event, Gossip as IrohGossip};
+use iroh::EndpointId;
 #[cfg(feature = "iroh")]
 use iroh_gossip::proto::TopicId as IrohTopicId;
 #[cfg(feature = "iroh")]
-use iroh::EndpointId;
+use iroh_gossip::{Gossip as IrohGossip, api::Event};
 #[cfg(feature = "iroh")]
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 #[cfg(feature = "iroh")]
 use tracing::{debug, warn};
 
@@ -141,7 +141,10 @@ impl IrohGossipTransport {
     /// Ensure the local node has joined the topic and the broadcast
     /// channel exists. Idempotent: returns the existing channel if
     /// already joined.
-    async fn ensure_joined(&self, topic: &Topic) -> anyhow::Result<broadcast::Sender<AnnouncementPayload>> {
+    async fn ensure_joined(
+        &self,
+        topic: &Topic,
+    ) -> anyhow::Result<broadcast::Sender<AnnouncementPayload>> {
         {
             let guard = self.topics.read().await;
             if let Some(slot) = guard.get(topic) {
@@ -204,7 +207,10 @@ impl IrohGossipTransport {
         });
         guard.insert(
             topic.clone(),
-            TopicSlot { tx: tx.clone(), _receiver_task: Some(handle) },
+            TopicSlot {
+                tx: tx.clone(),
+                _receiver_task: Some(handle),
+            },
         );
         Ok(tx)
     }
@@ -214,10 +220,10 @@ impl IrohGossipTransport {
     /// callers who need it fully joined should call `join()` first.
     fn ensure_channel_sync(&self, topic: &Topic) -> broadcast::Sender<AnnouncementPayload> {
         // Fast path: try a read lock.
-        if let Ok(guard) = self.topics.try_read() {
-            if let Some(slot) = guard.get(topic) {
-                return slot.tx.clone();
-            }
+        if let Ok(guard) = self.topics.try_read()
+            && let Some(slot) = guard.get(topic)
+        {
+            return slot.tx.clone();
         }
         // Slow path: take the write lock and create the channel.
         // We block on the runtime here because we cannot return a
@@ -231,7 +237,10 @@ impl IrohGossipTransport {
                 let (tx, _rx) = broadcast::channel::<AnnouncementPayload>(1024);
                 guard.insert(
                     topic.clone(),
-                    TopicSlot { tx: tx.clone(), _receiver_task: None },
+                    TopicSlot {
+                        tx: tx.clone(),
+                        _receiver_task: None,
+                    },
                 );
                 // Spawn the iroh-side join in the background. The
                 // channel we just installed will start receiving
@@ -287,11 +296,7 @@ impl GossipTransport for IrohGossipTransport {
         Ok(())
     }
 
-    async fn broadcast(
-        &self,
-        topic: Topic,
-        payload: AnnouncementPayload,
-    ) -> anyhow::Result<()> {
+    async fn broadcast(&self, topic: Topic, payload: AnnouncementPayload) -> anyhow::Result<()> {
         let iroh_topic = topic_to_iroh_topic_id(&topic);
         // Subscribe is cheap on a hot topic (iroh returns a clone of
         // the internal state). On the first broadcast we still pay

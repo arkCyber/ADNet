@@ -36,7 +36,7 @@ use std::sync::Arc;
 use adnet_blobstore::IrohBlobStore;
 use adnet_chatstore::IrohDocsChat;
 use adnet_gossip::IrohGossipTransport;
-use iroh::{protocol::Router, Endpoint};
+use iroh::{Endpoint, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_docs::api::DocsApi;
 use iroh_docs::protocol::Docs;
@@ -105,15 +105,15 @@ impl IrohRuntime {
         // `Store`, and we hold it in an `Arc` so the router's
         // background task can keep the protocol alive for the
         // lifetime of the runtime.
-        let blobs = BlobsProtocol::new(&*blob_store, None);
+        let blobs = BlobsProtocol::new(&blob_store, None);
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
 
         // iroh-docs: persistent (disk-backed) replica + default author.
-// `fs-store` is forwarded to `iroh-docs` from the crate-level
-// `iroh` feature so this code is always compiled when this module
-// is reachable.
-#[cfg(feature = "fs-store")]
+        // `fs-store` is forwarded to `iroh-docs` from the crate-level
+        // `iroh` feature so this code is always compiled when this module
+        // is reachable.
+        #[cfg(feature = "fs-store")]
         let docs = {
             let docs_root = _docs_path
                 .map(|p| p.to_path_buf())
@@ -181,10 +181,7 @@ impl IrohRuntime {
     /// gossip engine. The returned transport plugs straight into a
     /// [`GossipBus`](adnet_gossip::GossipBus) via
     /// [`GossipBus::new`](adnet_gossip::GossipBus::new).
-    pub fn gossip_transport(
-        &self,
-        local_node: adnet_types::NodeId,
-    ) -> IrohGossipTransport {
+    pub fn gossip_transport(&self, local_node: adnet_types::NodeId) -> IrohGossipTransport {
         IrohGossipTransport::new(local_node, self.gossip.clone())
     }
 
@@ -217,7 +214,14 @@ impl IrohRuntime {
 
         // 1. Router drains. Bounded by SHUTDOWN_TIMEOUT so a stuck
         //    connection cannot wedge the process.
+        // Allow `redundant_pattern_matching`: the `Err(_)` arm
+        // deliberately ignores the inner value (it just means
+        // `tokio::time::timeout` elapsed); we only want to know
+        // whether it timed out vs returned an inner `Err(e)` so we
+        // can log the right warning.
+        #[allow(clippy::redundant_pattern_matching)]
         let router_result = tokio::time::timeout(SHUTDOWN_TIMEOUT, self.router.shutdown()).await;
+        #[allow(clippy::redundant_pattern_matching)]
         if let Err(_) = router_result {
             tracing::warn!(
                 "iroh router did not shut down within {SHUTDOWN_TIMEOUT:?}; \

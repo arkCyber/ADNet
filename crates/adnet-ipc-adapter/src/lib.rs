@@ -46,7 +46,7 @@
 
 pub mod rpc;
 
-pub use rpc::{NodeRpc, ANNOUNCEMENT_METHOD};
+pub use rpc::{ANNOUNCEMENT_METHOD, NodeRpc};
 
 use std::path::PathBuf;
 

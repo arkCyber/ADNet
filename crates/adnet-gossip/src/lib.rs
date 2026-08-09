@@ -28,7 +28,7 @@ pub use bridge::GossipBridge;
 pub use bus::GossipBus;
 #[cfg(feature = "iroh")]
 pub use iroh_transport::IrohGossipTransport;
-pub use priority::{determine_strategy, MessageSource, RetrievalStrategy};
+pub use priority::{MessageSource, RetrievalStrategy, determine_strategy};
 pub use transport::{GossipTransport, InProcessGossip, TopicId};
 
 pub use adnet_types::{Announcement, AnnouncementPayload, NodeId, Topic};

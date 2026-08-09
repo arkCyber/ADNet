@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use adnet_blobstore::BlobStore;
-use adnet_mesh::{fetch_from_mesh, MeshFetchResult};
-use adnet_transport::{fetch_blob_over_transport, Frame, TransportError};
+use adnet_mesh::{MeshFetchResult, fetch_from_mesh};
+use adnet_transport::{Frame, TransportError, fetch_blob_over_transport};
 use adnet_types::{BlobTicket, ContentHash, NodeAddr, RangeSpec};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -59,7 +59,7 @@ pub async fn fetch_blob(
                     status: "ok".into(),
                     bytes_done: n,
                     bytes_total: n,
-                })
+                });
             }
             Err(e) => warn!("transport fetch failed: {e}; falling back to mesh"),
         }

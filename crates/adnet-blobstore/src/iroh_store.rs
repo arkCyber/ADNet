@@ -40,9 +40,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use adnet_types::{ByteRange, ContentHash, RangeSpec};
-use iroh_blobs::store::fs::FsStore;
-use iroh_blobs::api::proto::BlobStatus;
 use iroh_blobs::Hash as IrohHash;
+use iroh_blobs::api::proto::BlobStatus;
+use iroh_blobs::store::fs::FsStore;
 use tracing::debug;
 
 use crate::chunked::ChunkError;
@@ -152,8 +152,7 @@ pub fn content_hash_to_iroh_hash(hash: &ContentHash) -> std::io::Result<IrohHash
 
 /// Convert an iroh [`IrohHash`] back to an ADNet [`ContentHash`].
 pub fn iroh_hash_to_content_hash(hash: &IrohHash) -> ContentHash {
-    ContentHash::from_hex(&hex::encode(hash.as_bytes()))
-        .expect("iroh hash is always 32 bytes hex")
+    ContentHash::from_hex(&hex::encode(hash.as_bytes())).expect("iroh hash is always 32 bytes hex")
 }
 
 // ─────────────────────────── BlobReader / BlobImporter ───────────────────
@@ -267,11 +266,7 @@ impl BlobReader for IrohBlobStore {
         self.read_range(hash, range).await.map(Some)
     }
 
-    async fn export_to_file(
-        &self,
-        hash: &ContentHash,
-        dest: &Path,
-    ) -> Result<u64, ChunkError> {
+    async fn export_to_file(&self, hash: &ContentHash, dest: &Path) -> Result<u64, ChunkError> {
         let bytes = self.read_all(hash).await?;
         let n = bytes.len() as u64;
         tokio::fs::write(dest, &bytes).await.map_err(wrap)?;
@@ -320,8 +315,7 @@ mod tests {
     #[test]
     fn content_hash_iroh_hash_round_trip() {
         let store_bytes = [7u8; 32];
-        let adnet_hash =
-            ContentHash::from_hex(&hex::encode(store_bytes)).unwrap();
+        let adnet_hash = ContentHash::from_hex(&hex::encode(store_bytes)).unwrap();
         let iroh_hash = content_hash_to_iroh_hash(&adnet_hash).unwrap();
         assert_eq!(iroh_hash.as_bytes(), &store_bytes);
         let back = iroh_hash_to_content_hash(&iroh_hash);
@@ -368,8 +362,7 @@ mod tests {
         let payload = vec![0u8; 1024];
         let hash = BlobImporter::put_bytes(&store, &payload).await.unwrap();
         // Request (0..MAX_RANGE_BYTES + 1) — one byte over the cap.
-        let oversized =
-            ByteRange::new(0, MAX_RANGE_BYTES + 1).expect("non-empty range is valid");
+        let oversized = ByteRange::new(0, MAX_RANGE_BYTES + 1).expect("non-empty range is valid");
         let err = store
             .read_range(&hash, RangeSpec::Single(oversized))
             .await

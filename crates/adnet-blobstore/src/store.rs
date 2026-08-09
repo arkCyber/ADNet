@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use adnet_types::{ByteRange, ContentHash, RangeSpec};
 
-use crate::chunked::{chunk_count_for, chunks_for_range, ChunkError, CHUNK_SIZE};
+use crate::chunked::{CHUNK_SIZE, ChunkError, chunk_count_for, chunks_for_range};
 use crate::traits::{BlobImporter, BlobReader};
 
 /// Sentinel file written once a blob is fully imported.

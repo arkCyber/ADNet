@@ -26,11 +26,11 @@ pub mod server;
 pub mod validation;
 
 pub use blobs_service::{BlobsIpcConfig, BlobsIpcService};
-pub use client::{json_rpc_call, json_rpc_stream, JsonRpcError, StreamItem};
+pub use client::{JsonRpcError, StreamItem, json_rpc_call, json_rpc_stream};
 pub use gossip_service::{GossipIpcConfig, GossipIpcMessage, GossipIpcService};
 pub use group_chat_service::{
-    attachment_with_hash, group_attachment_from_hash, message_id_for_node, GroupChatIpcConfig,
-    GroupChatIpcService, MessageEnvelope, Receipt,
+    GroupChatIpcConfig, GroupChatIpcService, MessageEnvelope, Receipt, attachment_with_hash,
+    group_attachment_from_hash, message_id_for_node,
 };
 pub use server::{
     JsonRpcServer, JsonRpcServerHandle, Notification, NotificationSender, RpcHandler,

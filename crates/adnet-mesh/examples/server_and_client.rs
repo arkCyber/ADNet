@@ -10,7 +10,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use adnet_blobstore::{BlobReader, BlobStore, CHUNK_SIZE};
-use adnet_mesh::{fetch_from_mesh, MeshServer};
+use adnet_mesh::{MeshServer, fetch_from_mesh};
 use adnet_types::{ByteRange, ContentHash, RangeSpec};
 use tempfile::tempdir;
 

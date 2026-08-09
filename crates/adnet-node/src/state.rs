@@ -92,14 +92,13 @@ impl SwarmIndex {
         // announced_at) when the cap is reached. This bounds the
         // per-room memory footprint under gossip flood.
         let room_map = self.assets_by_room.entry(ann.room_id.clone()).or_default();
-        if room_map.len() >= MAX_ASSETS_PER_ROOM {
-            if let Some(oldest_hash) = room_map
+        if room_map.len() >= MAX_ASSETS_PER_ROOM
+            && let Some(oldest_hash) = room_map
                 .iter()
                 .min_by_key(|(_, a)| a.announced_at)
                 .map(|(h, _)| h.clone())
-            {
-                room_map.remove(&oldest_hash);
-            }
+        {
+            room_map.remove(&oldest_hash);
         }
         room_map.insert(asset.content_hash.clone(), asset.clone());
 

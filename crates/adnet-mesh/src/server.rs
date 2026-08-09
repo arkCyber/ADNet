@@ -156,10 +156,10 @@ async fn handle_connection(
 
     if let Some(rest) = req.path.strip_prefix("/blobs/") {
         let rest = rest.split('?').next().unwrap_or(rest);
-        if let Some((hash, tail)) = rest.split_once("/chunks/") {
-            if let Ok(index) = tail.parse::<u32>() {
-                return serve_chunk(stream, store, hash, index).await;
-            }
+        if let Some((hash, tail)) = rest.split_once("/chunks/")
+            && let Ok(index) = tail.parse::<u32>()
+        {
+            return serve_chunk(stream, store, hash, index).await;
         }
         if let Some(hash) = rest.strip_suffix("/meta") {
             return serve_meta(stream, store, hash).await;

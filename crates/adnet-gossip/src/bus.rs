@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use adnet_types::{topic_name, Announcement, AnnouncementPayload, NodeId, RoomId, Topic};
+use adnet_types::{Announcement, AnnouncementPayload, NodeId, RoomId, Topic, topic_name};
 use tokio::sync::broadcast;
 
 use crate::bridge;

@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex};
 
 use adnet_blobstore::{BlobImporter, BlobReader, BlobStore};
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::server::{JsonRpcServer, JsonRpcServerHandle, RpcHandler};
 use crate::validation::{Validate, ValidationOutcome, ValidationPolicy};
@@ -231,12 +231,11 @@ impl BlobsIpcService {
             return Some(bytes);
         }
         // Fall back to the on-disk store when configured.
-        if let Ok(Some(store)) = self.disk_store().await {
-            if let Ok(content_hash) = adnet_types::ContentHash::from_hex(hash) {
-                if store.has(&content_hash).await {
-                    return store.read_all(&content_hash).await.ok();
-                }
-            }
+        if let Ok(Some(store)) = self.disk_store().await
+            && let Ok(content_hash) = adnet_types::ContentHash::from_hex(hash)
+            && store.has(&content_hash).await
+        {
+            return store.read_all(&content_hash).await.ok();
         }
         None
     }

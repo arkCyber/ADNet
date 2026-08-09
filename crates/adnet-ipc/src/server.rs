@@ -34,10 +34,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tracing::{info, warn};
 
 /// A server-pushed notification. JSON-RPC 2.0 distinguishes
@@ -482,7 +482,10 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while socket_path.exists() {
             if std::time::Instant::now() >= deadline {
-                panic!("socket file {} still present after drop", socket_path.display());
+                panic!(
+                    "socket file {} still present after drop",
+                    socket_path.display()
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -526,18 +529,14 @@ mod tests {
         // oversize error or a clean EOF.
         let mut br = BufReader::new(r);
         let mut line = String::new();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            br.read_line(&mut line),
-        )
-        .await
-        .expect("timed out draining oversize response");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), br.read_line(&mut line))
+            .await
+            .expect("timed out draining oversize response");
         // If the server delivered a JSON error, validate it. The
         // Take cap may fire either as an oversize-line rejection or
         // as a parse error on the truncated JSON, both are valid.
         if !line.is_empty() {
-            let v: Value =
-                serde_json::from_str(&line).expect("parse error response");
+            let v: Value = serde_json::from_str(&line).expect("parse error response");
             let err = v.get("error").expect("response should be an error");
             let msg = err["message"].as_str().unwrap_or_default();
             let is_oversize = msg.contains("too large");

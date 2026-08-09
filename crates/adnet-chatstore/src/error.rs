@@ -179,10 +179,9 @@ impl ChatStoreError {
     /// ```
     pub fn recoverability(&self) -> ErrorClass {
         match self {
-            Self::Validation(_)
-            | Self::Invalid(_)
-            | Self::Constraint(_)
-            | Self::ForeignKey(_) => ErrorClass::UserError,
+            Self::Validation(_) | Self::Invalid(_) | Self::Constraint(_) | Self::ForeignKey(_) => {
+                ErrorClass::UserError
+            }
             Self::NotFound(_) => ErrorClass::Recoverable,
             Self::Sqlite(_)
             | Self::Lock

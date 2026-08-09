@@ -16,5 +16,5 @@
 pub mod client;
 pub mod server;
 
-pub use client::{fetch_from_mesh, MeshFetchResult};
+pub use client::{MeshFetchResult, fetch_from_mesh};
 pub use server::{MeshServer, MeshServerHandle};

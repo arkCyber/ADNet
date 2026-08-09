@@ -161,12 +161,12 @@ impl PeerSource {
                 )));
             }
         }
-        if let Some(rtt) = self.rtt_ms {
-            if rtt > MAX_RTT_MS {
-                return Err(AdnetError::Validation(format!(
-                    "peer_source rtt_ms: {rtt} exceeds MAX_RTT_MS ({MAX_RTT_MS})"
-                )));
-            }
+        if let Some(rtt) = self.rtt_ms
+            && rtt > MAX_RTT_MS
+        {
+            return Err(AdnetError::Validation(format!(
+                "peer_source rtt_ms: {rtt} exceeds MAX_RTT_MS ({MAX_RTT_MS})"
+            )));
         }
         let now = Utc::now();
         let skew = self.last_seen.signed_duration_since(now);
@@ -268,11 +268,11 @@ impl PeerMap {
         // the same. Also avoids touching the cross-hash eviction
         // path for an update.
         {
-            if let Some(list) = self.by_hash.get_mut(&source.content_hash) {
-                if let Some(existing) = list.iter_mut().find(|p| p.node_id == source.node_id) {
-                    *existing = source;
-                    return;
-                }
+            if let Some(list) = self.by_hash.get_mut(&source.content_hash)
+                && let Some(existing) = list.iter_mut().find(|p| p.node_id == source.node_id)
+            {
+                *existing = source;
+                return;
             }
         }
         // New node under an existing hash: enforce the per-hash cap
@@ -281,10 +281,10 @@ impl PeerMap {
         // back to cap, not cap+1).
         {
             let list = self.by_hash.entry(source.content_hash.clone()).or_default();
-            if list.len() >= MAX_PEER_SOURCES_PER_HASH {
-                if let Some((idx, _)) = list.iter().enumerate().min_by_key(|(_, p)| p.last_seen) {
-                    list.remove(idx);
-                }
+            if list.len() >= MAX_PEER_SOURCES_PER_HASH
+                && let Some((idx, _)) = list.iter().enumerate().min_by_key(|(_, p)| p.last_seen)
+            {
+                list.remove(idx);
             }
             list.push(source.clone());
         }

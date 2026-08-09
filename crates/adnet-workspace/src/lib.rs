@@ -17,8 +17,8 @@
 mod workspace;
 
 pub use workspace::{
-    split_name_ext, Workspace, WorkspaceFileEntry, WorkspaceManifest, DIR_INBOX, DIR_OUTBOX,
-    DIR_SHARED, WORKSPACE_ROOM_ID,
+    DIR_INBOX, DIR_OUTBOX, DIR_SHARED, WORKSPACE_ROOM_ID, Workspace, WorkspaceFileEntry,
+    WorkspaceManifest, split_name_ext,
 };
 
 /// Gossip topic name used to announce workspace manifest updates.

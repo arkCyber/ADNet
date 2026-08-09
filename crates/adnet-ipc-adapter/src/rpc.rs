@@ -11,7 +11,7 @@ use adnet_types::{Announcement, BlobTicket, CdnContentKind, ContentHash, RoomId}
 use anyhow::Context as _;
 use async_trait::async_trait;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tracing::warn;
 

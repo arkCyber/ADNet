@@ -89,7 +89,7 @@ use iroh_docs::engine::LiveEvent;
 use iroh_docs::store::{Query, QueryBuilder};
 use iroh_docs::{AuthorId, DocTicket, NamespaceId};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, warn};
 
@@ -296,7 +296,10 @@ struct StoredMessage {
 }
 
 fn encode_message(msg: &Message) -> DocsBridgeResult<Vec<u8>> {
-    let payload = StoredMessage { v: 1, msg: msg.clone() };
+    let payload = StoredMessage {
+        v: 1,
+        msg: msg.clone(),
+    };
     let bytes = serde_json::to_vec(&payload)?;
     Ok(bytes)
 }
@@ -562,17 +565,13 @@ impl IrohDocsChat {
                 .put_bytes(&payload)
                 .await
                 .map_err(|e| anyhow::anyhow!("blob put_bytes failed for message: {e}"))?;
-            let iroh_hash =
-                adnet_blobstore::iroh_store::content_hash_to_iroh_hash(&content_hash)
-                    .map_err(|e| anyhow::anyhow!("content_hash→iroh_hash: {e}"))?;
+            let iroh_hash = adnet_blobstore::iroh_store::content_hash_to_iroh_hash(&content_hash)
+                .map_err(|e| anyhow::anyhow!("content_hash→iroh_hash: {e}"))?;
             let size = payload.len() as u64;
 
             // 2. Write the msg entry by hash.
             let key = msg_key(&msg.sender_id, next_seq);
-            handle
-                .doc
-                .set_hash(author, key, iroh_hash, size)
-                .await?;
+            handle.doc.set_hash(author, key, iroh_hash, size).await?;
 
             // 3. Write the seq pointer. Encode the seq into a tiny
             //    blob so the doc entry carries a hash — keeps the
@@ -607,11 +606,8 @@ impl IrohDocsChat {
                     "appended message to iroh-docs (verified)"
                 );
                 // Fan-out to local subscribers.
-                self.fan_out(
-                    handle.conversation_id.clone(),
-                    MessageEvent::Insert(msg),
-                )
-                .await;
+                self.fan_out(handle.conversation_id.clone(), MessageEvent::Insert(msg))
+                    .await;
                 return Ok(next_seq);
             }
             // observed < next_seq means our `set_hash` for the seq
@@ -692,10 +688,10 @@ impl IrohDocsChat {
                 Some(v) => v,
                 None => continue,
             };
-            if let Some(after) = after {
-                if seq <= after {
-                    continue;
-                }
+            if let Some(after) = after
+                && seq <= after
+            {
+                continue;
             }
             let ch = entry_hash_to_content_hash(entry.content_hash());
             let bytes = match self.blobs.read_all(&ch).await {
@@ -783,10 +779,10 @@ impl IrohDocsChat {
         let mut task_set = self.task_set.lock().await;
         task_set.abort_all();
         while let Some(res) = task_set.join_next().await {
-            if let Err(e) = res {
-                if !e.is_cancelled() {
-                    warn!("subscription task panicked: {e}");
-                }
+            if let Err(e) = res
+                && !e.is_cancelled()
+            {
+                warn!("subscription task panicked: {e}");
             }
         }
         drop(task_set);
@@ -908,9 +904,8 @@ impl IrohDocsChat {
                     Ok(m) => m,
                     Err(e) => {
                         warn!(conversation = %conv_id, "decode failed for live event: {e}");
-                        let _ = tx_for_task.send(MessageEvent::Corruption(format!(
-                            "live decode failed: {e}"
-                        )));
+                        let _ = tx_for_task
+                            .send(MessageEvent::Corruption(format!("live decode failed: {e}")));
                         continue;
                     }
                 };
@@ -968,10 +963,10 @@ impl IrohDocsChat {
         // Drain any join handles that have already finished so the
         // JoinSet doesn't grow unbounded.
         while let Some(res) = task_set.try_join_next() {
-            if let Err(e) = res {
-                if !e.is_cancelled() {
-                    warn!("subscription task ended: {e}");
-                }
+            if let Err(e) = res
+                && !e.is_cancelled()
+            {
+                warn!("subscription task ended: {e}");
             }
         }
     }
@@ -983,11 +978,7 @@ impl IrohDocsChat {
         }
     }
 
-    async fn read_sender_seq(
-        &self,
-        handle: &DocHandle,
-        sender_id: &str,
-    ) -> DocsBridgeResult<u32> {
+    async fn read_sender_seq(&self, handle: &DocHandle, sender_id: &str) -> DocsBridgeResult<u32> {
         let key = seq_key(sender_id);
         let builder: QueryBuilder<iroh_docs::store::FlatQuery> = Query::all().key_exact(&key);
         let query: Query = builder.into();

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use adnet_ipc::{json_rpc_call, GossipIpcConfig, GossipIpcService};
+use adnet_ipc::{GossipIpcConfig, GossipIpcService, json_rpc_call};
 use serde_json::json;
 
 #[tokio::main]

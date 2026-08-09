@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use adnet_resilience::{retry_with_backoff, RetryPolicy};
+use adnet_resilience::{RetryPolicy, retry_with_backoff};
 
 #[tokio::main]
 async fn main() {

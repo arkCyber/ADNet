@@ -27,12 +27,12 @@ use std::io::Write;
 use std::path::Path;
 
 use adnet_types::{ByteRange, ContentHash, RangeSpec};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::traits::{OutgoingConnection, TransportError, TransportResult};
 use crate::Frame;
+use crate::traits::{OutgoingConnection, TransportError, TransportResult};
 
 /// Maximum `Chunk` payload (1 MiB). Larger blobs are split across
 /// multiple `Chunk` frames so a single `Frame` stays well below the
@@ -115,7 +115,7 @@ pub async fn fetch_blob_over_transport(
             None => {
                 return Err(TransportError::Other(
                     "blob fetch: peer closed stream before Done".into(),
-                ))
+                ));
             }
         };
         match Message::from_frame(frame)? {
@@ -149,15 +149,14 @@ pub async fn fetch_blob_over_transport(
                         "blob fetch: blake3 mismatch (got {computed}, peer claimed {blake3})"
                     )));
                 }
-                if matches!(range, RangeSpec::All) {
-                    if let Some(size) = expected_size {
-                        if size != total {
-                            let _ = std::fs::remove_file(dest);
-                            return Err(TransportError::Other(format!(
-                                "blob fetch: size mismatch (peer said {size}, received {total})"
-                            )));
-                        }
-                    }
+                if matches!(range, RangeSpec::All)
+                    && let Some(size) = expected_size
+                    && size != total
+                {
+                    let _ = std::fs::remove_file(dest);
+                    return Err(TransportError::Other(format!(
+                        "blob fetch: size mismatch (peer said {size}, received {total})"
+                    )));
                 }
                 file.flush()
                     .map_err(|e| TransportError::Other(format!("flush {}: {e}", dest.display())))?;
@@ -170,7 +169,7 @@ pub async fn fetch_blob_over_transport(
             other => {
                 return Err(TransportError::Other(format!(
                     "blob fetch: unexpected reply {other:?}"
-                )))
+                )));
             }
         }
     }
@@ -235,13 +234,13 @@ pub async fn serve_blob_request(
         )
         .await?;
     }
-    let ranges: Vec<ByteRange> =
-        match &range {
-            RangeSpec::All => vec![ByteRange::new(0, size)
-                .map_err(|e| TransportError::Other(format!("range: {e}")))?],
-            RangeSpec::Single(r) => vec![*r],
-            RangeSpec::Multi(rs) => rs.clone(),
-        };
+    let ranges: Vec<ByteRange> = match &range {
+        RangeSpec::All => vec![
+            ByteRange::new(0, size).map_err(|e| TransportError::Other(format!("range: {e}")))?,
+        ],
+        RangeSpec::Single(r) => vec![*r],
+        RangeSpec::Multi(rs) => rs.clone(),
+    };
     let mut hasher = blake3::Hasher::new();
     let mut offset = 0u64;
     for r in &ranges {
@@ -379,15 +378,19 @@ mod tests {
     #[test]
     fn message_close_is_terminal() {
         assert!(Message::Close.is_terminal());
-        assert!(Message::Error {
-            message: "x".into()
-        }
-        .is_terminal());
-        assert!(!Message::Get {
-            hash: "a".repeat(64),
-            range: RangeSpec::All,
-        }
-        .is_terminal());
+        assert!(
+            Message::Error {
+                message: "x".into()
+            }
+            .is_terminal()
+        );
+        assert!(
+            !Message::Get {
+                hash: "a".repeat(64),
+                range: RangeSpec::All,
+            }
+            .is_terminal()
+        );
     }
 
     #[tokio::test]

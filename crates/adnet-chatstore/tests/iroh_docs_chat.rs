@@ -20,10 +20,10 @@ use std::path::PathBuf;
 use adnet_blobstore::IrohBlobStore;
 use adnet_chatstore::{IrohDocsChat, MessageEvent};
 use chrono::Utc;
-use iroh::endpoint::presets::N0;
 use iroh::Endpoint;
-use iroh_docs::protocol::Docs;
+use iroh::endpoint::presets::N0;
 use iroh_docs::api::DocsApi;
+use iroh_docs::protocol::Docs;
 use iroh_gossip::net::Gossip;
 use tempfile::TempDir;
 
@@ -75,10 +75,7 @@ fn sample_message(sender: &str, content: &str) -> adnet_chatstore::Message {
 async fn append_then_get_roundtrip() {
     let (_dir, bridge, _docs) = fresh_bridge().await;
 
-    let handle = bridge
-        .open_conversation("conv-1")
-        .await
-        .expect("open conv");
+    let handle = bridge.open_conversation("conv-1").await.expect("open conv");
     assert_eq!(handle.conversation_id, "conv-1");
 
     let seq1 = bridge
@@ -125,10 +122,7 @@ async fn append_then_get_roundtrip() {
 async fn subscribe_receives_replay_then_live_inserts() {
     let (_dir, bridge, _docs) = fresh_bridge().await;
 
-    bridge
-        .open_conversation("conv-2")
-        .await
-        .expect("open conv");
+    bridge.open_conversation("conv-2").await.expect("open conv");
 
     // Pre-populate one message before any subscribers exist.
     bridge
@@ -137,10 +131,7 @@ async fn subscribe_receives_replay_then_live_inserts() {
         .expect("pre seed");
 
     // Now subscribe — we expect a single Replay with one message.
-    let mut rx = bridge
-        .subscribe("conv-2")
-        .await
-        .expect("subscribe");
+    let mut rx = bridge.subscribe("conv-2").await.expect("subscribe");
 
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
@@ -173,10 +164,7 @@ async fn subscribe_receives_replay_then_live_inserts() {
 #[tokio::test]
 async fn empty_sender_id_is_rejected() {
     let (_dir, bridge, _docs) = fresh_bridge().await;
-    bridge
-        .open_conversation("conv-3")
-        .await
-        .expect("open conv");
+    bridge.open_conversation("conv-3").await.expect("open conv");
     let res = bridge
         .append_message("conv-3", sample_message("", "no one speaks"))
         .await;

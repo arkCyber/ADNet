@@ -183,15 +183,15 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery) -> Result<Response, (StatusCode, S
     })?;
 
     let mut out = Response::builder().status(status);
-    if let Some(ct) = headers.get(header::CONTENT_TYPE) {
-        if let Ok(v) = axum::http::HeaderValue::from_bytes(ct.as_bytes()) {
-            out = out.header(header::CONTENT_TYPE, v);
-        }
+    if let Some(ct) = headers.get(header::CONTENT_TYPE)
+        && let Ok(v) = axum::http::HeaderValue::from_bytes(ct.as_bytes())
+    {
+        out = out.header(header::CONTENT_TYPE, v);
     }
-    if let Some(cl) = headers.get(header::CONTENT_LENGTH) {
-        if let Ok(v) = axum::http::HeaderValue::from_bytes(cl.as_bytes()) {
-            out = out.header(header::CONTENT_LENGTH, v);
-        }
+    if let Some(cl) = headers.get(header::CONTENT_LENGTH)
+        && let Ok(v) = axum::http::HeaderValue::from_bytes(cl.as_bytes())
+    {
+        out = out.header(header::CONTENT_LENGTH, v);
     }
     out.body(axum::body::Body::from(bytes))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))

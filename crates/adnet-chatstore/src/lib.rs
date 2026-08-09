@@ -42,8 +42,8 @@ pub mod storage;
 
 pub use error::{ChatStoreError, Result};
 pub use im::{
-    ChatType, Conversation, GroupMember, ImManager, Message, MessageReceipt, PendingMessage,
-    SenderSequence, SyncRequest, SyncResponse, User, UserSequence, MAX_SEQUENCE,
+    ChatType, Conversation, GroupMember, ImManager, MAX_SEQUENCE, Message, MessageReceipt,
+    PendingMessage, SenderSequence, SyncRequest, SyncResponse, User, UserSequence,
 };
 pub use schema::SCHEMA_VERSION;
 pub use storage::{ChatStorage, ChatStorageConfig, Friend, MessageAttachment};
@@ -54,8 +54,7 @@ pub use storage::{ChatStorage, ChatStorageConfig, Friend, MessageAttachment};
 pub mod docs_bridge;
 #[cfg(feature = "iroh")]
 pub use docs_bridge::{
-    ConversationTicket, DocHandle, DocsBridgeError, DocsBridgeResult, IrohDocsChat,
-    MessageEvent,
+    ConversationTicket, DocHandle, DocsBridgeError, DocsBridgeResult, IrohDocsChat, MessageEvent,
 };
 
 // Re-export iroh-docs symbols we use in the public surface.

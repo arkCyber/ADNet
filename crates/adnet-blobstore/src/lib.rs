@@ -29,12 +29,12 @@ pub mod iroh_store;
 pub mod store;
 pub mod traits;
 
-pub use chunked::{ChunkReader, ChunkWriter, CHUNK_SIZE};
-pub use filename::{safe_filename, MAX_FILENAME_LEN};
+pub use chunked::{CHUNK_SIZE, ChunkReader, ChunkWriter};
+pub use filename::{MAX_FILENAME_LEN, safe_filename};
 #[cfg(feature = "iroh")]
 pub use iroh_store::{
-    content_hash_to_iroh_hash, iroh_hash_to_content_hash, IrohBlobHash, IrohBlobStore,
-    IrohBlobTicket, MAX_RANGE_BYTES,
+    IrohBlobHash, IrohBlobStore, IrohBlobTicket, MAX_RANGE_BYTES, content_hash_to_iroh_hash,
+    iroh_hash_to_content_hash,
 };
 pub use store::BlobStore;
 pub use traits::{BlobImporter, BlobReader};

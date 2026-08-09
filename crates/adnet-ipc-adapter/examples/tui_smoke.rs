@@ -27,7 +27,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use adnet_ipc::{json_rpc_call, json_rpc_stream, StreamItem};
+use adnet_ipc::{StreamItem, json_rpc_call, json_rpc_stream};
 use anyhow::Result;
 use futures::StreamExt;
 use serde_json::json;

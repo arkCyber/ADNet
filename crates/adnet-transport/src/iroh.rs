@@ -50,9 +50,7 @@ use tracing::debug;
 #[cfg(feature = "iroh")]
 use crate::frame::Frame;
 #[allow(unused_imports)] // TransportError is only used in one cfg branch
-use crate::traits::{
-    OutgoingConnection, Transport, TransportError, TransportResult,
-};
+use crate::traits::{OutgoingConnection, Transport, TransportError, TransportResult};
 
 /// iroh-flavoured transport. Bridges [`crate::quic::QuicTransport`] in
 /// the default build, and a real `iroh::Endpoint` when the `iroh`
@@ -106,7 +104,10 @@ fn build_inner_quic(bind: std::net::SocketAddr, seed_node: NodeId) -> Inner {
 fn build_inner_iroh(endpoint: iroh::Endpoint) -> Inner {
     let local_pk = endpoint.id();
     let local_node = public_key_to_node_id(&local_pk);
-    Inner { endpoint: Some(endpoint), local_node }
+    Inner {
+        endpoint: Some(endpoint),
+        local_node,
+    }
 }
 
 impl Default for IrohTransport {
@@ -211,7 +212,7 @@ impl IrohTransport {
 /// already been bound. Only available in the `iroh` build.
 #[cfg(feature = "iroh")]
 async fn build_inner_iroh_at(bind: std::net::SocketAddr) -> anyhow::Result<Inner> {
-    use iroh::{endpoint::presets, Endpoint};
+    use iroh::{Endpoint, endpoint::presets};
     // `bind_addr` returns a `Result<Builder, _>` because it validates
     // the socket address; `bind` then binds asynchronously.
     let endpoint = Endpoint::builder(presets::N0)
@@ -281,20 +282,18 @@ pub fn public_key_to_node_id(pk: &iroh::PublicKey) -> NodeId {
 /// Reinterpret an ADNet [`NodeAddr`] (with `direct: Endpoint` and
 /// `relay: RelayUrl`) as an iroh `EndpointAddr`.
 #[cfg(feature = "iroh")]
-pub fn node_addr_to_endpoint_addr(
-    addr: &NodeAddr,
-) -> anyhow::Result<iroh::EndpointAddr> {
+pub fn node_addr_to_endpoint_addr(addr: &NodeAddr) -> anyhow::Result<iroh::EndpointAddr> {
     let id = node_id_to_public_key(&addr.node_id)?;
     let mut out = iroh::EndpointAddr::new(id);
     if let Some(relay) = &addr.relay {
         let relay_url: iroh::RelayUrl = relay.as_str().parse()?;
         out = out.with_relay_url(relay_url);
     }
-    if let Some(ep) = &addr.direct {
-        if let (Ok(host), Some(port)) = (ep.host().parse::<std::net::IpAddr>(), ep.port()) {
-            let socket = std::net::SocketAddr::new(host, port);
-            out = out.with_ip_addr(socket);
-        }
+    if let Some(ep) = &addr.direct
+        && let (Ok(host), Some(port)) = (ep.host().parse::<std::net::IpAddr>(), ep.port())
+    {
+        let socket = std::net::SocketAddr::new(host, port);
+        out = out.with_ip_addr(socket);
     }
     Ok(out)
 }
@@ -309,10 +308,7 @@ impl Transport for IrohTransport {
         self.inner.quic.dial(node).await
     }
 
-    async fn dial_addr(
-        &self,
-        addr: NodeAddr,
-    ) -> TransportResult<Box<dyn OutgoingConnection>> {
+    async fn dial_addr(&self, addr: NodeAddr) -> TransportResult<Box<dyn OutgoingConnection>> {
         if let Some(relay) = addr.relay.as_ref() {
             if let Ok(mut g) = self.last_relay.lock() {
                 *g = Some(relay.as_str().to_string());
@@ -365,14 +361,11 @@ impl Transport for IrohTransport {
         self.dial_endpoint_addr(addr, &node).await
     }
 
-    async fn dial_addr(
-        &self,
-        addr: NodeAddr,
-    ) -> TransportResult<Box<dyn OutgoingConnection>> {
-        if let Some(relay) = addr.relay.as_ref() {
-            if let Ok(mut g) = self.last_relay.lock() {
-                *g = Some(relay.as_str().to_string());
-            }
+    async fn dial_addr(&self, addr: NodeAddr) -> TransportResult<Box<dyn OutgoingConnection>> {
+        if let Some(relay) = addr.relay.as_ref()
+            && let Ok(mut g) = self.last_relay.lock()
+        {
+            *g = Some(relay.as_str().to_string());
         }
         let eaddr = node_addr_to_endpoint_addr(&addr).map_err(transport_err)?;
         self.dial_endpoint_addr(eaddr, &addr.node_id).await
@@ -387,7 +380,9 @@ impl Transport for IrohTransport {
             .accept()
             .await
             .ok_or_else(|| TransportError::Other("endpoint closed".into()))?;
-        let connecting = incoming.await.map_err(|e| TransportError::Other(format!("accept: {e}")))?;
+        let connecting = incoming
+            .await
+            .map_err(|e| TransportError::Other(format!("accept: {e}")))?;
         let remote_pk = connecting.remote_id();
         let node_id = public_key_to_node_id(&remote_pk);
         let (send, recv) = connecting
@@ -430,8 +425,12 @@ impl Transport for IrohTransport {
             while let Some(incoming) = endpoint.accept().await {
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let Ok(connecting) = incoming.await else { return };
-                    let Ok((send, recv)) = connecting.open_bi().await else { return };
+                    let Ok(connecting) = incoming.await else {
+                        return;
+                    };
+                    let Ok((send, recv)) = connecting.open_bi().await else {
+                        return;
+                    };
                     let node_id = public_key_to_node_id(&connecting.remote_id());
                     let conn = IrohConnection::new(connecting, send, recv);
                     let _ = tx.send((node_id, Box::new(conn) as _)).await;
@@ -445,10 +444,9 @@ impl Transport for IrohTransport {
 #[cfg(feature = "iroh")]
 impl IrohTransport {
     fn require_endpoint(&self) -> TransportResult<&iroh::Endpoint> {
-        self.inner
-            .endpoint
-            .as_ref()
-            .ok_or_else(|| TransportError::Other("endpoint not yet bound; call bind_endpoint_now()".into()))
+        self.inner.endpoint.as_ref().ok_or_else(|| {
+            TransportError::Other("endpoint not yet bound; call bind_endpoint_now()".into())
+        })
     }
 
     async fn dial_endpoint_addr(
@@ -522,8 +520,7 @@ impl OutgoingConnection for IrohConnection {
 
     async fn close(mut self: Box<Self>) -> TransportResult<()> {
         let _ = self.send.finish();
-        self.conn
-            .close(0u32.into(), b"bye");
+        self.conn.close(0u32.into(), b"bye");
         Ok(())
     }
 }
@@ -545,11 +542,7 @@ fn url_host_hint(url: &str) -> Option<&str> {
         .or_else(|| url.strip_prefix("http://"))?;
     let host_end = rest.find('/').unwrap_or(rest.len());
     let host = &rest[..host_end];
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
-    }
+    if host.is_empty() { None } else { Some(host) }
 }
 
 #[cfg(test)]
@@ -598,7 +591,10 @@ mod tests {
             url_host_hint("https://relay.example.com/x"),
             Some("relay.example.com")
         );
-        assert_eq!(url_host_hint("http://localhost:1234"), Some("localhost:1234"));
+        assert_eq!(
+            url_host_hint("http://localhost:1234"),
+            Some("localhost:1234")
+        );
         assert_eq!(url_host_hint("garbage"), None);
     }
 
@@ -633,23 +629,18 @@ mod tests {
         let frame = Frame::text("hello-bridge");
         conn.send(frame).await.unwrap();
 
-        let (peer, mut incoming) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.recv(),
-        )
-        .await
-        .expect("server should accept within 5s")
-        .expect("server should yield one incoming connection");
+        let (peer, mut incoming) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("server should accept within 5s")
+                .expect("server should yield one incoming connection");
         assert_eq!(peer, client.local_node().clone());
 
-        let received = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            incoming.recv(),
-        )
-        .await
-        .expect("server should receive the frame in 5s")
-        .expect("recv must yield a frame")
-        .expect("frame must decode");
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), incoming.recv())
+            .await
+            .expect("server should receive the frame in 5s")
+            .expect("recv must yield a frame")
+            .expect("frame must decode");
         let body = received.as_bytes().to_vec();
         assert_eq!(body, b"hello-bridge");
 

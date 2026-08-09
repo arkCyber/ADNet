@@ -151,7 +151,10 @@ pub async fn run(data_dir: PathBuf, node: Node) -> Result<()> {
                 let title = args.get(2).copied().unwrap_or("shared file");
                 let kind_str = args.get(3).copied().unwrap_or("generic_file");
                 let Some(kind) = CdnContentKind::from_str_loose(kind_str) else {
-                    warn!(kind = kind_str, "unknown kind — expected one of: article, ai_model, video_model, dataset, generic_file");
+                    warn!(
+                        kind = kind_str,
+                        "unknown kind — expected one of: article, ai_model, video_model, dataset, generic_file"
+                    );
                     continue;
                 };
                 let room: RoomId = room.into();
@@ -298,10 +301,7 @@ pub async fn run(data_dir: PathBuf, node: Node) -> Result<()> {
                 }
             }
             "/workspace" => {
-                let local = node
-                    .local_workspace_files()
-                    .await
-                    .unwrap_or_default();
+                let local = node.local_workspace_files().await.unwrap_or_default();
                 if local.is_empty() {
                     println!("(workspace disabled or empty)");
                 } else {
@@ -385,7 +385,12 @@ pub async fn run(data_dir: PathBuf, node: Node) -> Result<()> {
                 let owner = pick.owner.clone();
                 let name = pick.entry.name.clone();
                 match node.fetch_remote_workspace_entry(&owner, &name).await {
-                    Ok(p) => println!("fetched {} → {} ({}B)", name, p.display(), pick.entry.size_bytes),
+                    Ok(p) => println!(
+                        "fetched {} → {} ({}B)",
+                        name,
+                        p.display(),
+                        pick.entry.size_bytes
+                    ),
                     Err(e) => warn!(error = %e, "auto-fetch failed"),
                 }
             }

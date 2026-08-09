@@ -18,12 +18,12 @@ pub mod quic;
 pub mod traits;
 
 pub use blob_proto::{
-    error_frame, error_value, fetch_blob_over_transport, looks_like_message, serve_blob_request,
-    JsonValue, Message, MAX_CHUNK_PAYLOAD,
+    JsonValue, MAX_CHUNK_PAYLOAD, Message, error_frame, error_value, fetch_blob_over_transport,
+    looks_like_message, serve_blob_request,
 };
 pub use endpoint::EndpointAddr;
 pub use frame::{Frame, FrameCodec};
-pub use quic::{derive_node_id_from_cert, QuicTransport, QuicTransportBuilder, TransportIdentity};
+pub use quic::{QuicTransport, QuicTransportBuilder, TransportIdentity, derive_node_id_from_cert};
 pub use traits::{OutgoingConnection, SharedTransport, Transport, TransportError, TransportResult};
 
 pub mod iroh;

@@ -260,8 +260,10 @@ mod tests {
     #[cfg(feature = "billing")]
     fn billing_mode_with_missing_secret_file_warns_and_disables() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = RelayConfig::default();
-        cfg.billing_secret_path = Some(dir.path().join("does-not-exist.hex"));
+        let cfg = RelayConfig {
+            billing_secret_path: Some(dir.path().join("does-not-exist.hex")),
+            ..RelayConfig::default()
+        };
         let mut warnings = vec![];
         let mode = cfg.billing_mode_with_logger(|m| warnings.push(m.to_string()));
         assert!(matches!(mode, BillingMode::Disabled));
@@ -280,8 +282,10 @@ mod tests {
         let secret_hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
         std::fs::write(&secret_path, secret_hex).unwrap();
 
-        let mut cfg = RelayConfig::default();
-        cfg.billing_secret_path = Some(secret_path);
+        let cfg = RelayConfig {
+            billing_secret_path: Some(secret_path),
+            ..RelayConfig::default()
+        };
         let mut warnings = vec![];
         let mode = cfg.billing_mode_with_logger(|m| warnings.push(m.to_string()));
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");

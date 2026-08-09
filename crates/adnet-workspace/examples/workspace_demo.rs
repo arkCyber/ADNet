@@ -1,6 +1,6 @@
 //! Demo: create a workspace and publish a file.
 
-use adnet_workspace::{workspace_room_topic, Workspace};
+use adnet_workspace::{Workspace, workspace_room_topic};
 use std::io::Write;
 
 fn main() {

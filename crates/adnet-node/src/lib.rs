@@ -31,6 +31,6 @@ pub use iroh_runtime::IrohRuntime;
 pub use node::{MeshEndpointInfo, Node, NodeBuilder, NodeConfig, NodeInfo, RelayEndpointInfo};
 pub use state::{RoomFeed, SwarmIndex};
 pub use transfer::{
-    apply_throttle, build_checksum_report, run_chunked_download, MeshBackend, TransferBackend,
-    TransferOutcome, TransferProgress, TransferSettings,
+    MeshBackend, TransferBackend, TransferOutcome, TransferProgress, TransferSettings,
+    apply_throttle, build_checksum_report, run_chunked_download,
 };

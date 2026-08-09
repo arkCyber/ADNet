@@ -165,22 +165,19 @@ fn split_hash_and_range(rest: &str) -> Result<(usize, &str, Option<&str>)> {
     // `/`, ending at the end of the string. For it to be valid there must
     // be 64 hex chars immediately before that `/`.
     let last_is_digit_or_brace = matches!(bytes.last(), Some(b'}' | b'0'..=b'9'));
-    if last_is_digit_or_brace {
-        if let Some(range_slash_pos) = bytes[..cursor].iter().rposition(|&b| b == b'/') {
-            if let Some(hash_start) = range_slash_pos.checked_sub(hex_len) {
-                if hash_start > 0
-                    && bytes[hash_start..range_slash_pos]
-                        .iter()
-                        .all(|b| b.is_ascii_hexdigit())
-                    && bytes[hash_start - 1] == b'/'
-                {
-                    let hash_hex = &rest[hash_start..range_slash_pos];
-                    let slash_idx = hash_start - 1;
-                    let range_part = &rest[range_slash_pos + 1..];
-                    return Ok((slash_idx, hash_hex, Some(range_part)));
-                }
-            }
-        }
+    if last_is_digit_or_brace
+        && let Some(range_slash_pos) = bytes[..cursor].iter().rposition(|&b| b == b'/')
+        && let Some(hash_start) = range_slash_pos.checked_sub(hex_len)
+        && hash_start > 0
+        && bytes[hash_start..range_slash_pos]
+            .iter()
+            .all(|b| b.is_ascii_hexdigit())
+        && bytes[hash_start - 1] == b'/'
+    {
+        let hash_hex = &rest[hash_start..range_slash_pos];
+        let slash_idx = hash_start - 1;
+        let range_part = &rest[range_slash_pos + 1..];
+        return Ok((slash_idx, hash_hex, Some(range_part)));
     }
     // No range suffix — the body must end with `/<64 hex chars>`.
     let total = bytes.len();

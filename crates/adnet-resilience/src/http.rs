@@ -9,7 +9,7 @@ use std::time::Duration;
 use tracing::warn;
 
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use crate::retry::{retry_with_backoff, RetryConfig};
+use crate::retry::{RetryConfig, retry_with_backoff};
 
 /// Combined HTTP client config.
 #[derive(Debug, Clone)]

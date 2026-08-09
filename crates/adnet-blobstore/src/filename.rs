@@ -68,14 +68,15 @@ fn truncate_with_ext(name: &str, max_len: usize) -> String {
     if name.len() <= max_len {
         return name.to_string();
     }
-    if let Some((stem, ext)) = name.rsplit_once('.') {
-        if !stem.is_empty() && !ext.is_empty() {
-            let ext_with_dot = format!(".{ext}");
-            let keep = max_len.saturating_sub(ext_with_dot.len());
-            if keep > 0 {
-                let stem: String = stem.chars().take(keep).collect();
-                return format!("{stem}{ext_with_dot}");
-            }
+    if let Some((stem, ext)) = name.rsplit_once('.')
+        && !stem.is_empty()
+        && !ext.is_empty()
+    {
+        let ext_with_dot = format!(".{ext}");
+        let keep = max_len.saturating_sub(ext_with_dot.len());
+        if keep > 0 {
+            let stem: String = stem.chars().take(keep).collect();
+            return format!("{stem}{ext_with_dot}");
         }
     }
     name.chars().take(max_len).collect()

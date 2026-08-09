@@ -27,14 +27,14 @@ use std::time::Duration;
 
 use adnet_types::{NodeAddr, NodeId};
 use quinn::{ClientConfig, Endpoint, ServerConfig};
+use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::DigitallySignedStruct;
 use rustls::{Error as RustlsError, SignatureScheme};
 use std::sync::Mutex;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 // rustls 0.23 requires `CryptoProvider::install_default()` to be
@@ -108,7 +108,7 @@ mod base64_encode {
             }
         }
         let bytes = input.as_bytes();
-        if bytes.len() % 4 != 0 {
+        if !bytes.len().is_multiple_of(4) {
             return None;
         }
         let mut out = Vec::with_capacity(bytes.len() / 4 * 3);

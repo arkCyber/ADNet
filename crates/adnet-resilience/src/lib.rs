@@ -20,4 +20,4 @@ pub mod retry;
 
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use http::{ResilientHttpClient, ResilientHttpConfig};
-pub use retry::{retry_with_backoff, RetryConfig, RetryPolicy};
+pub use retry::{RetryConfig, RetryPolicy, retry_with_backoff};

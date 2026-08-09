@@ -44,7 +44,7 @@ pub async fn fetch_from_mesh(
                 return Ok(MeshFetchResult {
                     bytes: n,
                     peer: base.clone(),
-                })
+                });
             }
             Err(e) => last_err = e,
         }
