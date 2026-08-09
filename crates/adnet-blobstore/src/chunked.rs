@@ -28,6 +28,14 @@ pub enum ChunkError {
     RangeOutOfBounds { start: u64, end: u64, size: u64 },
     #[error("invalid range: {0}")]
     InvalidRange(String),
+    /// The requested range is larger than the configured safety cap
+    /// (default 16 MiB). DO-178C: the iroh-backed adapter cannot
+    /// stream partial reads from the FsStore today; pulling an
+    /// arbitrarily large range would exhaust memory. Callers that
+    /// genuinely need more than the cap must read chunk by chunk
+    /// via [`crate::traits::BlobReader::read_chunk`].
+    #[error("range too large: requested {requested} bytes, cap is {cap} bytes")]
+    TooLarge { requested: u64, cap: u64 },
 }
 
 impl From<AdnetError> for ChunkError {

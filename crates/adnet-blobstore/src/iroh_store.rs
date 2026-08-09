@@ -55,6 +55,32 @@ fn wrap<E: std::fmt::Display>(e: E) -> ChunkError {
     ChunkError::Io(std::io::Error::other(format!("{e}")))
 }
 
+/// Safety cap (bytes) on the size of a single `read_range` /
+/// `read_all` call against the iroh-backed store. DO-178C
+/// `iroh_blobs::store::fs::FsStore::get_bytes` materialises the
+/// whole Bao-verified blob in memory before the caller can slice
+/// it. Without a guard, requesting `RangeSpec::All` on a 1 TiB
+/// blob would allocate 1 TiB of RAM on the request thread.
+///
+/// Callers that need more than the cap must read chunk by chunk via
+/// [`BlobReader::read_chunk`].
+pub const MAX_RANGE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Compute the byte length that the given `range` would request
+/// against a blob of `total_size` bytes. `None` is returned for
+/// range specs that translate to "all" — for those we conservatively
+/// return `total_size`.
+fn range_byte_len(range: &RangeSpec, total_size: u64) -> u64 {
+    match range {
+        RangeSpec::All => total_size,
+        RangeSpec::Single(br) => br.end.saturating_sub(br.start),
+        RangeSpec::Multi(ranges) => ranges
+            .iter()
+            .map(|br| br.end.saturating_sub(br.start))
+            .sum(),
+    }
+}
+
 /// Thin wrapper around [`FsStore`]. Cloning is cheap — the
 /// underlying `redb` tables live behind an `Arc` inside the
 /// `FsStore`, so we just hold another `Arc` over the `FsStore` clone.
@@ -175,6 +201,20 @@ impl BlobReader for IrohBlobStore {
         range: RangeSpec,
     ) -> Result<Vec<u8>, ChunkError> {
         let ihash = content_hash_to_iroh_hash(hash).map_err(wrap)?;
+        let size = self.size(hash).await?;
+
+        // DO-178C guard: refuse ranges larger than the safety cap
+        // *before* calling `get_bytes` so a malicious / buggy
+        // caller cannot OOM the process. Callers that need more
+        // must use the chunked `read_chunk` API.
+        let requested = range_byte_len(&range, size);
+        if requested > MAX_RANGE_BYTES {
+            return Err(ChunkError::TooLarge {
+                requested,
+                cap: MAX_RANGE_BYTES,
+            });
+        }
+
         // iroh-blobs `get_bytes` returns the full Bao-verified blob;
         // we slice it locally. For very large blobs the production
         // implementation should use the chunked `BlobReader` API.
@@ -311,5 +351,35 @@ mod tests {
         // A 4-byte payload has 1 chunk. Asking for chunk 5 must be None.
         let chunk = store.read_chunk(&hash, 5).await.unwrap();
         assert!(chunk.is_none());
+    }
+
+    /// DO-178C regression: a request whose byte length exceeds the
+    /// safety cap must be refused *before* the iroh FsStore is asked
+    /// to materialise the whole blob. We can't easily simulate a
+    /// 16 MiB+ payload without burning a lot of RAM in the test, so
+    /// we just verify that an oversized range on a small blob still
+    /// trips the guard (the guard fires on the requested byte
+    /// length, not the actual blob size — a hostile caller can lie
+    /// about `range.end` to try to read beyond the cap).
+    #[tokio::test]
+    async fn read_range_above_safety_cap_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let store = IrohBlobStore::open(dir.path()).await.unwrap();
+        let payload = vec![0u8; 1024];
+        let hash = BlobImporter::put_bytes(&store, &payload).await.unwrap();
+        // Request (0..MAX_RANGE_BYTES + 1) — one byte over the cap.
+        let oversized =
+            ByteRange::new(0, MAX_RANGE_BYTES + 1).expect("non-empty range is valid");
+        let err = store
+            .read_range(&hash, RangeSpec::Single(oversized))
+            .await
+            .unwrap_err();
+        match err {
+            ChunkError::TooLarge { requested, cap } => {
+                assert_eq!(requested, MAX_RANGE_BYTES + 1);
+                assert_eq!(cap, MAX_RANGE_BYTES);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
     }
 }

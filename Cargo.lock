@@ -24,9 +24,16 @@ dependencies = [
 name = "adnet-chatstore"
 version = "0.1.0"
 dependencies = [
+ "adnet-blobstore",
  "adnet-types",
+ "anyhow",
  "bincode",
  "chrono",
+ "futures",
+ "iroh",
+ "iroh-blobs",
+ "iroh-docs",
+ "iroh-gossip",
  "rand 0.8.7",
  "rusqlite",
  "serde",
@@ -164,6 +171,7 @@ name = "adnet-node"
 version = "0.1.0"
 dependencies = [
  "adnet-blobstore",
+ "adnet-chatstore",
  "adnet-gossip",
  "adnet-identity",
  "adnet-ipc",
@@ -179,6 +187,7 @@ dependencies = [
  "futures",
  "iroh",
  "iroh-blobs",
+ "iroh-docs",
  "iroh-gossip",
  "reqwest 0.12.28",
  "serde",

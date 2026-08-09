@@ -34,7 +34,7 @@ pub use filename::{safe_filename, MAX_FILENAME_LEN};
 #[cfg(feature = "iroh")]
 pub use iroh_store::{
     content_hash_to_iroh_hash, iroh_hash_to_content_hash, IrohBlobHash, IrohBlobStore,
-    IrohBlobTicket,
+    IrohBlobTicket, MAX_RANGE_BYTES,
 };
 pub use store::BlobStore;
 pub use traits::{BlobImporter, BlobReader};

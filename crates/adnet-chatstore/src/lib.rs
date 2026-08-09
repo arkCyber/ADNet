@@ -48,5 +48,19 @@ pub use im::{
 pub use schema::SCHEMA_VERSION;
 pub use storage::{ChatStorage, ChatStorageConfig, Friend, MessageAttachment};
 
+/// Phase 5a — iroh-docs backed message sync. Available only when
+/// the `iroh` feature is enabled.
+#[cfg(feature = "iroh")]
+pub mod docs_bridge;
+#[cfg(feature = "iroh")]
+pub use docs_bridge::{
+    ConversationTicket, DocHandle, DocsBridgeError, DocsBridgeResult, IrohDocsChat,
+    MessageEvent,
+};
+
+// Re-export iroh-docs symbols we use in the public surface.
+#[cfg(feature = "iroh")]
+pub use iroh_docs::{AuthorId as IrohAuthorId, DocTicket as IrohDocTicket};
+
 #[cfg(test)]
 mod tests;

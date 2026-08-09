@@ -1304,3 +1304,93 @@ async fn im_count_messages_and_prune() {
     let err = mgr.prune_messages_before(&conv.id, -1).await.unwrap_err();
     assert!(matches!(err, crate::error::ChatStoreError::Invalid(_)));
 }
+
+// ----------------------------------------------------------------------
+// DO-178C audit additions: recoverability, schema-upgrade, OOM guard.
+// ----------------------------------------------------------------------
+
+#[test]
+fn error_recoverability_matches_documented_table() {
+    use crate::error::ErrorClass;
+
+    let cases: Vec<(crate::error::ChatStoreError, ErrorClass)> = vec![
+        (crate::error::ChatStoreError::Validation("x".into()), ErrorClass::UserError),
+        (crate::error::ChatStoreError::Invalid("x".into()), ErrorClass::UserError),
+        (crate::error::ChatStoreError::Constraint("x".into()), ErrorClass::UserError),
+        (crate::error::ChatStoreError::ForeignKey("x".into()), ErrorClass::UserError),
+        (crate::error::ChatStoreError::NotFound("x".into()), ErrorClass::Recoverable),
+        (
+            crate::error::ChatStoreError::SchemaVersion {
+                stored: 1,
+                supported: 2,
+            },
+            ErrorClass::Fatal,
+        ),
+        (
+            crate::error::ChatStoreError::DatabaseCorrupt("not ok".into()),
+            ErrorClass::Fatal,
+        ),
+        (crate::error::ChatStoreError::Lock, ErrorClass::Fatal),
+        (crate::error::ChatStoreError::Json("x".into()), ErrorClass::Fatal),
+    ];
+
+    for (err, expected) in cases {
+        let actual = err.recoverability();
+        assert_eq!(actual, expected, "wrong class for {err:?}");
+    }
+}
+
+#[test]
+fn schema_upgrade_idempotent_on_fresh_db() {
+    // DO-178C: opening a freshly-created store must apply all
+    // schema migrations and end at `SCHEMA_VERSION`. Opening it a
+    // second time must be a no-op (no duplicate-column errors etc.)
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = ChatStorageConfig {
+        storage_dir: dir.path().to_path_buf(),
+    };
+    let _first = ChatStorage::new(cfg.clone()).unwrap();
+    let second = ChatStorage::new(cfg).unwrap();
+    assert_eq!(second.schema_version().unwrap(), SCHEMA_VERSION);
+}
+
+#[test]
+fn startup_integrity_check_passes_on_healthy_db() {
+    // ChatStorage::new now runs PRAGMA integrity_check
+    // unconditionally. A freshly-created DB trivially passes the
+    // check; this test is the canary that wires the new contract.
+    let storage = temp_chatstorage();
+    // Storage was already opened in `temp_chatstorage`, so reaching
+    // here at all means the integrity check passed.
+    storage.check_integrity().unwrap();
+}
+
+/// Regression: a stored schema version **newer** than the build's
+/// [`SCHEMA_VERSION`] must be rejected as `SchemaVersion` rather
+/// than silently downgrading. We simulate the "newer" case by
+/// manually inserting a v=999 row into `schema_version` and
+/// re-opening the store.
+#[test]
+fn startup_rejects_newer_schema_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = ChatStorageConfig {
+        storage_dir: dir.path().to_path_buf(),
+    };
+    // First open — creates the schema_version table.
+    let _first = ChatStorage::new(cfg.clone()).unwrap();
+    // Force the on-disk version ahead of what this build supports.
+    {
+        let p = dir.path().join("exodus_chat.db");
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        conn.execute(
+            "UPDATE schema_version SET version = ?1",
+            rusqlite::params![(SCHEMA_VERSION + 1) as i64],
+        )
+        .unwrap();
+    }
+    let err = ChatStorage::new(cfg).unwrap_err();
+    assert!(
+        matches!(err, crate::error::ChatStoreError::SchemaVersion { .. }),
+        "expected SchemaVersion, got {err:?}"
+    );
+}

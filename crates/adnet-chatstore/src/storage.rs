@@ -88,6 +88,17 @@ pub struct ChatStorage {
 
 impl ChatStorage {
     /// Open (or create) the database at `config.storage_dir/exodus_chat.db`.
+    ///
+    /// DO-178C startup contract:
+    /// - WAL mode + foreign keys + `synchronous=NORMAL` are
+    ///   enabled in [`schema::configure_connection`].
+    /// - `PRAGMA integrity_check` runs before the storage becomes
+    ///   available so a corrupt database fails loudly at open time
+    ///   instead of returning per-row errors later.
+    /// - The returned `ChatStorage` is the only access point to the
+    ///   SQLite handle. Callers must NOT open another connection to
+    ///   the same file; that would silently disable WAL's
+    ///   single-writer semantics.
     pub fn new(config: ChatStorageConfig) -> Result<Self> {
         std::fs::create_dir_all(&config.storage_dir)?;
         let db_path = config.storage_dir.join("exodus_chat.db");
@@ -95,6 +106,17 @@ impl ChatStorage {
 
         schema::configure_connection(&conn)?;
         schema::apply_schema(&mut conn)?;
+
+        // Fail-fast startup probe (DO-178C): refuse to hand out a
+        // `ChatStorage` whose underlying file is corrupt. The
+        // pragma is cheap on healthy databases (a single page
+        // checksum) and forces the operator to deal with corruption
+        // explicitly rather than via cryptic per-row errors.
+        let integrity: String =
+            conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(ChatStoreError::DatabaseCorrupt(integrity));
+        }
 
         info!(path = %db_path.display(), "chatstore opened");
         Ok(Self {

@@ -87,6 +87,7 @@ adnet-workspace  = { path = "crates/adnet-workspace" }
 adnet-node       = { path = "crates/adnet-node" }
 adnet-identity   = { path = "crates/adnet-identity" }
 adnet-token      = { path = "crates/adnet-token" }
+adnet-chatstore  = { path = "crates/adnet-chatstore" }
 
 # ---------------------------------------------------------------------------
 # Profile / lints applied workspace-wide

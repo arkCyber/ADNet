@@ -231,6 +231,13 @@ pub struct ImManager {
 impl ImManager {
     /// Open (or create) the hub database at `db_path`. Applies the
     /// schema if absent.
+    ///
+    /// DO-178C startup contract (mirrors [`ChatStorage::new`]):
+    /// - WAL + foreign keys + synchronous=NORMAL are enabled.
+    /// - `PRAGMA integrity_check` runs to completion before the
+    ///   manager is handed back. A corrupt DB returns
+    ///   [`ChatStoreError::DatabaseCorrupt`] at open time rather
+    ///   than as a cryptic mid-write error.
     pub fn new(db_path: PathBuf) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -239,6 +246,12 @@ impl ImManager {
 
         schema::configure_connection(&conn)?;
         schema::apply_schema(&mut conn)?;
+
+        let integrity: String =
+            conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(ChatStoreError::DatabaseCorrupt(integrity));
+        }
 
         info!(path = %db_path.display(), "hub database opened");
         Ok(Self {
