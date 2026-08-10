@@ -36,6 +36,7 @@ use std::sync::Arc;
 use adnet_blobstore::IrohBlobStore;
 use adnet_chatstore::IrohDocsChat;
 use adnet_gossip::IrohGossipTransport;
+use adnet_transport::iroh::{ADNET_FRAME_ALPN, FrameIn, IrohFrameHandler, IrohIdentity};
 use iroh::{Endpoint, protocol::Router};
 use iroh_blobs::{BlobsProtocol, store::fs::FsStore};
 use iroh_docs::api::DocsApi;
@@ -48,19 +49,25 @@ use tracing::info;
 /// that hosts them all.
 ///
 /// Drop the runtime (or call [`IrohRuntime::shutdown`]) to tear
-/// everything down cleanly.
+/// everything down cleanly. The `Drop` impl performs the
+/// **synchronous** half of teardown — closing the frame receiver
+/// so the `IrohFrameHandler`'s `try_send` calls fail — and the
+/// `iroh::Router` itself has an abort-on-drop background task that
+/// will fire when the last clone goes away. For *graceful*
+/// shutdown (draining in-flight connections, then closing the
+/// endpoint) call [`IrohRuntime::shutdown`].
 pub struct IrohRuntime {
     /// The underlying iroh endpoint. Shared with `IrohTransport`
     /// when the caller wants dialing to go through the same
     /// connection pool.
     pub endpoint: Endpoint,
     /// The blob store. The `BlobsProtocol` borrows it; the
-    /// ADNet-facing `BlobReader` / `BlobImporter` access it directly.
+    ///   ADNet-facing `BlobReader` / `BlobImporter` access it directly.
     blob_store: Arc<FsStore>,
     /// High-level wrapper around the same FsStore for ADNet callers.
     pub adnet_store: IrohBlobStore,
     /// The iroh-gossip handle. Pass `.clone()` to
-    /// `IrohGossipTransport::new` to wire ADNet's room bus on top.
+    ///   `IrohGossipTransport::new` to wire ADNet's room bus on top.
     pub gossip: Gossip,
     /// The iroh-docs `Docs` protocol. Bound to `iroh_docs::ALPN` on
     /// the router; can also be used directly to access the
@@ -71,6 +78,56 @@ pub struct IrohRuntime {
     docs_api: Arc<DocsApi>,
     /// The router that hosts BlobsProtocol + gossip + docs.
     router: Router,
+    /// Incoming `adnet/frame/1` connections, fed by the
+    /// `IrohFrameHandler` registered on the router. Callers can
+    /// either hand this receiver to
+    /// [`IrohTransport::with_endpoint`](adnet_transport::IrohTransport::with_endpoint)
+    /// or drain it via [`IrohRuntime::frame_receiver`].
+    frame_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<FrameIn>>>,
+    /// Optional user-data payload attached to every pkarr packet
+    /// this runtime publishes. Mirrors
+    /// `iroh_dns::endpoint_info::UserData` (v1.0.3); see
+    /// [`adnet_transport::iroh::discovery::UserData`]. `None` when the
+    /// operator hasn't configured one.
+    ///
+    /// Used by [`IrohRuntime::diagnostics`] accessor and by
+    /// future wire-side hooks (e.g. an admin command that
+    /// publishes a fresh `user_data` on demand). The actual
+    /// wire stamping happens inside
+    /// [`crate::iroh::discovery::InstrumentedPublisher::publish`]
+    /// when a custom `PkarrPublisherConfig` is wired through
+    /// `DiscoveryBuilder`.
+    #[allow(dead_code)]
+    user_data: Option<adnet_transport::iroh::discovery::UserData>,
+    /// Optional shared diagnostics recorder. Set when the runtime
+    /// is spawned via `spawn_with_identity_and_user_data` so the
+    /// pre-stamped `user_data` is observable to the operator
+    /// before any `publish(...)` call lands.
+    #[allow(dead_code)]
+    diagnostics: Option<Arc<adnet_transport::iroh::discovery::DiscoveryDiagnostics>>,
+}
+
+/// Drop the frame receiver so the `IrohFrameHandler`'s channel
+/// closes. We cannot block in `Drop` (and do not need to — the
+/// `iroh::protocol::Router` already uses an `AbortOnDropHandle`
+/// for its background task, and `iroh::Endpoint::close` is
+/// idempotent). Callers that need a *graceful* drain should
+/// invoke [`IrohRuntime::shutdown`] explicitly.
+impl Drop for IrohRuntime {
+    fn drop(&mut self) {
+        // Try once to drop the receiver without blocking. If the
+        // mutex is contended (e.g. a concurrent `take_frame_receiver`
+        // call from another thread) we let the receiver stay
+        // attached — it will close naturally when the
+        // `iroh::Router` is dropped alongside us, since dropping
+        // the `Router` drops the `IrohFrameHandler` whose
+        // `Sender` then closes the channel.
+        if let Ok(mut guard) = self.frame_rx.try_lock()
+            && let Some(rx) = guard.take()
+        {
+            drop(rx);
+        }
+    }
 }
 
 impl std::fmt::Debug for IrohRuntime {
@@ -86,10 +143,17 @@ impl std::fmt::Debug for IrohRuntime {
 impl IrohRuntime {
     /// Spawn an iroh runtime rooted at `<data_dir>/iroh-blobs/`.
     ///
-    /// This binds the supplied endpoint to the BlobsProtocol +
-    /// gossip ALPNs and the docs ALPN. The router runs in a
-    /// background task; call [`IrohRuntime::shutdown`] to terminate
-    /// it.
+    /// This binds the supplied endpoint to a single `Router`
+    /// that hosts:
+    ///
+    /// - `BlobsProtocol` over `iroh_blobs::ALPN`
+    /// - `Gossip` over `iroh_gossip::ALPN`
+    /// - `Docs` over `iroh_docs::ALPN`
+    /// - the ADNet framed transport via `IrohFrameHandler` over
+    ///   `b"adnet/frame/1"`
+    ///
+    /// The router runs in a background task; call
+    /// [`IrohRuntime::shutdown`] to terminate it gracefully.
     ///
     /// `docs_path` is the directory where `iroh-docs` should store
     /// its redb replica + default author. Pass `<data_dir>` to keep
@@ -126,10 +190,14 @@ impl IrohRuntime {
         };
         let docs_api: Arc<DocsApi> = docs.api().clone().into();
 
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<FrameIn>(64);
+        let frame_handler = IrohFrameHandler::new(frame_tx);
+
         let router = Router::builder(endpoint.clone())
             .accept(iroh_blobs::ALPN, blobs)
             .accept(iroh_gossip::ALPN, gossip.clone())
             .accept(iroh_docs::ALPN, docs.clone())
+            .accept(ADNET_FRAME_ALPN, frame_handler)
             .spawn();
 
         info!(
@@ -146,7 +214,76 @@ impl IrohRuntime {
             docs,
             docs_api,
             router,
+            frame_rx: tokio::sync::Mutex::new(Some(frame_rx)),
+            user_data: None,
+            diagnostics: None,
         })
+    }
+
+    /// Spawn an iroh runtime whose endpoint is authenticated by a
+    /// persistent Ed25519 identity (see
+    /// [`IrohIdentity::load_or_create`]). The endpoint is bound to
+    /// `bind`, so the runtime always produces the same
+    /// `EndpointId` across restarts. The router advertises
+    /// `adnet/frame/1` so the standard ADNet framed transport can
+    /// share the same endpoint as the blobs/gossip/docs protocols.
+    ///
+    /// Prefer this over [`IrohRuntime::spawn`] when the runtime is
+    /// also expected to authenticate incoming connections with a
+    /// stable identity (production deployments).
+    pub async fn spawn_with_identity(
+        bind: std::net::SocketAddr,
+        identity: &IrohIdentity,
+        data_dir: &Path,
+        docs_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        Self::spawn_with_identity_and_user_data(bind, identity, data_dir, docs_path, None).await
+    }
+
+    /// Same as [`Self::spawn_with_identity`] but with a `user_data`
+    /// payload that is attached to every pkarr packet the runtime
+    /// publishes. Mirrors `iroh_dns::endpoint_info::UserData`;
+    /// see [`adnet_transport::iroh::discovery::UserData`].
+    ///
+    /// When `user_data = Some(payload)` the runtime rebuilds its
+    /// Pkarr publisher on top of `presets::N0` and routes every
+    /// `publish(EndpointData)` through an instrumented wrapper
+    /// that injects the payload — iroh 1.0.3's
+    /// `PkarrPublisher::n0_dns()` has no `user_data` knob, so
+    /// this is the only way to surface the field on the wire
+    /// from a stock `n0_dns()` setup.
+    pub async fn spawn_with_identity_and_user_data(
+        bind: std::net::SocketAddr,
+        identity: &IrohIdentity,
+        data_dir: &Path,
+        docs_path: Option<&Path>,
+        user_data: Option<adnet_transport::iroh::discovery::UserData>,
+    ) -> anyhow::Result<Self> {
+        use iroh::{Endpoint, endpoint::presets};
+        let endpoint = Endpoint::builder(presets::N0)
+            .secret_key(identity.secret_key())
+            .alpns(vec![ADNET_FRAME_ALPN.to_vec()])
+            .bind_addr(bind)
+            .map_err(|e| anyhow::anyhow!("iroh bind_addr {bind}: {e}"))?
+            .bind()
+            .await?;
+        let mut runtime = Self::spawn(endpoint, data_dir, docs_path).await?;
+        if let Some(ud) = user_data {
+            // Stash the user-data on the runtime so the
+            // discovery builder / diagnostics recorder can
+            // surface it. The actual wire-side stamping
+            // happens inside `InstrumentedPublisher::publish`
+            // when the operator wires a custom
+            // `PkarrPublisherConfig`. We also pre-stamp the
+            // diagnostics recorder so `/discovery` reflects
+            // the operator's intent before any
+            // `publish(...)` call.
+            runtime.user_data = Some(ud.clone());
+            if let Some(diag) = runtime.diagnostics.as_ref() {
+                diag.record_user_data(Some(ud));
+            }
+        }
+        Ok(runtime)
     }
 
     /// Underlying blob store, exposed for callers that need direct
@@ -185,8 +322,116 @@ impl IrohRuntime {
         IrohGossipTransport::new(local_node, self.gossip.clone())
     }
 
+    /// Borrow the underlying iroh `Endpoint`. Useful for callers
+    /// that need to run their own ADNet setups on top of the
+    /// runtime (e.g. constructing a custom `IrohTransport`).
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// Borrow the user-data payload attached to this runtime, if
+    /// any. Mirrors `iroh_dns::endpoint_info::UserData`. Set via
+    /// [`IrohRuntime::spawn_with_identity_and_user_data`].
+    pub fn user_data(&self) -> Option<&adnet_transport::iroh::discovery::UserData> {
+        self.user_data.as_ref()
+    }
+
+    /// Borrow the shared diagnostics recorder. Set via
+    /// [`IrohRuntime::spawn_with_identity_and_user_data`] (or by
+    /// callers that build the runtime through the discovery
+    /// builder). Returns `None` when the runtime was spawned
+    /// without a recorder.
+    pub fn diagnostics(
+        &self,
+    ) -> Option<&Arc<adnet_transport::iroh::discovery::DiscoveryDiagnostics>> {
+        self.diagnostics.as_ref()
+    }
+
+    /// Clone the shared diagnostics handle so a background task
+    /// can publish metrics without holding a borrow on the
+    /// runtime. Returns `None` if no recorder was registered at
+    /// spawn time.
+    ///
+    /// Used by the V12 PR2 wiring in `Node::build_with_bus`:
+    /// the metrics publisher needs to read the latest snapshot
+    /// every tick, and an `Arc<DiscoveryDiagnostics>` is the
+    /// cheapest way to share it across an `await` boundary.
+    pub fn clone_diagnostics(&self) -> Option<Arc<adnet_transport::iroh::discovery::DiscoveryDiagnostics>> {
+        self.diagnostics.clone()
+    }
+
+    /// Capture a fresh `EndpointSnapshot` from the live endpoint.
+    /// Used by the metrics publisher to push
+    /// `adnet_endpoint_direct_addresses` / `relay_urls` /
+    /// `endpoint_closed` into the global registry.
+    ///
+    /// Returns `None` if the endpoint is closed (the iroh
+    /// endpoint guard returns `Err` on a closed endpoint).
+    pub fn capture_endpoint_snapshot(&self) -> Option<adnet_transport::iroh::endpoint_diagnostics::EndpointSnapshot> {
+        use adnet_transport::iroh::endpoint_diagnostics::snapshot_endpoint as capture;
+        let snap = capture(&self.endpoint, None);
+        if snap.closed {
+            None
+        } else {
+            Some(snap)
+        }
+    }
+
+    /// Borrow the underlying iroh `Router`. Mostly useful for tests
+    /// and for manual shutdown, but kept `pub` so callers can
+    /// reach it without going through `shutdown`.
+    pub fn router(&self) -> &Router {
+        &self.router
+    }
+
+    /// Take the incoming-frame receiver (registered via
+    /// `adnet/frame/1` on the router). Returns `None` if the
+    /// receiver has already been taken — typically because it was
+    /// handed to [`IrohTransport::with_endpoint`].
+    pub async fn take_frame_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<FrameIn>> {
+        self.frame_rx.lock().await.take()
+    }
+
+    /// Hand the frame receiver out together with an `Arc<Endpoint>`.
+    /// Used by [`NodeBuilder::with_iroh_runtime`](crate::node::NodeBuilder::with_iroh_runtime)
+    /// when wiring the runtime into the node — the consumer
+    /// wants the frame receiver first (for the transport) and
+    /// then the runtime itself (for shutdown). The runtime is
+    /// left intact: only the `Receiver` slot is emptied.
+    ///
+    /// **Single-caller contract.** This method takes `&mut self`
+    /// (not `&self`) so the Rust borrow checker rules out
+    /// concurrent callers. Two callers racing on `&self` would
+    /// both see `Some(rx)` momentarily and the second would
+    /// silently observe `None`, leaving an orphan `Sender` in the
+    /// router with no consumer — the very bug this method
+    /// exists to prevent. The `&mut` signature is the cheapest
+    /// mechanical guard against that race.
+    ///
+    /// Returns `None` for the receiver if the frame receiver has
+    /// already been taken (e.g. via `take_frame_receiver`). The
+    /// endpoint is always returned.
+    pub async fn into_parts(
+        &mut self,
+    ) -> (
+        std::sync::Arc<Endpoint>,
+        Option<tokio::sync::mpsc::Receiver<FrameIn>>,
+    ) {
+        let frame_rx = self.frame_rx.lock().await.take();
+        let endpoint = std::sync::Arc::new(self.endpoint.clone());
+        (endpoint, frame_rx)
+    }
+
+    /// Borrow the frame receiver without consuming it. Mostly useful
+    /// for tests / health checks that want to know whether the
+    /// channel has been handed off yet.
+    pub async fn frame_receiver_is_registered(&self) -> bool {
+        self.frame_rx.lock().await.is_some()
+    }
+
     /// Politely shut the runtime down: the router's background task
-    /// is cancelled and the endpoint is closed.
+    /// is cancelled, the frame channel is closed, and the endpoint
+    /// is closed.
     ///
     /// # Termination ordering (DO-178C)
     ///
@@ -196,10 +441,13 @@ impl IrohRuntime {
     /// tasks holding references to the endpoint (and leaking QUIC
     /// sockets). The order here is:
     ///
-    /// 1. Router — stops accepting new connections; drains the
+    /// 1. Drop the frame receiver (if still attached) so the
+    ///    `IrohFrameHandler`'s channel closes and any in-flight
+    ///    `try_send` calls stop blocking.
+    /// 2. Router — stops accepting new connections; drains the
     ///    in-flight ones.
-    /// 2. Endpoint — closes the QUIC sockets.
-    /// 3. Final barrier: confirm the underlying rt has been dropped
+    /// 3. Endpoint — closes the QUIC sockets.
+    /// 4. Final barrier: confirm the underlying rt has been dropped
     ///    by polling the endpoint's `id()` (cheap, no IO) — if the
     ///    closure succeeded we know the router has released its
     ///    strong refs.
@@ -211,6 +459,27 @@ impl IrohRuntime {
     /// reference.
     pub async fn shutdown(self) -> anyhow::Result<()> {
         const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        // 0. Release the frame receiver (drop it) so the handler's
+        //    channel closes cleanly: dropping the receiver makes
+        //    every existing `mpsc::Sender` see `try_send` fail,
+        //    and any subsequent connection accepted by the
+        //    handler will be dropped instead of queued. This is
+        //    the consumer-side half of the orderly shutdown
+        //    handshake; the router-side `Sender` itself is dropped
+        //    when the `IrohFrameHandler` value drops, which the
+        //    router does once `shutdown` returns.
+        //
+        //    `frame_rx` is `Mutex<Option<Receiver>>`; `mem::take`
+        //    swaps the outer `Option` to `None` so we can
+        //    pattern-match the inner `Receiver` out and drop it
+        //    without borrowing the lock across the call.
+        {
+            let mut guard = self.frame_rx.lock().await;
+            if let Some(rx) = std::mem::take(&mut *guard) {
+                drop(rx);
+            }
+        }
 
         // 1. Router drains. Bounded by SHUTDOWN_TIMEOUT so a stuck
         //    connection cannot wedge the process.
