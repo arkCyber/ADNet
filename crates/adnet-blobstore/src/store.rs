@@ -96,7 +96,8 @@ impl BlobStore {
         Ok(count)
     }
 
-    fn blob_dir(&self, hash: &ContentHash) -> PathBuf {
+    /// Returns the directory path for a given content hash.
+    pub fn blob_dir(&self, hash: &ContentHash) -> PathBuf {
         self.data_dir.join(hash.as_hex())
     }
 
@@ -110,76 +111,112 @@ impl BlobStore {
     pub fn import_file_sync(&self, source: &Path) -> std::io::Result<(ContentHash, u64)> {
         let (hash, size) = self.hash_file(source)?;
         let dest_dir = self.blob_dir(&hash);
+
         if dest_dir.join(COMPLETE_SENTINEL).exists() {
+            // Idempotent: blob already complete — still count as an import.
+            crate::metrics::blob_metrics().imports.inc();
             return Ok((hash, size));
         }
+
         // Stage chunks under a sentinel directory and only rename on success.
         let staging = self.data_dir.join(format!(".importing-{}", hash));
         // Clean any leftover staging dir from a previous failed import.
         if staging.exists() {
             let _ = fs::remove_dir_all(&staging);
         }
-        fs::create_dir_all(staging.join("chunks"))?;
-        let mut file = File::open(source)?;
-        let mut index = 0u32;
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
+
+        let result = (|| -> std::io::Result<(ContentHash, u64)> {
+            fs::create_dir_all(staging.join("chunks"))?;
+            let mut file = File::open(source)?;
+            let mut index = 0u32;
+            let mut buf = vec![0u8; CHUNK_SIZE];
+            loop {
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                let chunk_path = staging.join("chunks").join(format!("{index:06}"));
+                let mut out = File::create(&chunk_path)?;
+                out.write_all(&buf[..n])?;
+                index += 1;
             }
-            let chunk_path = staging.join("chunks").join(format!("{index:06}"));
-            let mut out = File::create(&chunk_path)?;
-            out.write_all(&buf[..n])?;
-            index += 1;
+            let meta = serde_json::json!({
+                "hash": hash.as_hex(),
+                "sizeBytes": size,
+                "chunkCount": index,
+            });
+            fs::write(staging.join("meta.json"), serde_json::to_vec(&meta)?)?;
+            fs::write(staging.join(COMPLETE_SENTINEL), b"1")?;
+            // Atomic rename onto the final location.
+            fs::create_dir_all(&dest_dir)?;
+            if let Err(e) = fs::rename(&staging, &dest_dir) {
+                // Cross-volume or platform refusal: best-effort fallback.
+                copy_dir_recursive(&staging, &dest_dir).map_err(|e2| {
+                    std::io::Error::new(
+                        e.kind(),
+                        format!("rename {staging:?} -> {dest_dir:?} failed ({e}); fallback copy failed: {e2}"),
+                    )
+                })?;
+                let _ = fs::remove_dir_all(&staging);
+            }
+            // Re-verify the hash end-to-end by streaming back the staged chunks.
+            verify_blob_on_disk(&dest_dir, &hash, size)?;
+            Ok((hash, size))
+        })();
+
+        match result {
+            Ok((h, s)) => {
+                crate::metrics::blob_metrics().imports.inc();
+                Ok((h, s))
+            }
+            Err(e) => {
+                crate::metrics::blob_metrics().import_errors.inc();
+                Err(e)
+            }
         }
-        let meta = serde_json::json!({
-            "hash": hash.as_hex(),
-            "sizeBytes": size,
-            "chunkCount": index,
-        });
-        fs::write(staging.join("meta.json"), serde_json::to_vec(&meta)?)?;
-        fs::write(staging.join(COMPLETE_SENTINEL), b"1")?;
-        // Atomic rename onto the final location.
-        fs::create_dir_all(&dest_dir)?;
-        // On Windows, rename refuses to overwrite, but we're on unix in CI.
-        // For cross-platform safety, fall back to recursive copy + remove.
-        if let Err(e) = fs::rename(&staging, &dest_dir) {
-            // Cross-volume or platform refusal: best-effort fallback.
-            copy_dir_recursive(&staging, &dest_dir).map_err(|e2| {
-                std::io::Error::new(
-                    e.kind(),
-                    format!("rename {staging:?} -> {dest_dir:?} failed ({e}); fallback copy failed: {e2}"),
-                )
-            })?;
-            let _ = fs::remove_dir_all(&staging);
-        }
-        // Re-verify the hash end-to-end by streaming back the staged chunks.
-        verify_blob_on_disk(&dest_dir, &hash, size)?;
-        Ok((hash, size))
     }
 
-    /// Store raw bytes as a single-chunk blob.
+    /// Store raw bytes as a chunked blob (split into CHUNK_SIZE pieces).
     pub fn put_bytes_sync(&self, data: &[u8]) -> std::io::Result<(ContentHash, u64)> {
         let hash = ContentHash::from_bytes(data);
         let dest_dir = self.blob_dir(&hash);
         if dest_dir.join(COMPLETE_SENTINEL).exists() {
+            // Idempotent: already complete.
+            crate::metrics::blob_metrics().put_bytes.inc();
             return Ok((hash, data.len() as u64));
         }
-        fs::create_dir_all(dest_dir.join("chunks"))?;
-        fs::write(dest_dir.join("chunks").join("000000"), data)?;
-        fs::write(
-            dest_dir.join("chunks").join("000000.sha"),
-            blake3::hash(data).to_hex().as_bytes(),
-        )?;
-        let meta = serde_json::json!({
-            "hash": hash.as_hex(),
-            "sizeBytes": data.len(),
-            "chunkCount": 1u32,
-        });
-        fs::write(dest_dir.join("meta.json"), serde_json::to_vec(&meta)?)?;
-        fs::write(dest_dir.join(COMPLETE_SENTINEL), b"1")?;
-        Ok((hash, data.len() as u64))
+        let result = (|| -> std::io::Result<(ContentHash, u64)> {
+            fs::create_dir_all(dest_dir.join("chunks"))?;
+            // Write data in CHUNK_SIZE chunks, mirroring import_file_sync.
+            let mut index = 0u32;
+            for chunk in data.chunks(CHUNK_SIZE) {
+                let chunk_path = dest_dir.join("chunks").join(format!("{index:06}"));
+                fs::write(&chunk_path, chunk)?;
+                fs::write(
+                    chunk_path.with_extension("sha"),
+                    blake3::hash(chunk).to_hex().as_bytes(),
+                )?;
+                index += 1;
+            }
+            let meta = serde_json::json!({
+                "hash": hash.as_hex(),
+                "sizeBytes": data.len(),
+                "chunkCount": index,
+            });
+            fs::write(dest_dir.join("meta.json"), serde_json::to_vec(&meta)?)?;
+            fs::write(dest_dir.join(COMPLETE_SENTINEL), b"1")?;
+            Ok((hash, data.len() as u64))
+        })();
+        match result {
+            Ok(r) => {
+                crate::metrics::blob_metrics().put_bytes.inc();
+                Ok(r)
+            }
+            Err(e) => {
+                crate::metrics::blob_metrics().import_errors.inc();
+                Err(e)
+            }
+        }
     }
 
     /// `(size_bytes, chunk_count)` for a fully-imported blob.
@@ -259,20 +296,32 @@ impl BlobStore {
     }
 
     pub fn export_to_file_sync(&self, hash: &ContentHash, dest: &Path) -> std::io::Result<u64> {
-        let (size, count) = self
-            .meta(hash)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
+        let result = (|| -> std::io::Result<u64> {
+            let (size, count) = self
+                .meta(hash)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut out = File::create(dest)?;
+            for i in 0..count {
+                let chunk = self.read_chunk_sync(hash, i)?;
+                out.write_all(&chunk)?;
+            }
+            let written = out.metadata()?.len();
+            debug_assert_eq!(written, size);
+            Ok(written)
+        })();
+        match result {
+            Ok(n) => {
+                crate::metrics::blob_metrics().exports.inc();
+                Ok(n)
+            }
+            Err(e) => {
+                crate::metrics::blob_metrics().import_errors.inc();
+                Err(e)
+            }
         }
-        let mut out = File::create(dest)?;
-        for i in 0..count {
-            let chunk = self.read_chunk_sync(hash, i)?;
-            out.write_all(&chunk)?;
-        }
-        let written = out.metadata()?.len();
-        debug_assert_eq!(written, size);
-        Ok(written)
     }
 
     /// Enumerate every fully-imported blob in the store. Returned hashes
@@ -321,12 +370,14 @@ impl BlobStore {
         }
         if !dir.join(COMPLETE_SENTINEL).exists() {
             // Refuse to delete a partial / unverified blob.
+            crate::metrics::blob_metrics().import_errors.inc();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("refusing to remove incomplete blob: {hash}"),
             ));
         }
         fs::remove_dir_all(&dir)?;
+        crate::metrics::blob_metrics().removes.inc();
         Ok(true)
     }
 
@@ -346,6 +397,33 @@ impl BlobStore {
             }
         }
         Ok(total)
+    }
+
+    /// Refresh the `adnet_blob_store_size_bytes` and
+    /// `adnet_blob_blobs_total` gauges from the current store
+    /// state. The other blob metrics (`imports_total`,
+    /// `import_errors_total`, `put_bytes_total`, `exports_total`,
+    /// `removes_total`) are wired at the call sites; only the
+    /// gauges need a sweep because they reflect *current state*
+    /// rather than cumulative counters.
+    ///
+    /// On any I/O error the gauges are left at their previous
+    /// values — gauges are best-effort and a partial sweep must
+    /// never block a /metrics scrape. The error is returned so
+    /// callers (typically a background refresh task) can log it.
+    pub fn refresh_gauge_metrics(&self) -> std::io::Result<()> {
+        use crate::metrics::blob_metrics;
+        let complete = self.list_complete()?;
+        let mut total = 0u64;
+        for hash in &complete {
+            if let Ok((size, _)) = self.meta(hash) {
+                total = total.saturating_add(size);
+            }
+        }
+        let m = blob_metrics();
+        m.store_size_bytes.set(total as i64);
+        m.blobs_total.set(complete.len() as i64);
+        Ok(())
     }
 }
 
@@ -713,5 +791,528 @@ mod tests {
         assert_eq!(store.total_size().unwrap(), 17);
         store.remove(&b).unwrap();
         assert_eq!(store.total_size().unwrap(), 0);
+    }
+
+    // ─────────────────────── constructor & accessors ───────────────────────
+
+    /// `BlobStore::new` creates the data directory if it does not exist.
+    #[test]
+    fn new_creates_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        assert!(dir.path().exists());
+        assert_eq!(store.data_dir(), dir.path());
+    }
+
+    /// `data_dir` returns the path passed to `new`.
+    #[test]
+    fn data_dir_returns_original_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        assert_eq!(store.data_dir(), dir.path());
+    }
+
+    // ─────────────────────── hash_file ────────────────────────
+
+    /// `hash_file` correctly computes the BLAKE3 hash and byte size
+    /// of a regular file.
+    #[test]
+    fn hash_file_computes_correct_hash_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let payload = b"hello world from hash_file".to_vec();
+        let path = dir.path().join("data.bin");
+        std::fs::write(&path, &payload).unwrap();
+        let (hash, size) = store.hash_file(&path).unwrap();
+        assert_eq!(size, payload.len() as u64);
+        assert_eq!(hash, ContentHash::from_bytes(&payload));
+    }
+
+    /// `hash_file` returns an error for a non-existent path.
+    #[test]
+    fn hash_file_error_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let result = store.hash_file(&dir.path().join("nonexistent.bin"));
+        assert!(result.is_err());
+    }
+
+    /// `hash_file` computes the same hash as `ContentHash::from_bytes`
+    /// for any file content.
+    #[test]
+    fn hash_file_hash_matches_direct() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let payload: Vec<u8> = (0..50_000).map(|i| (i % 251) as u8).collect();
+        let path = dir.path().join("data.bin");
+        std::fs::write(&path, &payload).unwrap();
+        let (hash, size) = store.hash_file(&path).unwrap();
+        assert_eq!(hash, ContentHash::from_bytes(&payload));
+        assert_eq!(size, 50_000);
+    }
+
+    // ─────────────────────── contains / has_complete ───────────────────────
+
+    /// `contains` is an alias for `has_complete` — both return `true`
+    /// only when the `complete` sentinel is present.
+    #[test]
+    fn contains_matches_has_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (h, _) = store.put_bytes_sync(b"hello").unwrap();
+        assert!(store.contains(&h));
+        assert_eq!(store.contains(&h), store.has_complete(&h));
+        store.remove(&h).unwrap();
+        assert!(!store.contains(&h));
+        assert_eq!(store.contains(&h), store.has_complete(&h));
+    }
+
+    /// `contains` returns `false` for a hash that was never imported.
+    #[test]
+    fn contains_false_for_unknown_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let unknown = ContentHash::from_bytes(b"unknown-blob");
+        assert!(!store.contains(&unknown));
+        assert!(!store.has_complete(&unknown));
+    }
+
+    // ─────────────────────── meta ────────────────────────
+
+    /// `meta` returns `(size, chunk_count)` for a complete blob.
+    #[test]
+    fn meta_returns_size_and_chunk_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        // Single-chunk blob via put_bytes_sync.
+        let (h, _) = store.put_bytes_sync(b"hello").unwrap();
+        let (size, count) = store.meta(&h).unwrap();
+        assert_eq!(size, 5);
+        assert_eq!(count, 1);
+    }
+
+    /// `meta` returns an error for a blob that was never imported.
+    #[test]
+    fn meta_error_for_unknown_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let unknown = ContentHash::from_bytes(b"unknown");
+        let err = store.meta(&unknown).unwrap_err();
+        assert!(matches!(err, ChunkError::Io(_)));
+        let io_err = match err {
+            ChunkError::Io(e) => e,
+            other => panic!("expected Io error, got {other:?}"),
+        };
+        assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// `meta` returns an error for a partial blob (no `complete` sentinel).
+    #[test]
+    fn meta_error_for_partial_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        // Plant a partial blob (chunks + meta.json but no sentinel).
+        let partial = ContentHash::from_bytes(b"partial");
+        let blob_dir = dir.path().join(partial.as_hex());
+        std::fs::create_dir_all(blob_dir.join("chunks")).unwrap();
+        std::fs::write(blob_dir.join("chunks").join("000000"), b"x").unwrap();
+        let meta = serde_json::json!({
+            "hash": partial.as_hex(),
+            "sizeBytes": 1,
+            "chunkCount": 1,
+        });
+        std::fs::write(
+            blob_dir.join("meta.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+        // No "complete" sentinel — meta must fail.
+        let err = store.meta(&partial).unwrap_err();
+        assert!(matches!(err, ChunkError::Io(_)));
+    }
+
+    /// `meta` surfaces a parse error when `meta.json` is corrupted.
+    #[test]
+    fn meta_error_on_corrupted_meta_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (h, _) = store.put_bytes_sync(b"hello").unwrap();
+        let meta_path = dir.path().join(h.as_hex()).join("meta.json");
+        std::fs::write(meta_path, b"not-json-at-all").unwrap();
+        let err = store.meta(&h).unwrap_err();
+        assert!(matches!(err, ChunkError::Io(_)));
+    }
+
+    // ─────────────────────── read_chunk_sync ────────────────────────
+
+    /// `read_chunk_sync` returns the correct chunk bytes for a
+    /// complete multi-chunk blob.
+    #[test]
+    fn read_chunk_sync_returns_correct_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let payload: Vec<u8> = (0..(32 * 1024)).map(|i| (i % 251) as u8).collect();
+        let src = dir.path().join("data.bin");
+        std::fs::write(&src, &payload).unwrap();
+        let (h, _) = store.import_file_sync(&src).unwrap();
+        // Chunk 0 is the first 16 KiB.
+        let chunk0 = store.read_chunk_sync(&h, 0).unwrap();
+        assert_eq!(chunk0.len(), 16 * 1024);
+        assert_eq!(chunk0[..100], payload[..100]);
+        // Chunk 1 is the next 16 KiB.
+        let chunk1 = store.read_chunk_sync(&h, 1).unwrap();
+        assert_eq!(chunk1.len(), 16 * 1024);
+        assert_eq!(chunk1[..100], payload[16 * 1024..16 * 1024 + 100]);
+    }
+
+    /// `read_chunk_sync` returns `NotFound` for an unknown blob.
+    #[test]
+    fn read_chunk_sync_error_on_unknown_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let unknown = ContentHash::from_bytes(b"unknown");
+        let err = store.read_chunk_sync(&unknown, 0).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// `read_chunk_sync` returns `NotFound` for a chunk index that
+    /// is out of range.
+    #[test]
+    fn read_chunk_sync_error_for_out_of_range_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (h, _) = store.put_bytes_sync(b"hello").unwrap(); // 1 chunk
+        let err = store.read_chunk_sync(&h, 99).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    // ─────────────────────── read_range_sync ────────────────────────
+
+    /// `read_range_sync` returns the exact bytes for a range within
+    /// a single chunk.
+    #[test]
+    fn read_range_sync_single_chunk_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        // Multi-chunk blob: 32 KiB.
+        let payload: Vec<u8> = (0..(32 * 1024)).map(|i| (i % 251) as u8).collect();
+        let src = dir.path().join("data.bin");
+        std::fs::write(&src, &payload).unwrap();
+        let (h, _) = store.import_file_sync(&src).unwrap();
+        // Read bytes 500..700 from the first chunk.
+        let r = ByteRange::new(500, 700).unwrap();
+        let bytes = store.read_range_sync(&h, &r).unwrap();
+        assert_eq!(bytes.len(), 200);
+        assert_eq!(bytes[..], payload[500..700]);
+    }
+
+    /// `read_range_sync` returns an empty vec for a range that
+    /// starts at the blob's end (zero bytes). Note: we can't
+    /// construct `ByteRange::new(5, 5)` — the constructor rejects
+    /// zero-length ranges — so we test this by reading a range
+    /// whose effective length is 0 because the blob is too small.
+    #[test]
+    fn read_range_sync_empty_range_when_blob_too_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (h, _) = store.put_bytes_sync(b"hello").unwrap(); // size=5
+        // Range (5, 10) — after clamping to blob size becomes (5, 5),
+        // which conceptually has zero length. read_range_sync handles
+        // this by clamping and returning an empty vec.
+        let r = ByteRange::new(5, 10).unwrap();
+        let bytes = store.read_range_sync(&h, &r).unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    /// `read_range_sync` returns an empty vec when `range.start >= size`.
+    #[test]
+    fn read_range_sync_start_beyond_end_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (h, _) = store.put_bytes_sync(b"hello").unwrap(); // size=5
+        let r = ByteRange::new(10, 20).unwrap();
+        let bytes = store.read_range_sync(&h, &r).unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    /// `read_range_sync` clamps a range that extends past the blob end.
+    #[test]
+    fn read_range_sync_clamps_range_past_blob_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let payload = b"0123456789".to_vec(); // 10 bytes
+        let (h, _) = store.put_bytes_sync(&payload).unwrap();
+        // Range (5, 100) extends past the blob size of 10.
+        let r = ByteRange::new(5, 100).unwrap();
+        let bytes = store.read_range_sync(&h, &r).unwrap();
+        // Clamped to (5, 10) → 5 bytes.
+        assert_eq!(bytes.len(), 5);
+        assert_eq!(bytes, b"56789");
+    }
+
+    /// `read_range_sync` error for an unknown blob.
+    #[test]
+    fn read_range_sync_error_on_unknown_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let unknown = ContentHash::from_bytes(b"unknown");
+        let r = ByteRange::new(0, 10).unwrap();
+        let err = store.read_range_sync(&unknown, &r).unwrap_err();
+        assert!(matches!(err, ChunkError::Io(_)));
+    }
+
+    // ─────────────────────── export_to_file_sync ────────────────────────
+
+    /// `export_to_file_sync` creates parent directories if they do not exist.
+    #[test]
+    fn export_to_file_sync_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (h, _) = store.put_bytes_sync(b"hello").unwrap();
+        let dest = dir.path().join("subdir").join("nested").join("out.bin");
+        let n = store.export_to_file_sync(&h, &dest).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+    }
+
+    /// `export_to_file_sync` error for a non-existent blob.
+    #[test]
+    fn export_to_file_sync_error_on_unknown_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let unknown = ContentHash::from_bytes(b"unknown");
+        let dest = dir.path().join("out.bin");
+        // `.unwrap_err()` confirms an error is returned.
+        store.export_to_file_sync(&unknown, &dest).unwrap_err();
+    }
+
+    // ─────────────────────── list_complete ────────────────────────
+
+    /// `list_complete` on an empty store returns an empty vec.
+    #[test]
+    fn list_complete_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        assert!(store.list_complete().unwrap().is_empty());
+    }
+
+    /// `list_complete` on a store with many blobs returns all of them.
+    #[test]
+    fn list_complete_returns_all_complete_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let mut hashes = Vec::new();
+        for i in 0..10u8 {
+            let payload = vec![i; 100];
+            let (h, _) = store.put_bytes_sync(&payload).unwrap();
+            hashes.push(h);
+        }
+        let listed = store.list_complete().unwrap();
+        assert_eq!(listed.len(), 10);
+        for h in &hashes {
+            assert!(listed.contains(h), "missing hash {h}");
+        }
+    }
+
+    // ─────────────────────── remove ────────────────────────
+
+    /// `remove` returns `false` for a hash that was never in the store.
+    #[test]
+    fn remove_returns_false_for_unknown_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let unknown = ContentHash::from_bytes(b"unknown");
+        assert!(!store.remove(&unknown).unwrap());
+    }
+
+    /// `remove` returns `false` for a blob that was already removed.
+    #[test]
+    fn remove_returns_false_after_first_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (h, _) = store.put_bytes_sync(b"hello").unwrap();
+        assert!(store.remove(&h).unwrap());
+        assert!(!store.remove(&h).unwrap());
+    }
+
+    // ─────────────────────── finalize_import ────────────────────────
+
+    /// `finalize_import` is idempotent — calling it twice on the same
+    /// hash does not produce an error or duplicate structure.
+    #[test]
+    fn finalize_import_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let payload = b"idempotent test".to_vec();
+        let src = dir.path().join("data.bin");
+        std::fs::write(&src, &payload).unwrap();
+        let (hash, size) = store.import_file_sync(&src).unwrap();
+        // The first import already called finalize_import. Calling it
+        // again must be a no-op.
+        store.finalize_import(&hash, size).unwrap();
+        assert!(store.has_complete(&hash));
+        let (size2, count) = store.meta(&hash).unwrap();
+        assert_eq!(size2, size);
+        assert_eq!(count, 1);
+    }
+
+    /// `finalize_import` on a never-imported blob creates the
+    /// directory structure and `complete` sentinel.
+    #[test]
+    fn finalize_import_creates_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let payload = b"finalize test".to_vec();
+        let src = dir.path().join("data.bin");
+        std::fs::write(&src, &payload).unwrap();
+        let (hash, size) = store.hash_file(&src).unwrap();
+        // Pre-condition: blob dir does not exist.
+        assert!(!store.blob_dir(&hash).exists());
+        // Manually stage a blob and then call finalize_import.
+        let blob_dir = store.blob_dir(&hash);
+        std::fs::create_dir_all(blob_dir.join("chunks")).unwrap();
+        std::fs::write(blob_dir.join("chunks").join("000000"), &payload).unwrap();
+        store.finalize_import(&hash, size).unwrap();
+        assert!(store.has_complete(&hash));
+        assert!(store.meta(&hash).is_ok());
+    }
+
+    // ─────────────────────── trait impl dispatch ────────────────────────
+    //
+    // Verify that `BlobReader` and `BlobImporter` are implemented
+    // for `BlobStore` and the trait methods produce the correct results.
+    // (The traits use `impl Trait` RPITIT return types, so they are
+    // NOT dyn-safe; these tests use concrete dispatch.)
+
+    /// `BlobReader::size` returns the correct size through trait dispatch.
+    #[tokio::test]
+    async fn blob_reader_trait_impl_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (h, _) = store.put_bytes_sync(b"dispatch-test").unwrap();
+        // Call through the trait directly (concrete dispatch).
+        assert!(BlobReader::has(&store, &h).await);
+        assert_eq!(BlobReader::size(&store, &h).await.unwrap(), 13);
+        assert_eq!(BlobReader::chunk_count(&store, &h).await.unwrap(), 1);
+        assert_eq!(
+            BlobReader::read_all(&store, &h).await.unwrap(),
+            b"dispatch-test"
+        );
+    }
+
+    /// `BlobImporter::put_bytes` through trait dispatch produces a readable blob.
+    #[tokio::test]
+    async fn blob_importer_trait_impl_put_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let hash = BlobImporter::put_bytes(&store, b"trait-impl")
+            .await
+            .unwrap();
+        assert_eq!(hash, ContentHash::from_bytes(b"trait-impl"));
+        // And it can be read back via the reader trait.
+        assert_eq!(
+            BlobReader::read_all(&store, &hash).await.unwrap(),
+            b"trait-impl"
+        );
+    }
+
+    // ─────────────────────── BlobImporter impl ────────────────────────
+
+    /// `BlobImporter::put_bytes` on the `BlobStore` produces a blob
+    /// that is readable via `BlobReader`.
+    #[tokio::test]
+    async fn blob_importer_put_bytes_produces_readable_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let payload = b"async importer payload".to_vec();
+        let hash = BlobImporter::put_bytes(&store, &payload).await.unwrap();
+        assert!(BlobReader::has(&store, &hash).await);
+        assert_eq!(BlobReader::read_all(&store, &hash).await.unwrap(), payload);
+        assert_eq!(
+            BlobReader::size(&store, &hash).await.unwrap(),
+            payload.len() as u64
+        );
+    }
+
+    // ─────────────────────── cross-chunk range read ────────────────────────
+
+    /// `read_range_sync` across the boundary between two chunks returns
+    /// the correct bytes.
+    #[test]
+    fn read_range_sync_crosses_chunk_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        // Build a blob where we know the chunk boundary.
+        let payload: Vec<u8> = (0..(16 * 1024 + 500)).map(|i| (i % 251) as u8).collect();
+        let src = dir.path().join("data.bin");
+        std::fs::write(&src, &payload).unwrap();
+        let (h, _) = store.import_file_sync(&src).unwrap();
+        // Range that spans chunk 0 (end) and chunk 1 (start).
+        let r = ByteRange::new(16 * 1024 - 100, 16 * 1024 + 100).unwrap();
+        let bytes = store.read_range_sync(&h, &r).unwrap();
+        assert_eq!(bytes.len(), 200);
+        assert_eq!(bytes[..], payload[r.start as usize..r.end as usize]);
+    }
+
+    // ─────────────────────── refresh_gauge_metrics ────────────────────────
+
+    /// `refresh_gauge_metrics` reflects the current store state in
+    /// `adnet_blob_store_size_bytes` and `adnet_blob_blobs_total`.
+    #[test]
+    fn refresh_gauge_metrics_reports_current_state() {
+        use crate::metrics::blob_metrics;
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+
+        let m = blob_metrics();
+        let size_before = m.store_size_bytes.get();
+        let count_before = m.blobs_total.get();
+
+        store.put_bytes_sync(b"alpha").unwrap();
+        store.put_bytes_sync(b"bravo-bravo").unwrap();
+        store.put_bytes_sync(b"charlie-charlie-charlie").unwrap();
+        store.refresh_gauge_metrics().unwrap();
+
+        let expected_size = 5 + 11 + 23;
+        assert_eq!(
+            m.store_size_bytes.get() - size_before,
+            expected_size as i64,
+            "size gauge should increase by exact payload bytes"
+        );
+        assert_eq!(
+            m.blobs_total.get() - count_before,
+            3,
+            "blobs_total gauge should increase by 3"
+        );
+
+        // Remove one and re-sweep: gauges should drop accordingly.
+        let list = store.list_complete().unwrap();
+        store.remove(&list[0]).unwrap();
+        store.refresh_gauge_metrics().unwrap();
+        assert_eq!(
+            m.blobs_total.get() - count_before,
+            2,
+            "blobs_total should drop to 2 after a remove"
+        );
+    }
+
+    /// `refresh_gauge_metrics` on an empty store leaves both gauges
+    /// at zero (relative to whatever they were before the sweep —
+    /// the absolute values may be > 0 if other tests already touched
+    /// the global registry, but the *delta* from an empty sweep
+    /// against an empty store must be 0).
+    #[test]
+    fn refresh_gauge_metrics_empty_store_is_noop_delta() {
+        use crate::metrics::blob_metrics;
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+
+        let m = blob_metrics();
+        let size_before = m.store_size_bytes.get();
+        let count_before = m.blobs_total.get();
+
+        store.refresh_gauge_metrics().unwrap();
+        assert_eq!(m.store_size_bytes.get(), size_before);
+        assert_eq!(m.blobs_total.get(), count_before);
     }
 }
