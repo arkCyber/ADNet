@@ -4,13 +4,21 @@
 //! different ADNet components will produce/consume identical bytes for any
 //! given blob.
 
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 
 use adnet_types::{AdnetError, ByteRange, ContentHash, RangeSpec};
 use thiserror::Error;
 
 /// 16 KiB — matches iroh-blobs group granularity.
 pub const CHUNK_SIZE: usize = 16 * 1024;
+
+/// Default buffer size for [`ChunkWriter::new_with_buffered_inner`]. Writers
+/// created with [`ChunkWriter::new`] keep the previous eager behaviour for
+/// backwards compatibility; new callers should opt in to `64 KiB` to
+/// amortise the per-chunk `write_all` syscall cost. 64 KiB is one
+/// 4×chunk-group batch, which matches the iroh-blobs transport
+/// recommendation and lines up with NTFS / ext4 direct-IO alignment.
+pub const DEFAULT_CHUNK_WRITER_BUFFER: usize = 64 * 1024;
 
 /// Errors produced by chunk-level IO.
 #[derive(Debug, Error)]
@@ -136,6 +144,14 @@ pub fn resolve_range(total_size: u64, spec: RangeSpec) -> Result<Vec<ByteRange>,
 /// at finalize time. This guarantees correctness even if `inner` mutates
 /// the bytes (e.g., a compression layer). For very large blobs, prefer
 /// [`ChunkWriter::with_inline_hash`] to stream-hash the input instead.
+///
+/// ## Write amplification
+///
+/// `ChunkWriter` issues one `inner.write_all` per 16 KiB chunk. When
+/// `inner` is unbuffered (e.g. a `File` or `TcpStream`) this means one
+/// syscall for every 16 KiB. Use [`ChunkWriter::new_buffered`] to wrap
+/// `inner` in a `BufWriter` of [`DEFAULT_CHUNK_WRITER_BUFFER`] bytes so
+/// the underlying writer only sees a `write` once every 64 KiB.
 pub struct ChunkWriter<W: Write> {
     inner: W,
     index: u32,
@@ -150,6 +166,29 @@ impl<W: Write> ChunkWriter<W> {
     pub fn new(inner: W) -> Self {
         Self {
             inner,
+            index: 0,
+            bytes_total: 0,
+            chunk_buf: Vec::with_capacity(CHUNK_SIZE),
+            hasher: blake3::Hasher::new(),
+        }
+    }
+
+    /// Wrap `inner` in a `BufWriter` of the default size so the underlying
+    /// writer is only hit once per ~64 KiB instead of once per 16 KiB
+    /// chunk. The [`finish`](Self::finish) flush guarantees that all
+    /// buffered bytes are written before the hash is returned.
+    pub fn new_buffered(inner: W) -> ChunkWriter<BufWriter<W>> {
+        Self::new_buffered_with(inner, DEFAULT_CHUNK_WRITER_BUFFER)
+    }
+
+    /// Same as [`Self::new_buffered`] but with a caller-chosen buffer size.
+    /// Use a multiple of [`CHUNK_SIZE`] to flush on chunk-group
+    /// boundaries; the default of 64 KiB (= 4 chunks) is a good balance
+    /// between latency and syscall overhead on both spinning disks and
+    /// NVMe SSDs.
+    pub fn new_buffered_with(inner: W, buf_size: usize) -> ChunkWriter<BufWriter<W>> {
+        ChunkWriter {
+            inner: BufWriter::with_capacity(buf_size, inner),
             index: 0,
             bytes_total: 0,
             chunk_buf: Vec::with_capacity(CHUNK_SIZE),
@@ -173,6 +212,20 @@ impl<W: Write> ChunkWriter<W> {
             self.hasher.update(bytes.as_slice());
             self.inner.write_all(bytes.as_slice())?;
             self.index += 1;
+        }
+        // When `inner` is a `BufWriter<W>` (i.e. the writer was created via
+        // `new_buffered` / `new_buffered_with`) this drops the buffer and
+        // its `Drop` impl flushes any pending bytes to the underlying `W`
+        // before we read the hash. For the unbuffered variant this is a
+        // no-op semantically and the hash is still computed from the
+        // bytes the caller wrote, not from anything `inner` may have
+        // transformed. Belt-and-suspenders: explicit flush so the call
+        // doesn't depend on `Drop` order in the face of a future refactor.
+        if let Err(e) = self.inner.flush() {
+            // `flush` only fails on the underlying writer; the buffered
+            // path can't lose data we haven't yet observed. Surface the
+            // error so the caller doesn't silently commit a partial blob.
+            return Err(e);
         }
         // Wrap the already-finalized 32-byte digest as hex.
         let digest = self.hasher.finalize();
@@ -302,6 +355,57 @@ mod tests {
         assert_eq!(buf, payload, "writer output mismatch");
         let hash_direct = ContentHash::from_bytes(&payload);
         assert_eq!(hash_from_writer, hash_direct, "writer hash mismatch");
+    }
+
+    /// `new_buffered` must produce the same bytes and the same hash as
+    /// the unbuffered `new`. This is the regression contract for the
+    /// 64 KiB buffer used to amortise chunk-group writes.
+    #[test]
+    fn chunk_writer_buffered_matches_unbuffered() {
+        let payload: Vec<u8> = (0..(CHUNK_SIZE * 5 + 17))
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        let mut buf_unbuffered: Vec<u8> = Vec::new();
+        let (hash_unbuffered, n_unbuffered) = {
+            let mut w = ChunkWriter::new(&mut buf_unbuffered);
+            w.write_all(&payload).unwrap();
+            w.finish().unwrap()
+        };
+
+        let mut buf_buffered: Vec<u8> = Vec::new();
+        let (hash_buffered, n_buffered) = {
+            let mut w = ChunkWriter::new_buffered(&mut buf_buffered);
+            // Feed in 17 KiB blocks so the BufWriter has to flush mid-stream.
+            for chunk in payload.chunks(17 * 1024) {
+                w.write_all(chunk).unwrap();
+            }
+            w.finish().unwrap()
+        };
+
+        assert_eq!(n_unbuffered, n_buffered);
+        assert_eq!(hash_unbuffered, hash_buffered, "buffered hash mismatch");
+        assert_eq!(buf_unbuffered, buf_buffered, "buffered bytes mismatch");
+        assert_eq!(buf_buffered, payload, "byte mismatch with original");
+    }
+
+    /// `new_buffered` with a 64 KiB buffer must still flush every byte on
+    /// `finish` even when the input is not a multiple of the buffer
+    /// size. We feed a 33 KiB payload (just over 2 chunks) and assert
+    /// the underlying sink sees exactly 33 KiB — no half-buffer lost.
+    #[test]
+    fn chunk_writer_buffered_drains_on_finish() {
+        let payload: Vec<u8> = (0..(33 * 1024)).map(|i| (i % 199) as u8).collect();
+        let mut sink: Vec<u8> = Vec::new();
+        let (hash, n) = {
+            let mut w = ChunkWriter::new_buffered(&mut sink);
+            w.write_all(&payload).unwrap();
+            w.finish().unwrap()
+        };
+        assert_eq!(n, payload.len() as u64);
+        assert_eq!(sink, payload, "sink missing tail bytes");
+        let hash_direct = ContentHash::from_bytes(&payload);
+        assert_eq!(hash, hash_direct);
     }
 
     /// The known BLAKE3 digest of `b""` (the empty string).

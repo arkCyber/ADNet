@@ -7,8 +7,9 @@
 //
 // Run: `cargo bench -p adnet-bench --bench bao_large`
 
-use adnet_blobstore::BaoTree;
+use adnet_blobstore::{BaoTree, ChunkWriter};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::io::Write;
 
 fn make_payload(size: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(size);
@@ -96,6 +97,50 @@ fn bench_hex_dance_baseline(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(bao, bench_bao_build, bench_hex_dance_baseline);
+/// Compare `ChunkWriter::new` (one 16 KiB write_all per chunk) with
+/// `ChunkWriter::new_buffered` (64 KiB BufWriter around `inner`) on a
+/// 64 MiB payload. The output is captured in a `Vec<u8>` so the
+/// measurement is dominated by the ChunkWriter logic, not by disk or
+/// network latency.
+fn bench_chunk_writer_buffered_vs_unbuffered(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bao_large/chunk_writer");
+    let size = 64 * 1024 * 1024usize;
+    let data = make_payload(size);
+
+    group.throughput(Throughput::Bytes(size as u64));
+
+    group.bench_function("unbuffered", |b| {
+        b.iter(|| {
+            let mut out: Vec<u8> = Vec::with_capacity(size);
+            {
+                let mut w = ChunkWriter::new(&mut out);
+                w.write_all(&data).unwrap();
+                let _ = w.finish().unwrap();
+            }
+            std::hint::black_box(&out);
+        });
+    });
+
+    group.bench_function("buffered_64kib", |b| {
+        b.iter(|| {
+            let mut out: Vec<u8> = Vec::with_capacity(size);
+            {
+                let mut w = ChunkWriter::new_buffered(&mut out);
+                w.write_all(&data).unwrap();
+                let _ = w.finish().unwrap();
+            }
+            std::hint::black_box(&out);
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    bao,
+    bench_bao_build,
+    bench_hex_dance_baseline,
+    bench_chunk_writer_buffered_vs_unbuffered
+);
 criterion_main!(bao);
 
