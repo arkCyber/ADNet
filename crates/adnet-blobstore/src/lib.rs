@@ -26,6 +26,7 @@ pub mod filename;
 pub mod import;
 #[cfg(feature = "iroh")]
 pub mod iroh_store;
+pub mod metrics;
 pub mod store;
 pub mod traits;
 

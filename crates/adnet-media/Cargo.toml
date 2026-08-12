@@ -1,0 +1,42 @@
+[package]
+name        = "adnet-media"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Aerospace-grade short-video media pipeline: transcode, segment, audio, integrity, DAG."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types      = { workspace = true }
+adnet-blobstore  = { workspace = true }
+tokio            = { workspace = true, features = ["sync", "time"] }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+bincode          = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+blake3           = { workspace = true }
+hex              = { workspace = true }
+sha2             = { workspace = true }
+chrono           = { workspace = true }
+async-trait      = { workspace = true }
+futures          = { workspace = true }
+parking_lot      = "0.12"
+
+[dev-dependencies]
+tempfile         = { workspace = true }
+tokio            = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tracing-subscriber = { workspace = true }
+proptest         = { workspace = true }
+
+[features]
+# DO-178C DAL-B aerospace mode. Enables the `aerospace` module
+# (certification constants) and is the activation switch for the
+# compliance test suite in `tests/aerospace_compliance.rs`. Builds
+# under this feature are pinned to `SAFETY_REVISION` so the
+# certification baseline is reproducible.
+default = []
+aerospace = []

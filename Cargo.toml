@@ -2,14 +2,19 @@
 resolver = "2"
 members = [
     "crates/adnet-types",
+    "crates/adnet-error",
+    "crates/adnet-observability",
     "crates/adnet-blobstore",
     "crates/adnet-gossip",
+    "crates/adnet-dht",
+    "crates/adnet-namespace",
     "crates/adnet-mesh",
     "crates/adnet-resilience",
     "crates/adnet-transport",
     "crates/adnet-ipc",
     "crates/adnet-relay",
     "crates/adnet-workspace",
+    "crates/adnet-gateway",
     "crates/adnet-chatstore",
     "crates/adnet-node",
     "crates/adnet-cli",
@@ -35,28 +40,34 @@ authors     = ["ADNet Contributors"]
 
 [workspace.dependencies]
 # --- Async runtime / utilities ----------------------------------------------
-tokio       = { version = "1.40", features = ["full"] }
-futures     = "0.3"
-async-trait = "0.1"
-thiserror   = "1.0"
-anyhow      = "1.0"
+tokio        = { version = "1.40", features = ["full"] }
+futures      = "0.3"
+async-trait  = "0.1"
+async-stream = "0.3"
+thiserror    = "1.0"
+anyhow       = "1.0"
+once_cell    = "1.19"
+parking_lot  = "0.12"
 
 # --- Serialization ----------------------------------------------------------
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode    = "1.3"
 hex        = "0.4"
+url        = { version = "2.5", features = ["serde"] }
 
 # --- Time / IDs / Misc -------------------------------------------------------
 chrono   = { version = "0.4", features = ["serde", "clock"] }
 uuid     = { version = "1.10", features = ["v4", "serde"] }
 tracing  = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs     = "5.0"
 
 # --- Crypto / content addressing --------------------------------------------
 blake3 = "1.5"
 sha2   = "0.10"
 rand   = "0.8"
+ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
 
 # --- Networking (HTTP fallback / QUIC) ---------------------------------------
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -75,19 +86,25 @@ proptest  = "1.4"
 # ---------------------------------------------------------------------------
 # Internal workspace member shorthands
 # ---------------------------------------------------------------------------
-adnet-types      = { path = "crates/adnet-types" }
-adnet-blobstore  = { path = "crates/adnet-blobstore" }
-adnet-gossip     = { path = "crates/adnet-gossip" }
-adnet-mesh       = { path = "crates/adnet-mesh" }
-adnet-resilience = { path = "crates/adnet-resilience" }
-adnet-transport  = { path = "crates/adnet-transport" }
-adnet-ipc        = { path = "crates/adnet-ipc" }
-adnet-relay      = { path = "crates/adnet-relay" }
-adnet-workspace  = { path = "crates/adnet-workspace" }
-adnet-node       = { path = "crates/adnet-node" }
-adnet-identity   = { path = "crates/adnet-identity" }
-adnet-token      = { path = "crates/adnet-token" }
-adnet-chatstore  = { path = "crates/adnet-chatstore" }
+adnet-types         = { path = "crates/adnet-types" }
+adnet-error         = { path = "crates/adnet-error" }
+adnet-observability = { path = "crates/adnet-observability" }
+adnet-blobstore     = { path = "crates/adnet-blobstore" }
+adnet-gossip        = { path = "crates/adnet-gossip" }
+adnet-dht           = { path = "crates/adnet-dht" }
+adnet-namespace     = { path = "crates/adnet-namespace" }
+adnet-mesh          = { path = "crates/adnet-mesh" }
+adnet-resilience    = { path = "crates/adnet-resilience" }
+adnet-transport     = { path = "crates/adnet-transport" }
+adnet-ipc           = { path = "crates/adnet-ipc" }
+adnet-relay         = { path = "crates/adnet-relay" }
+adnet-workspace     = { path = "crates/adnet-workspace" }
+adnet-gateway       = { path = "crates/adnet-gateway" }
+adnet-node          = { path = "crates/adnet-node" }
+adnet-identity      = { path = "crates/adnet-identity" }
+adnet-token         = { path = "crates/adnet-token" }
+adnet-chatstore     = { path = "crates/adnet-chatstore" }
+adnet-ipc-adapter   = { path = "crates/adnet-ipc-adapter" }
 
 # ---------------------------------------------------------------------------
 # Profile / lints applied workspace-wide

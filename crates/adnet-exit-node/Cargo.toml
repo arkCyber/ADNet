@@ -1,0 +1,32 @@
+[package]
+name        = "adnet-exit-node"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Exit-node gateway — lets a mesh member offer its Internet connectivity to the rest of the mesh (gateway mode) and lets a mesh member route all its outbound traffic through a chosen gateway (client mode). Pure routing decision logic; the actual IP packet forwarding is performed by `adnet-tun`."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types             = { workspace = true }
+adnet-mesh-coordinator  = { workspace = true }
+adnet-tun               = { workspace = true }
+adnet-mesh-firewall     = { workspace = true }
+tokio                   = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+async-trait             = { workspace = true }
+thiserror               = { workspace = true }
+serde                   = { workspace = true }
+serde_json              = { workspace = true }
+tracing                 = { workspace = true }
+parking_lot             = { version = "0.12", default-features = false }
+chrono                  = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+adnet-tun = { workspace = true }
+
+[[example]]
+name = "exit_node_demo"
+path = "examples/exit_node_demo.rs"

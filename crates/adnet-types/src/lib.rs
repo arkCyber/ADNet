@@ -27,18 +27,26 @@
 #![deny(unused_must_use)]
 
 pub mod announce;
+pub mod bulletin;
+pub mod cid;
 pub mod content;
 pub mod error;
+pub mod graphsync;
 pub mod group_chat;
 pub mod integrity;
 pub mod invariants;
+pub mod mesh;
+pub mod multihash;
 pub mod node;
+pub mod node_profile;
 pub mod peer_source;
 pub mod range;
 pub mod room;
 pub mod social_feed;
 pub mod ticket;
 pub mod topic;
+pub mod unixfs;
+pub mod virtual_ip;
 pub mod wallet_address;
 
 pub use announce::{Announcement, AnnouncementPayload, MAX_ANNOUNCED_SIZE};

@@ -10,7 +10,8 @@ description = "Disk-backed BLAKE3 chunked content store (iroh-blobs layout parit
 workspace = true
 
 [dependencies]
-adnet-types  = { workspace = true }
+adnet-types         = { workspace = true }
+adnet-observability = { workspace = true }
 tokio        = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -20,6 +21,7 @@ blake3       = { workspace = true }
 hex          = { workspace = true }
 async-trait  = { workspace = true }
 futures      = { workspace = true }
+once_cell    = { workspace = true }
 
 # iroh-backed blob store adapter. When the `iroh` feature is on,
 # callers can build an `IrohBlobStore` next to a regular `BlobStore`

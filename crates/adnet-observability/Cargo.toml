@@ -1,0 +1,60 @@
+[package]
+name        = "adnet-observability"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "ADNet observability — Counter / Gauge / Histogram metrics with a Prometheus text exporter. Layer-specific metric sets for transport, gossip, blobs, docs, chat, relay, billing, and discovery. Bridge to existing DiscoveryDiagnostics and EndpointDiagnosticsRecorder so we don't replace what already works."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace members
+#
+# `adnet-types` is intentionally **not** a dependency here:
+# `adnet-types → adnet-error → adnet-observability` would
+# form a cycle, and this crate has no functional need for
+# adnet-types symbols (verified via grep). Historical note:
+# an earlier revision did declare the dep and broke the
+# workspace's `cargo check --workspace` (see commit
+# `cyclic-deps-adnet-types` for the fix).
+
+# Async runtime / utilities
+tokio            = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+async-trait      = { workspace = true }
+
+# Serialization
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+
+# Time
+chrono           = { workspace = true }
+
+# Lazy globals + cheap locks
+once_cell        = "1"
+parking_lot      = "0.12"
+
+# HTTP /metrics server — opt-in, mirrors adnet-mesh's axum dep
+axum             = { version = "0.7", optional = true, default-features = false, features = ["http1", "tokio", "json"] }
+
+[dev-dependencies]
+# Workspace members
+# adnet-types intentionally omitted (cycle guard — see
+# [dependencies] above). Tests use only chrono + serde_json.
+
+# Serialization
+serde_json       = { workspace = true }
+
+# Tests need a fixed clock to snapshot the Prometheus output
+chrono           = { workspace = true }
+
+# Lightweight test runtime for async metric gatherers
+tokio            = { version = "1.40", features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+[features]
+default = []
+# Enables the axum-backed /metrics + /health HTTP server.
+http-server = ["dep:axum"]

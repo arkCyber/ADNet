@@ -26,3 +26,17 @@ Cargo.lock.bak
 
 # Backup / unrelated directories
 Exodus@src-backup/
+
+# Local working artifacts (root-level only) — audit rounds, planning
+# documents, status files, sqlite databases, and ad-hoc shell scripts
+# that should not be published to the public mirror.
+/AUDIT_*.md
+/PLAN_*.md
+/SAFETY_CASE.md
+/CLI_FFI_IPC_ROSTER.md
+/ADNET_VS_IPFS_GAP_ANALYSIS.md
+/feature_status_matrix.md
+/roster.sqlite
+/test-mail.sh
+/test-mail-full.sh
+/.tmp_*.txt

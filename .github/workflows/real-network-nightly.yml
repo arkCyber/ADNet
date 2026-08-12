@@ -1,0 +1,114 @@
+name: Real Network Nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: real-network-nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  acceptance:
+    name: self-hosted relay / public nodes / restricted NAT
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: real-network-nightly
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Validate required secrets
+        env:
+          INVENTORY_B64: ${{ secrets.ADNET_NETWORK_INVENTORY_B64 }}
+          SSH_KEY: ${{ secrets.ADNET_NETWORK_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.ADNET_NETWORK_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$INVENTORY_B64"
+          test -n "$SSH_KEY"
+          test -n "$KNOWN_HOSTS"
+
+      - name: Configure pinned SSH trust
+        env:
+          SSH_KEY: ${{ secrets.ADNET_NETWORK_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.ADNET_NETWORK_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          cat >> ~/.ssh/config <<'EOF'
+          Host *
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Decode protected inventory
+        env:
+          INVENTORY_B64: ${{ secrets.ADNET_NETWORK_INVENTORY_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$INVENTORY_B64" | base64 --decode > /tmp/adnet-network-inventory.json
+          python3 -m json.tool /tmp/adnet-network-inventory.json >/dev/null
+
+      - name: Build acceptance probe
+        run: cargo build --locked --release -p adnet-node --features iroh --example network_acceptance
+
+      - name: Run real-network acceptance matrix
+        run: |
+          python3 scripts/real-network-acceptance.py \
+            --inventory /tmp/adnet-network-inventory.json \
+            --binary target/release/examples/network_acceptance \
+            --output-dir artifacts/real-network
+
+      - name: Publish test report
+        if: always()
+        uses: dorny/test-reporter@v2
+        with:
+          name: Real Network Acceptance
+          path: artifacts/real-network/junit.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Upload evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-network-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/real-network/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove ephemeral credentials
+        if: always()
+        run: |
+          rm -f ~/.ssh/id_ed25519 /tmp/adnet-network-inventory.json

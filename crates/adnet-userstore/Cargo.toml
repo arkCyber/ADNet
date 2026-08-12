@@ -1,0 +1,40 @@
+[package]
+name        = "adnet-userstore"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "SQLite-backed user-profile store: per-user preferences, public-key bindings, avatar blob hash, and 12-digit <-> user_id mapping. Sits alongside adnet-chatstore (which owns conversations / messages / sequences) and adnet-roster (which owns the contact address book)."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace members --------------------------------------------------------
+adnet-types = { workspace = true }
+adnet-roster = { workspace = true }
+
+# Async runtime / utilities -----------------------------------------------
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+anyhow      = { workspace = true }
+
+# Serialization ------------------------------------------------------------
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+bincode     = { workspace = true }
+
+# Time / IDs ---------------------------------------------------------------
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+rand        = { workspace = true }
+
+# SQLite — bundled, no system dependency -----------------------------------
+rusqlite    = { version = "0.32", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt", "time"] }
+proptest = { workspace = true }

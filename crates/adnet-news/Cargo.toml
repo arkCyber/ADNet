@@ -1,0 +1,36 @@
+[package]
+name        = "adnet-news"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "ADNet news + authoritative announcement bulletin service: gossip-backed pub/sub with SQLite persistence, offline catch-up, signed corrections and retractions."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types  = { workspace = true }
+adnet-gossip = { workspace = true }
+
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+chrono      = { workspace = true }
+hex         = { workspace = true }
+blake3      = { workspace = true }
+sha2        = { workspace = true }
+uuid        = { workspace = true }
+rand        = { workspace = true }
+parking_lot = "0.12"
+
+rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+proptest = { workspace = true }

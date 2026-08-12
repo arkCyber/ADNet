@@ -124,6 +124,214 @@ async fn main() -> Result<()> {
             info!("REPL ended, exiting");
             repl_result?;
         }
+
+        // ─── Audit V6: file / pin / repo / routing / dht / swarm ───
+        // These 9 commands run offline against the local blob
+        // store topology — they don't touch the running node and
+        // exit as soon as the on-disk state is updated.
+
+        Cmd::Add {
+            path,
+            recursive,
+            wrap_in_dir,
+            pin,
+            json,
+        } => {
+            let topo = adnet_blobstore::scope::StorageTopology::open(
+                &data_dir,
+                adnet_blobstore::scope::QuotaPolicy::default_split(
+                    1024u64 * 1024 * 1024 * 1024,
+                ),
+            )?;
+            let args = adnet_cli::file_ops::AddArgs {
+                path: std::path::PathBuf::from(path),
+                recursive,
+                wrap_in_dir,
+                pin,
+                json,
+            };
+            adnet_cli::file_ops::run_add(&args, &topo)?;
+        }
+
+        Cmd::Get { cid, output, json } => {
+            let topo = adnet_blobstore::scope::StorageTopology::open(
+                &data_dir,
+                adnet_blobstore::scope::QuotaPolicy::default_split(
+                    1024u64 * 1024 * 1024 * 1024,
+                ),
+            )?;
+            let args = adnet_cli::file_ops::GetArgs {
+                cid,
+                output: output.map(std::path::PathBuf::from),
+                json,
+            };
+            adnet_cli::file_ops::run_get(&args, &topo)?;
+        }
+
+        Cmd::Cat { cid, json } => {
+            let topo = adnet_blobstore::scope::StorageTopology::open(
+                &data_dir,
+                adnet_blobstore::scope::QuotaPolicy::default_split(
+                    1024u64 * 1024 * 1024 * 1024,
+                ),
+            )?;
+            let args = adnet_cli::file_ops::CatArgs { cid, json };
+            adnet_cli::file_ops::run_cat(&args, &topo)?;
+        }
+
+        Cmd::Ls { cid, json } => {
+            let topo = adnet_blobstore::scope::StorageTopology::open(
+                &data_dir,
+                adnet_blobstore::scope::QuotaPolicy::default_split(
+                    1024u64 * 1024 * 1024 * 1024,
+                ),
+            )?;
+            let args = adnet_cli::file_ops::LsArgs { cid, json };
+            adnet_cli::file_ops::run_ls(&args, &topo)?;
+        }
+
+        Cmd::Pin { sub } => {
+            let topo = adnet_blobstore::scope::StorageTopology::open(
+                &data_dir,
+                adnet_blobstore::scope::QuotaPolicy::default_split(
+                    1024u64 * 1024 * 1024 * 1024,
+                ),
+            )?;
+            let pin_cmd = match sub {
+                adnet_cli::cli::PinCmd::Add { cid, recursive } => {
+                    adnet_cli::file_ops::PinCmd::Add {
+                        cid: cid.clone(),
+                        recursive: *recursive,
+                    }
+                }
+                adnet_cli::cli::PinCmd::Rm { cid } => {
+                    adnet_cli::file_ops::PinCmd::Rm { cid: cid.clone() }
+                }
+                adnet_cli::cli::PinCmd::Ls { cid, json } => {
+                    adnet_cli::file_ops::PinCmd::Ls {
+                        cid: cid.clone(),
+                        json: *json,
+                    }
+                }
+                adnet_cli::cli::PinCmd::Verify { cid } => {
+                    adnet_cli::file_ops::PinCmd::Verify { cid: cid.clone() }
+                }
+            };
+            adnet_cli::file_ops::run_pin(&pin_cmd, &topo, &data_dir)?;
+        }
+
+        Cmd::Repo { sub } => {
+            let topo = adnet_blobstore::scope::StorageTopology::open(
+                &data_dir,
+                adnet_blobstore::scope::QuotaPolicy::default_split(
+                    1024u64 * 1024 * 1024 * 1024,
+                ),
+            )?;
+            let repo_cmd = match sub {
+                adnet_cli::cli::RepoCmd::Stat { json } => {
+                    adnet_cli::file_ops::RepoCmd::Stat { json: *json }
+                }
+                adnet_cli::cli::RepoCmd::Ls { json } => {
+                    adnet_cli::file_ops::RepoCmd::Ls { json: *json }
+                }
+                adnet_cli::cli::RepoCmd::Gc { dry_run, json } => {
+                    adnet_cli::file_ops::RepoCmd::Gc {
+                        dry_run: *dry_run,
+                        json: *json,
+                    }
+                }
+                adnet_cli::cli::RepoCmd::Verify { json } => {
+                    adnet_cli::file_ops::RepoCmd::Verify { json: *json }
+                }
+            };
+            adnet_cli::file_ops::run_repo(&repo_cmd, &topo)?;
+        }
+
+        Cmd::Routing { sub } => {
+            let routing_cmd = match sub {
+                adnet_cli::cli::RoutingCmd::FindProvs { cid, num, json } => {
+                    adnet_cli::routing_ops::RoutingCmd::FindProvs {
+                        cid: cid.clone(),
+                        num: *num,
+                        json: *json,
+                    }
+                }
+                adnet_cli::cli::RoutingCmd::FindPeer { peer_id, json } => {
+                    adnet_cli::routing_ops::RoutingCmd::FindPeer {
+                        peer_id: peer_id.clone(),
+                        json: *json,
+                    }
+                }
+                adnet_cli::cli::RoutingCmd::Get { key, json } => {
+                    adnet_cli::routing_ops::RoutingCmd::Get {
+                        key: key.clone(),
+                        json: *json,
+                    }
+                }
+                adnet_cli::cli::RoutingCmd::Put { key, value, json } => {
+                    adnet_cli::routing_ops::RoutingCmd::Put {
+                        key: key.clone(),
+                        value: value.clone(),
+                        json: *json,
+                    }
+                }
+            };
+            adnet_cli::routing_ops::run_routing(&routing_cmd, &node).await?;
+        }
+
+        Cmd::Dht { sub } => {
+            let dht_cmd = match sub {
+                adnet_cli::cli::DhtExtraCmd::FindPeer { peer_id, json } => {
+                    adnet_cli::routing_ops::DhtExtraCmd::FindPeer {
+                        peer_id: peer_id.clone(),
+                        json: *json,
+                    }
+                }
+                adnet_cli::cli::DhtExtraCmd::Query { target, json } => {
+                    adnet_cli::routing_ops::DhtExtraCmd::Query {
+                        target: target.clone(),
+                        json: *json,
+                    }
+                }
+                adnet_cli::cli::DhtExtraCmd::Put { key, value, json } => {
+                    adnet_cli::routing_ops::DhtExtraCmd::Put {
+                        key: key.clone(),
+                        value: value.clone(),
+                        json: *json,
+                    }
+                }
+                adnet_cli::cli::DhtExtraCmd::Get { key, json } => {
+                    adnet_cli::routing_ops::DhtExtraCmd::Get {
+                        key: key.clone(),
+                        json: *json,
+                    }
+                }
+            };
+            adnet_cli::routing_ops::run_dht_extra(&dht_cmd, &node).await?;
+        }
+
+        Cmd::Swarm { sub } => {
+            let swarm_cmd = match sub {
+                adnet_cli::cli::SwarmCmd::Peers { json } => {
+                    adnet_cli::routing_ops::SwarmCmd::Peers { json: *json }
+                }
+                adnet_cli::cli::SwarmCmd::Connect { addr } => {
+                    adnet_cli::routing_ops::SwarmCmd::Connect { addr: addr.clone() }
+                }
+                adnet_cli::cli::SwarmCmd::Disconnect { peer_id } => {
+                    adnet_cli::routing_ops::SwarmCmd::Disconnect {
+                        peer_id: peer_id.clone(),
+                    }
+                }
+                adnet_cli::cli::SwarmCmd::Addrs { json } => {
+                    adnet_cli::routing_ops::SwarmCmd::Addrs { json: *json }
+                }
+                adnet_cli::cli::SwarmCmd::Filters { json } => {
+                    adnet_cli::routing_ops::SwarmCmd::Filters { json: *json }
+                }
+            };
+            adnet_cli::routing_ops::run_swarm(&swarm_cmd, &data_dir).await?;
+        }
     }
 
     Ok(())

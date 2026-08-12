@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "topology": {
+    "server_public": true,
+    "client_public_control_plane": true,
+    "client_workload_restricted_nat": true,
+    "restricted_nat_evidence": "adnet-nat namespace has outbound masquerade and no inbound port mapping"
+  },
+  "relay": {
+    "url": "https://relay.example.net",
+    "health_url": "https://relay.example.net/generate_204",
+    "ssh": {
+      "target": "adnet-relay@relay.example.net",
+      "port": 22
+    },
+    "prepare_command": "sudo -n systemctl is-active --quiet iroh-relay"
+  },
+  "nodes": {
+    "server": {
+      "target": "adnet-accept@node-a.example.net",
+      "port": 22,
+      "data_dir": "/var/lib/adnet-acceptance/server",
+      "binary_dir": "/var/lib/adnet-acceptance/bin",
+      "bind": "0.0.0.0:49190",
+      "advertise_direct": "203.0.113.10:49190"
+    },
+    "client": {
+      "target": "adnet-accept@node-b.example.net",
+      "port": 22,
+      "data_dir": "/var/lib/adnet-acceptance/client",
+      "binary_dir": "/var/lib/adnet-acceptance/bin",
+      "command_prefix": "sudo -n ip netns exec adnet-nat",
+      "topology_check_command": "sudo -n ip netns exec adnet-nat sh -c 'ip -j address show; ip -j route show; ip route show default | grep -q ^default'"
+    }
+  },
+  "fault": {
+    "duration_seconds": 20,
+    "settle_seconds": 3,
+    "recovery_grace_seconds": 8,
+    "offline_command": "sudo -n /usr/local/sbin/adnet-acceptance-offline \"$ADNET_FAULT_SECONDS\""
+  }
+}

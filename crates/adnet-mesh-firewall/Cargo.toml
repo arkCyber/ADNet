@@ -1,0 +1,27 @@
+[package]
+name        = "adnet-mesh-firewall"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Userspace packet filter for the ADNet mesh VPN — directional rules (allow/deny) on (proto, port, peer) tuples, with a simple connection-tracking layer so connections initiated by the local node are allowed back in. Modeled after rayfish's `ray firewall` so a familiar rule shape drops straight in."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types    = { workspace = true }
+adnet-observability = { workspace = true }
+tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+thiserror      = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+tracing        = { workspace = true }
+parking_lot    = { version = "0.12", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[[example]]
+name = "firewall_demo"
+path = "examples/firewall_demo.rs"

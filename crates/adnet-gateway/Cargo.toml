@@ -1,0 +1,59 @@
+[package]
+name = "adnet-gateway"
+description = "IPFS-compatible HTTP Gateway for ADNet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Core dependencies
+adnet-blobstore = { workspace = true }
+adnet-types = { workspace = true }
+adnet-observability = { workspace = true }
+adnet-namespace = { workspace = true, features = ["dht"] }
+adnet-ipc = { workspace = true }
+
+# Crypto
+ed25519-dalek = { workspace = true }
+blake3 = { workspace = true }
+rand = { workspace = true }
+
+async-trait = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
+
+# HTTP server
+hyper = { version = "1.4", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+http = "1.1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_cbor = "0.11"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+bytes = "1.8"
+parking_lot = "0.12"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio-test = "0.4"
+serde_json = { workspace = true }
+
+[features]
+default = []

@@ -1,0 +1,38 @@
+[package]
+name        = "adnet-dns-server"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Self-hostable authoritative DNS server for ADNet. Hosts a pkarr-compatible zone (TXT records) that ADNet nodes can publish IPNS entries to, and serves _adnet.<name> lookups to public resolvers."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Async runtime / signal handling
+tokio       = { workspace = true, features = ["full"] }
+futures     = { workspace = true }
+# Persistence / encoding
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+chrono      = { workspace = true }
+parking_lot = { version = "0.12", default-features = false }
+# Errors
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+# Logging
+tracing     = { workspace = true }
+tracing-subscriber = { workspace = true }
+# CLI
+clap        = { workspace = true, features = ["derive", "env"] }
+# ADNet
+adnet-namespace = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["full", "test-util"] }
+
+[[bin]]
+name = "adnet-dns-server"
+path = "src/main.rs"

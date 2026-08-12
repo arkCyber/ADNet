@@ -1,0 +1,29 @@
+[package]
+name        = "adnet-invite"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "ADNet email invitation layer — builds and parses signed pairing invitations over SMTP/IMAP."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-pairing = { workspace = true }
+adnet-mail    = { workspace = true }
+adnet-qr      = { workspace = true }
+
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+log        = "0.4"
+base64     = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+adnet-identity = { workspace = true }
+adnet-types    = { workspace = true }
+chrono         = { workspace = true }
+tokio          = { workspace = true, features = ["full"] }
+anyhow         = { workspace = true }
+hex            = "0.4"

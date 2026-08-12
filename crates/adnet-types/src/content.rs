@@ -39,8 +39,31 @@ impl ContentHash {
         Ok(Self(s.to_ascii_lowercase()))
     }
 
+    fn hex_nibble(b: u8) -> u8 {
+        match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => 0,
+        }
+    }
+
     pub fn as_hex(&self) -> &str {
         &self.0
+    }
+
+    /// Decode the hex representation into a 32-byte vector. Callers
+    /// that need a borrow should use [`Self::as_bytes_array`] which
+    /// copies into a stack buffer.
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32);
+        let bytes = self.0.as_bytes();
+        for chunk in bytes.chunks_exact(2) {
+            let hi = Self::hex_nibble(chunk[0]);
+            let lo = Self::hex_nibble(chunk[1]);
+            out.push((hi << 4) | lo);
+        }
+        out
     }
 
     /// First 8 chars — handy for filenames.

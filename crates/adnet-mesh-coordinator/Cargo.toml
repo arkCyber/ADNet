@@ -1,0 +1,31 @@
+[package]
+name        = "adnet-mesh-coordinator"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Coordinator-side admission for closed mesh networks. Mints and verifies invite codes, manages the signed roster lifecycle, and serves the live approval queue that backs `ray requests` / `ray accept` / `ray deny`. Pure-data with optional in-memory store; persistence is the caller's concern."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types    = { workspace = true }
+blake3         = { workspace = true }
+chrono         = { workspace = true }
+thiserror      = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+parking_lot    = { version = "0.12", default-features = false }
+tracing        = { workspace = true }
+uuid           = { workspace = true }
+ed25519-dalek  = { workspace = true }
+hex            = { workspace = true }
+rand           = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["full", "test-util"] }
+
+[[example]]
+name = "coordinator_demo"
+path = "examples/coordinator_demo.rs"

@@ -65,6 +65,24 @@ impl NodeId {
     pub fn short(&self) -> &str {
         &self.0[..12.min(self.0.len())]
     }
+
+    /// XOR-distance to another [`NodeId`]. Defined over the
+    /// 32-byte decoded representation (decoding failure is
+    /// treated as a self-distance so the routing table stays
+    /// total). Used by Kademlia routing tables and contact
+    /// ordering.
+    pub fn xor_distance(&self, other: &NodeId) -> Vec<u8> {
+        let a = hex::decode(&self.0).unwrap_or_default();
+        let b = hex::decode(&other.0).unwrap_or_default();
+        let len = a.len().max(b.len()).max(NODE_ID_BYTES);
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let ai = a.get(i).copied().unwrap_or(0);
+            let bi = b.get(i).copied().unwrap_or(0);
+            out.push(ai ^ bi);
+        }
+        out
+    }
 }
 
 impl std::fmt::Display for NodeId {

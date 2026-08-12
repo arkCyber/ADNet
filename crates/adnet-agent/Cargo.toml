@@ -1,0 +1,32 @@
+[package]
+name        = "adnet-agent"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "AI-agent integration seams for ADNet. Defines LLM-provider-agnostic traits (ChatModel, Tool, ToolRegistry, Agent) so the LLM/tool stack can be plugged in by the host application without ADNet itself depending on any specific provider SDK."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types     = { workspace = true }
+async-trait     = { workspace = true }
+futures         = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+tokio           = { workspace = true }
+tracing         = { workspace = true }
+chrono          = { workspace = true }
+uuid            = { workspace = true }
+parking_lot     = "0.12"
+http            = "1"
+reqwest         = { version = "0.12", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[features]
+default = []

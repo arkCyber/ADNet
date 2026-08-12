@@ -1,0 +1,42 @@
+[package]
+name        = "adnet-error"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "ADNet unified error model — Hessian-style `AdnetErrorReport` with code/kind/severity/details, automatic tracing emit, and Prometheus counter integration. Every crate should convert its internal errors into a report at the boundary."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Error / serialization
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+
+# Tracing
+tracing     = { workspace = true }
+
+# Optional dependency for backtrace-style `source_loc`
+backtrace   = { version = "0.3", optional = true }
+
+# Optional observability dep — kept behind a feature so
+# this crate stays at the bottom of the dependency graph
+# (adnet-observability can depend on adnet-error without
+# forming a cycle).
+adnet-observability = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Stable error construction in tests.
+anyhow      = { workspace = true }
+
+[features]
+default = []
+# Capture `source_loc` (file:line) of every report — useful
+# for incident triage but adds a small cost. Off by default
+# so the FFI hot path stays minimal.
+source-loc = ["dep:backtrace"]
+# Wire the `adnet_error_total` Prometheus counter through
+# `adnet-observability`. Disabled by default so the
+# dependency graph stays acyclic.
+metrics = ["dep:adnet-observability"]
