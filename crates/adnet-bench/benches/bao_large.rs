@@ -136,11 +136,63 @@ fn bench_chunk_writer_buffered_vs_unbuffered(c: &mut Criterion) {
     group.finish();
 }
 
+/// P1 lazy-mode benchmark — measure the wall-time cost of
+/// `BaoTree::parents_cached()` materialisation. The hypothesis is:
+///
+/// 1. `build_only` (no proof/verify) is the same as the P0 build bench
+///    — we measure the eager (root only) path.
+/// 2. `build_then_first_proof` adds the parent-chain build cost
+///    (~3 MiB of hash allocations for a 1 GiB blob).
+/// 3. `build_then_proof_twice` shows the second proof is essentially
+///    free because the parents are cached in `OnceCell`.
+///
+/// All three benchmarks operate on the same 64 MiB payload so the
+/// numbers are directly comparable.
+fn bench_lazy_parents(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bao_large/lazy_parents");
+    let size = 64 * 1024 * 1024usize;
+    let data = make_payload(size);
+
+    group.throughput(Throughput::Bytes(size as u64));
+
+    group.bench_function("build_only", |b| {
+        b.iter(|| {
+            // Drop the tree immediately so the OnceCell can never be
+            // materialised — root_hash() is metadata-only.
+            let tree = BaoTree::build(&data);
+            std::hint::black_box(tree.root_hash());
+            // Explicitly drop the tree so the OnceCell is never
+            // triggered by a destructor.
+            drop(tree);
+        });
+    });
+
+    group.bench_function("build_then_first_proof", |b| {
+        b.iter(|| {
+            let tree = BaoTree::build(&data);
+            let proof = tree.proof_for_range(0, tree.total_len()).unwrap();
+            std::hint::black_box(proof);
+        });
+    });
+
+    group.bench_function("build_then_proof_twice", |b| {
+        b.iter(|| {
+            let tree = BaoTree::build(&data);
+            let p1 = tree.proof_for_range(0, tree.total_len()).unwrap();
+            let p2 = tree.proof_for_range(0, tree.total_len()).unwrap();
+            std::hint::black_box((p1, p2));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     bao,
     bench_bao_build,
     bench_hex_dance_baseline,
-    bench_chunk_writer_buffered_vs_unbuffered
+    bench_chunk_writer_buffered_vs_unbuffered,
+    bench_lazy_parents
 );
 criterion_main!(bao);
 
