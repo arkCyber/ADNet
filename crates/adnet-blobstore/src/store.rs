@@ -26,6 +26,14 @@ use crate::traits::{BlobImporter, BlobReader};
 /// Sentinel file written once a blob is fully imported.
 const COMPLETE_SENTINEL: &str = "complete";
 
+/// Storage statistics for monitoring and health checks.
+#[derive(Debug, Clone)]
+pub struct StorageStats {
+    pub data_dir: PathBuf,
+    pub total_blobs: usize,
+    pub total_size_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct BlobStore {
     data_dir: PathBuf,
@@ -41,6 +49,28 @@ impl BlobStore {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// Check if the blob store is healthy (data directory is accessible).
+    /// Returns true if the data directory exists and is readable.
+    pub fn is_healthy(&self) -> bool {
+        // Check if data directory exists and is accessible
+        match fs::metadata(&self.data_dir) {
+            Ok(meta) => meta.is_dir(),
+            Err(_) => false,
+        }
+    }
+
+    /// Get storage statistics for monitoring.
+    pub fn storage_stats(&self) -> StorageStats {
+        let total_blobs = self.list_complete().unwrap_or_default().len();
+        let total_size = self.total_size().unwrap_or(0);
+        
+        StorageStats {
+            data_dir: self.data_dir.clone(),
+            total_blobs,
+            total_size_bytes: total_size,
+        }
     }
 
     /// Compute the BLAKE3 hash of a file via streaming read.
@@ -248,6 +278,17 @@ impl BlobStore {
         fs::read(path)
     }
 
+    /// Read the entire blob into a `Vec<u8>`. Returns `None` if the
+    /// blob is not yet complete on disk. Used by the gateway's DAG service.
+    pub fn get_sync(&self, hash: &ContentHash) -> Option<Vec<u8>> {
+        if !self.has_complete(hash) {
+            return None;
+        }
+        let (size, _) = self.meta(hash).ok()?;
+        let range = ByteRange::new(0, size).ok()?;
+        self.read_range_sync(hash, &range).ok()
+    }
+
     /// Read a specific byte range from a fully-imported blob, returning the
     /// bytes concatenated.
     pub fn read_range_sync(
@@ -379,6 +420,105 @@ impl BlobStore {
         fs::remove_dir_all(&dir)?;
         crate::metrics::blob_metrics().removes.inc();
         Ok(true)
+    }
+
+    /// Garbage-collect every blob that is **not** in `pins`. Returns
+    /// the hashes that were deleted, in lexicographic order so the
+    /// result is deterministic for tests.
+    ///
+    /// This is the primitive that wires `PinSet` to actual on-disk
+    /// pruning — see [`crate::pin_set`] for the model.
+    ///
+    /// Behaviour:
+    /// * **Incomplete** blobs (no `complete` sentinel) are skipped,
+    ///   matching `remove`'s safety check.
+    /// * **Errors** during a single `remove` are **not** fatal — the
+    ///   offending hash is omitted from the result and the loop
+    ///   continues. This avoids a half-deleted store after a
+    ///   transient filesystem error.
+    /// * A `tracing::warn!` is emitted for every failed deletion so
+    ///   operators can correlate the GC result against their logs.
+    pub fn gc_orphans(&self, pins: &crate::pin_set::PinSet) -> std::io::Result<Vec<ContentHash>> {
+        let all_hex: Vec<String> = self
+            .list_complete()?
+            .iter()
+            .map(|h| h.as_hex().to_string())
+            .collect();
+        let mut removed = Vec::new();
+        for orphan_hex in pins.orphans(&all_hex) {
+            // Re-parse so we use the canonical ContentHash for `remove`.
+            let Ok(h) = ContentHash::from_hex(orphan_hex) else {
+                tracing::warn!(orphan_hex, "gc_orphans: invalid hex in pin set, skipping");
+                continue;
+            };
+            match self.remove(&h) {
+                Ok(true) => removed.push(h),
+                Ok(false) => {} // already gone
+                Err(e) => {
+                    tracing::warn!(hash = %h, error = %e, "gc_orphans: failed to remove orphan");
+                }
+            }
+        }
+        // Deterministic output for tests + logs.
+        removed.sort_by(|a, b| a.as_hex().cmp(b.as_hex()));
+        Ok(removed)
+    }
+
+    /// Like [`gc_orphans`] but the caller passes the pinned set
+    /// directly as an iterable of hex CIDs. Useful when the
+    /// [`crate::pin_set::PinSet`] is loaded elsewhere (e.g. the CLI's
+    /// `repo gc --prune-unpinned` path).
+    pub fn gc_unpinned<I, S>(&self, pinned: I) -> std::io::Result<Vec<ContentHash>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let pin_set: std::collections::HashSet<String> =
+            pinned.into_iter().map(|s| s.as_ref().to_string()).collect();
+        let all = self.list_complete()?;
+        let mut removed = Vec::new();
+        for h in all {
+            // Compare against the hex form to avoid needing the
+            // caller to coerce to `String` — the explicit
+            // `pin_set.contains::<String>(&h_hex)` keeps the type
+            // checker happy without losing the borrow API.
+            let h_hex = h.as_hex();
+            // `HashSet::contains` can't infer the borrow target
+            // when handed a `&str` (it might want `String`,
+            // `&str`, or `&String`), so we do an explicit
+            // string comparison against the pre-built set.
+            let keep = pin_set.iter().any(|p| p == h_hex);
+            if !keep {
+                match self.remove(&h) {
+                    Ok(true) => removed.push(h),
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(hash = %h, error = %e, "gc_unpinned: failed to remove");
+                    }
+                }
+            }
+        }
+        removed.sort_by(|a, b| a.as_hex().cmp(b.as_hex()));
+        Ok(removed)
+    }
+
+    /// Drop **every** blob from the store. Used by `adbnet repo gc
+    /// --prune-all` which is the operator's "reset" button. Returns
+    /// the hashes that were deleted, in deterministic order.
+    pub fn gc_all(&self) -> std::io::Result<Vec<ContentHash>> {
+        let all = self.list_complete()?;
+        let mut removed = Vec::new();
+        for h in all {
+            match self.remove(&h) {
+                Ok(true) => removed.push(h),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(hash = %h, error = %e, "gc_all: failed to remove");
+                }
+            }
+        }
+        removed.sort_by(|a, b| a.as_hex().cmp(b.as_hex()));
+        Ok(removed)
     }
 
     /// `true` when the store contains the given blob and the
@@ -1314,5 +1454,121 @@ mod tests {
         store.refresh_gauge_metrics().unwrap();
         assert_eq!(m.store_size_bytes.get(), size_before);
         assert_eq!(m.blobs_total.get(), count_before);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    //  GC integration tests — pin_set / gc_orphans / gc_unpinned / gc_all
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Two blobs in the store, one pinned → GC drops the other.
+    #[test]
+    fn gc_orphans_removes_only_unpinned_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (kept, _) = store.put_bytes_sync(b"keep me").unwrap();
+        let (gone, _) = store.put_bytes_sync(b"drop me").unwrap();
+        assert_eq!(store.list_complete().unwrap().len(), 2);
+
+        let mut pins = crate::pin_set::PinSet::new();
+        assert!(pins.add(&kept, false, std::collections::BTreeSet::new(), 1));
+
+        let removed = store.gc_orphans(&pins).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0], gone);
+        assert!(store.has_complete(&kept));
+        assert!(!store.has_complete(&gone));
+    }
+
+    /// No pins → everything is an orphan and gets dropped.
+    #[test]
+    fn gc_orphans_with_no_pins_drops_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        store.put_bytes_sync(b"a").unwrap();
+        store.put_bytes_sync(b"b").unwrap();
+        store.put_bytes_sync(b"c").unwrap();
+        assert_eq!(store.list_complete().unwrap().len(), 3);
+
+        let pins = crate::pin_set::PinSet::new();
+        let removed = store.gc_orphans(&pins).unwrap();
+        assert_eq!(removed.len(), 3);
+        assert!(store.list_complete().unwrap().is_empty());
+    }
+
+    /// All blobs pinned → GC is a no-op.
+    #[test]
+    fn gc_orphans_keeps_all_when_every_blob_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (a, _) = store.put_bytes_sync(b"a").unwrap();
+        let (b, _) = store.put_bytes_sync(b"b").unwrap();
+        let mut pins = crate::pin_set::PinSet::new();
+        pins.add(&a, false, std::collections::BTreeSet::new(), 1);
+        pins.add(&b, false, std::collections::BTreeSet::new(), 1);
+        assert!(store.gc_orphans(&pins).unwrap().is_empty());
+        assert_eq!(store.list_complete().unwrap().len(), 2);
+    }
+
+    /// gc_unpinned takes the pinned hex set as an iterable — used by
+    /// the CLI's `repo gc --prune-unpinned` path which already has
+    /// a hex list at hand.
+    #[test]
+    fn gc_unpinned_uses_supplied_hex_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (kept, _) = store.put_bytes_sync(b"kept").unwrap();
+        store.put_bytes_sync(b"dropped").unwrap();
+        let removed = store.gc_unpinned([kept.as_hex().to_string()]).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(store.has_complete(&kept));
+    }
+
+    /// gc_all is the operator's "nuke the repo" button. It returns
+    /// every previously-present hash.
+    #[test]
+    fn gc_all_returns_every_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        store.put_bytes_sync(b"a").unwrap();
+        store.put_bytes_sync(b"b").unwrap();
+        let removed = store.gc_all().unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(store.list_complete().unwrap().is_empty());
+    }
+
+    /// GC pass is idempotent — running it twice doesn't double-delete
+    /// or panic.
+    #[test]
+    fn gc_orphans_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        store.put_bytes_sync(b"a").unwrap();
+        let pins = crate::pin_set::PinSet::new();
+        assert_eq!(store.gc_orphans(&pins).unwrap().len(), 1);
+        // Second pass: nothing to remove.
+        assert!(store.gc_orphans(&pins).unwrap().is_empty());
+    }
+
+    /// Recursive pin + chunk-only pin survives GC together — this is
+    /// the scenario from `PinSet::sweep_orphan_chunks` mirrored on
+    /// the on-disk side.
+    #[test]
+    fn gc_orphans_preserves_implicit_chunk_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path()).unwrap();
+        let (chunk, _) = store.put_bytes_sync(b"chunk-bytes").unwrap();
+        let (root, _) = store.put_bytes_sync(b"root-bytes").unwrap();
+
+        let mut pins = crate::pin_set::PinSet::new();
+        pins.add_chunk(&chunk, 1);
+        let mut desc = std::collections::BTreeSet::new();
+        desc.insert(chunk.as_hex().to_string());
+        pins.add(&root, true, desc, 1);
+
+        // Neither should be considered an orphan.
+        let removed = store.gc_orphans(&pins).unwrap();
+        assert!(removed.is_empty(), "both pins must keep their blobs alive");
+        assert!(store.has_complete(&chunk));
+        assert!(store.has_complete(&root));
     }
 }

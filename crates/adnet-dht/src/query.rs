@@ -1,6 +1,6 @@
 //! Kademlia-style DHT queries for finding providers and resolving names.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,42 @@ const ALPHA: usize = 3;
 /// Number of closest peers to return in FIND_NODE.
 const CLOSEST_PEERS: usize = KBUCKET_SIZE;
 
+/// Default query timeout (30 seconds).
+pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default per-request timeout (5 seconds).
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum number of query iterations before giving up.
+const MAX_ITERATIONS: usize = 20;
+
+/// Query configuration options.
+#[derive(Debug, Clone)]
+pub struct QueryConfig {
+    /// Maximum time for a complete query to complete.
+    pub query_timeout: Duration,
+    /// Maximum time to wait for a single peer response.
+    pub request_timeout: Duration,
+    /// Maximum number of parallel requests (α).
+    pub parallelism: usize,
+    /// Maximum iterations in iterative lookup.
+    pub max_iterations: usize,
+    /// Whether to continue on individual peer failures.
+    pub continue_on_error: bool,
+}
+
+impl Default for QueryConfig {
+    fn default() -> Self {
+        Self {
+            query_timeout: DEFAULT_QUERY_TIMEOUT,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            parallelism: ALPHA,
+            max_iterations: MAX_ITERATIONS,
+            continue_on_error: true,
+        }
+    }
+}
+
 /// Query state for tracking in-flight queries.
 struct QueryState {
     started_at: Instant,
@@ -24,6 +60,7 @@ struct QueryState {
     responses_received: usize,
     closest_seen: Vec<Contact>,
     providers: Vec<ProviderRecord>,
+    timeout_at: Instant,
 }
 
 /// Result of a DHT query.
@@ -33,6 +70,15 @@ pub struct QueryResult {
     pub providers: Vec<ProviderRecord>,
     pub query_id: String,
     pub duration_ms: u64,
+    pub timed_out: bool,
+}
+
+/// Internal result of iterative query.
+struct IterativeQueryResult {
+    results: Vec<Contact>,
+    query_id: String,
+    duration_ms: u64,
+    iterations: usize,
 }
 
 /// DHT query engine implementing Kademlia-style lookups.
@@ -44,6 +90,8 @@ pub struct DhtQuery {
     sender: Arc<dyn DhtMessageSender>,
     /// Pending queries.
     pending: HashMap<String, QueryState>,
+    /// Query configuration.
+    config: QueryConfig,
 }
 
 impl std::fmt::Debug for DhtQuery {
@@ -55,12 +103,23 @@ impl std::fmt::Debug for DhtQuery {
 }
 
 impl DhtQuery {
-    /// Create a new DHT query engine.
+    /// Create a new DHT query engine with default config.
     pub fn new(
         local_id: NodeId,
         routing_table: Arc<RwLock<RoutingTable>>,
         store: SharedDhtStore,
         sender: Arc<dyn DhtMessageSender>,
+    ) -> Self {
+        Self::with_config(local_id, routing_table, store, sender, QueryConfig::default())
+    }
+
+    /// Create a new DHT query engine with custom config.
+    pub fn with_config(
+        local_id: NodeId,
+        routing_table: Arc<RwLock<RoutingTable>>,
+        store: SharedDhtStore,
+        sender: Arc<dyn DhtMessageSender>,
+        config: QueryConfig,
     ) -> Self {
         Self {
             local_id,
@@ -68,7 +127,18 @@ impl DhtQuery {
             store,
             sender,
             pending: HashMap::new(),
+            config,
         }
+    }
+
+    /// Get the current query configuration.
+    pub fn config(&self) -> &QueryConfig {
+        &self.config
+    }
+
+    /// Update query configuration.
+    pub fn set_config(&mut self, config: QueryConfig) {
+        self.config = config;
     }
 
     /// Generate a unique query ID.
@@ -81,29 +151,108 @@ impl DhtQuery {
         format!("q_{:x}", now)
     }
 
+    /// Check if a query has exceeded its global timeout.
+    fn is_timed_out(&self, start: Instant) -> bool {
+        start.elapsed() >= self.config.query_timeout
+    }
+
+    /// Query a batch of peers with per-request timeout.
+    async fn query_batch_with_timeout(
+        &self,
+        peers: &[Contact],
+        key: &DhtKey,
+        query_id: &str,
+        _query_start: Instant,
+    ) -> Vec<(NodeId, Option<Vec<Contact>>)> {
+        let sender = self.sender.clone();
+        let k = key.clone();
+        let qid = query_id.to_string();
+        let request_timeout = self.config.request_timeout;
+
+        let futures: Vec<_> = peers.iter().map(|peer| {
+            let sender = sender.clone();
+            let k = k.clone();
+            let qid = qid.clone();
+            async move {
+                let peer_id = peer.id.clone();
+                let result = tokio::time::timeout(
+                    request_timeout,
+                    sender.send_find_node(peer, &k, &qid),
+                ).await;
+
+                let contacts = match result {
+                    Ok(Ok(DhtWireMessage::Nodes(NodesPayload { nodes, .. }))) => {
+                        Some(nodes.into_iter().map(|nc| {
+                            Contact::new(nc.id, parse_addr(&nc.addrs))
+                        }).collect())
+                    }
+                    Ok(Ok(DhtWireMessage::Providers(ProvidersPayload { providers, .. }))) => {
+                        Some(providers.into_iter().filter_map(|pw| {
+                            pw.addrs.first().map(|addr| {
+                                Contact::new(pw.provider_id, addr.parse().unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()))
+                            })
+                        }).collect())
+                    }
+                    _ => None,
+                };
+
+                (peer_id, contacts)
+            }
+        }).collect();
+
+        futures::future::join_all(futures).await
+    }
+
     /// Start a FIND_NODE query to find peers closest to a key.
     pub async fn find_node(&mut self, key: &DhtKey) -> QueryResult {
-        let query_id = Self::new_query_id();
         let start = Instant::now();
+        let query_id = Self::new_query_id();
+        let target_id = node_id_from_key(key);
+
+        // Check timeout before starting
+        if self.is_timed_out(start) {
+            return QueryResult {
+                peers: Vec::new(),
+                providers: Vec::new(),
+                query_id,
+                duration_ms: start.elapsed().as_millis() as u64,
+                timed_out: true,
+            };
+        }
 
         // Get initial candidates from routing table
-        let target_id = node_id_from_key(key);
         let mut candidates: Vec<Contact> = {
             let rt = self.routing_table.read().unwrap();
             rt.closest(&target_id, CLOSEST_PEERS)
         };
 
-        let mut queried = std::collections::HashSet::new();
+        let mut queried = HashSet::new();
         queried.insert(self.local_id.clone());
 
         // Track responses
         let mut all_closest: Vec<Contact> = Vec::new();
+        let mut iterations = 0;
+        let mut timed_out = false;
 
-        // Iterative lookup
-        while !candidates.is_empty() {
-            // Take up to ALPHA candidates
+        // Iterative lookup with timeout
+        while !candidates.is_empty() && iterations < self.config.max_iterations {
+            // Check global timeout
+            if self.is_timed_out(start) {
+                tracing::debug!(
+                    query_id = %query_id,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    iterations,
+                    "FIND_NODE query timed out"
+                );
+                timed_out = true;
+                break;
+            }
+
+            iterations += 1;
+
+            // Take up to parallelism candidates
             let batch: Vec<_> = candidates
-                .drain(..std::cmp::min(ALPHA, candidates.len()))
+                .drain(..std::cmp::min(self.config.parallelism, candidates.len()))
                 .filter(|c| !queried.contains(&c.id))
                 .collect();
 
@@ -111,32 +260,20 @@ impl DhtQuery {
                 break;
             }
 
-            // Send parallel queries
-            let sender = self.sender.clone();
-            let futures: Vec<_> = batch.iter().map(|peer| {
-                let sender = sender.clone();
-                let qid = query_id.clone();
-                let k = key.clone();
-                async move {
-                    match sender.send_find_node(peer, &k, &qid).await {
-                        Ok(DhtWireMessage::Nodes(NodesPayload { nodes, .. })) => {
-                            // Convert NodeContact to NodeInfo
-                            let result: Vec<NodeInfo> = nodes.into_iter().map(|nc| NodeInfo {
-                                id: nc.id,
-                                addrs: nc.addrs,
-                            }).collect();
-                            Some(result)
-                        }
-                        _ => None,
-                    }
-                }
-            }).collect();
+            // Send parallel queries with per-request timeout
+            let results = self.query_batch_with_timeout(
+                &batch,
+                key,
+                &query_id,
+                start,
+            ).await;
 
             // Collect responses
-            for future in futures {
-                if let Some(nodes) = future.await {
-                    for node in nodes {
-                        let contact = Contact::new(node.id.clone(), parse_addr(&node.addrs));
+            for (peer_id, result) in results {
+                queried.insert(peer_id);
+
+                if let Some(contacts) = result {
+                    for contact in contacts {
                         if !queried.contains(&contact.id) {
                             candidates.push(contact.clone());
                             all_closest.push(contact);
@@ -172,13 +309,25 @@ impl DhtQuery {
             providers: Vec::new(),
             query_id,
             duration_ms: start.elapsed().as_millis() as u64,
+            timed_out,
         }
     }
 
     /// Start a GET_PROVIDERS query to find who has content.
     pub async fn get_providers(&mut self, key: &DhtKey) -> QueryResult {
-        let query_id = Self::new_query_id();
         let start = Instant::now();
+        let query_id = Self::new_query_id();
+
+        // Check global timeout before starting
+        if self.is_timed_out(start) {
+            return QueryResult {
+                peers: Vec::new(),
+                providers: self.store.get_providers(key),
+                query_id,
+                duration_ms: start.elapsed().as_millis() as u64,
+                timed_out: true,
+            };
+        }
 
         // Check local store first
         let mut all_providers: Vec<ProviderRecord> = self.store.get_providers(key);
@@ -190,13 +339,34 @@ impl DhtQuery {
             rt.closest(&target_id, CLOSEST_PEERS)
         };
 
-        let mut queried = std::collections::HashSet::new();
+        let mut queried = HashSet::new();
         queried.insert(self.local_id.clone());
 
-        // Iterative lookup
-        while !candidates.is_empty() && all_providers.len() < 20 {
+        let mut iterations = 0;
+        let mut timed_out = false;
+
+        // Iterative lookup with timeout
+        while !candidates.is_empty()
+            && all_providers.len() < 20
+            && iterations < self.config.max_iterations
+        {
+            // Check global timeout
+            if self.is_timed_out(start) {
+                tracing::debug!(
+                    query_id = %query_id,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    iterations,
+                    "GET_PROVIDERS query timed out"
+                );
+                timed_out = true;
+                break;
+            }
+
+            iterations += 1;
+
+            // Take up to parallelism candidates
             let batch: Vec<_> = candidates
-                .drain(..std::cmp::min(ALPHA, candidates.len()))
+                .drain(..std::cmp::min(self.config.parallelism, candidates.len()))
                 .filter(|c| !queried.contains(&c.id))
                 .collect();
 
@@ -204,34 +374,19 @@ impl DhtQuery {
                 break;
             }
 
-            // Send parallel queries
-            let futures: Vec<_> = batch.iter().map(|peer| {
-                let sender = &self.sender;
-                let qid = query_id.clone();
-                let k = key.clone();
-                let k_bytes = k.as_bytes().to_vec();
-                async move {
-                    match sender.send_get_providers(peer, &k, &qid).await {
-                        Ok(DhtWireMessage::Providers(ProvidersPayload { providers, .. })) => {
-                            // Convert ProviderRecordWire to ProviderRecord
-                            let result: Vec<ProviderRecord> = providers.into_iter().filter_map(|pw| {
-                                pw.addrs.first().map(|addr| {
-                                    ProviderRecord::new(
-                                        DhtKey::from_bytes(k_bytes.clone()),
-                                        pw.provider_id,
-                                        addr.clone(),
-                                    )
-                                })
-                            }).collect();
-                            Some(result)
-                        }
-                        _ => None,
-                    }
-                }
-            }).collect();
+            // Send parallel queries with per-request timeout
+            let results = self.query_providers_batch_with_timeout(
+                &batch,
+                key,
+                &query_id,
+                start,
+            ).await;
 
-            for future in futures {
-                if let Some(providers) = future.await {
+            // Collect responses
+            for (peer_id, result) in results {
+                queried.insert(peer_id);
+
+                if let Some(providers) = result {
                     all_providers.extend(providers);
                 }
             }
@@ -242,7 +397,7 @@ impl DhtQuery {
         }
 
         // Deduplicate providers
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         all_providers.retain(|p| seen.insert(p.provider_id.clone()));
 
         QueryResult {
@@ -250,7 +405,56 @@ impl DhtQuery {
             providers: all_providers,
             query_id,
             duration_ms: start.elapsed().as_millis() as u64,
+            timed_out,
         }
+    }
+
+    /// Query providers batch with per-request timeout.
+    async fn query_providers_batch_with_timeout(
+        &self,
+        peers: &[Contact],
+        key: &DhtKey,
+        query_id: &str,
+        _query_start: Instant,
+    ) -> Vec<(NodeId, Option<Vec<ProviderRecord>>)> {
+        let sender = self.sender.clone();
+        let k = key.clone();
+        let k_bytes = k.as_bytes().to_vec();
+        let qid = query_id.to_string();
+        let request_timeout = self.config.request_timeout;
+
+        let futures: Vec<_> = peers.iter().map(|peer| {
+            let sender = sender.clone();
+            let k = k.clone();
+            let k_bytes = k_bytes.clone();
+            let qid = qid.clone();
+            async move {
+                let peer_id = peer.id.clone();
+                let result = tokio::time::timeout(
+                    request_timeout,
+                    sender.send_get_providers(peer, &k, &qid),
+                ).await;
+
+                let providers = match result {
+                    Ok(Ok(DhtWireMessage::Providers(ProvidersPayload { providers, .. }))) => {
+                        Some(providers.into_iter().filter_map(|pw| {
+                            pw.addrs.first().map(|addr| {
+                                ProviderRecord::new(
+                                    DhtKey::from_bytes(k_bytes.clone()),
+                                    pw.provider_id,
+                                    addr.clone(),
+                                )
+                            })
+                        }).collect())
+                    }
+                    _ => None,
+                };
+
+                (peer_id, providers)
+            }
+        }).collect();
+
+        futures::future::join_all(futures).await
     }
 
     /// Announce that we provide content for a key.
@@ -387,7 +591,9 @@ pub enum QueryError {
 
 // Helper functions
 
-fn node_id_from_key(key: &DhtKey) -> NodeId {
+/// Convert a DhtKey to a NodeId for routing purposes.
+/// Uses the key bytes to derive a consistent node ID.
+pub fn node_id_from_key(key: &DhtKey) -> NodeId {
     // Use the key bytes as node ID (for routing)
     // In practice, use first 32 bytes or hash of key
     let bytes: Vec<u8> = key.as_bytes().iter().copied().take(32).chain(std::iter::repeat(0)).take(32).collect();
@@ -395,6 +601,31 @@ fn node_id_from_key(key: &DhtKey) -> NodeId {
     for (i, &b) in bytes.iter().enumerate() {
         arr[i] = b;
     }
+    NodeId::from_bytes(&arr).unwrap_or_else(|_| NodeId::random())
+}
+
+/// Convert a hex string or other string key to a NodeId for routing.
+/// Falls back to deriving a NodeId from the string bytes.
+pub fn node_id_from_key_str(key: &str) -> NodeId {
+    // First try to parse as a valid NodeId
+    if let Ok(node_id) = key.parse::<NodeId>() {
+        return node_id;
+    }
+    
+    // Try hex string (strip '0x' prefix if present)
+    let hex_str = key.trim_start_matches("0x");
+    if hex_str.len() == 64 {
+        if let Ok(bytes) = hex::decode(hex_str) {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes[..32]);
+            return NodeId::from_bytes(&arr).unwrap_or_else(|_| NodeId::random());
+        }
+    }
+    
+    // Fall back to hashing the string to get a deterministic NodeId
+    let hash = blake3::hash(key.as_bytes());
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(hash.as_bytes());
     NodeId::from_bytes(&arr).unwrap_or_else(|_| NodeId::random())
 }
 
@@ -442,5 +673,42 @@ mod tests {
         // Query should find it
         let providers = store.get_providers(&key);
         assert_eq!(providers.len(), 1);
+    }
+
+    #[test]
+    fn test_query_config_defaults() {
+        let config = QueryConfig::default();
+        assert_eq!(config.query_timeout, DEFAULT_QUERY_TIMEOUT);
+        assert_eq!(config.request_timeout, DEFAULT_REQUEST_TIMEOUT);
+        assert_eq!(config.parallelism, ALPHA);
+        assert!(config.continue_on_error);
+    }
+
+    #[test]
+    fn test_query_config_custom() {
+        let config = QueryConfig {
+            query_timeout: Duration::from_secs(60),
+            request_timeout: Duration::from_secs(10),
+            parallelism: 5,
+            max_iterations: 30,
+            continue_on_error: false,
+        };
+        assert_eq!(config.query_timeout, Duration::from_secs(60));
+        assert_eq!(config.request_timeout, Duration::from_secs(10));
+        assert_eq!(config.parallelism, 5);
+        assert_eq!(config.max_iterations, 30);
+        assert!(!config.continue_on_error);
+    }
+
+    #[tokio::test]
+    async fn test_query_result_timed_out_flag() {
+        let result = QueryResult {
+            peers: Vec::new(),
+            providers: Vec::new(),
+            query_id: "test".to_string(),
+            duration_ms: 100,
+            timed_out: true,
+        };
+        assert!(result.timed_out);
     }
 }

@@ -18,3 +18,11 @@ pub mod server;
 
 pub use client::{MeshFetchResult, fetch_from_mesh};
 pub use server::{MeshServer, MeshServerHandle};
+
+/// Stub configuration for the mesh server.
+/// Controls bind address and other mesh-level settings.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MeshConfig {
+    /// Bind address for the mesh HTTP server.
+    pub bind_addr: Option<String>,
+}

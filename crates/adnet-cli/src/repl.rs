@@ -202,6 +202,8 @@ pub async fn run(data_dir: PathBuf, node: Node) -> Result<()> {
                     timestamp: chrono::Utc::now(),
                     signer: None,
                     signature: None,
+                    message_id: None,
+                    ttl_secs: None,
                 };
                 match node.announce(&room, &ann).await {
                     Ok(()) => println!("echoed into {room}"),

@@ -1,0 +1,58 @@
+[package]
+name = "adnet-fuzz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Fuzzing infrastructure for ADNet"
+publish = false
+
+[dependencies]
+# Workspace dependencies
+adnet-types = { workspace = true }
+adnet-dht = { workspace = true }
+adnet-gossip = { workspace = true }
+adnet-blobstore = { workspace = true }
+
+# Fuzzing dependencies
+libfuzzer-sys = "0.4"
+serde_json = { workspace = true }
+serde_cbor = "0.11"
+rmp-serde = "1.0"
+postcard = { workspace = true }
+protobuf = "3.0"
+
+# Serialization for fuzzing
+bincode = { workspace = true }
+
+# For parse_node_id fuzzing - ed25519 key operations
+ed25519-dalek = "2.0"
+
+[dev-dependencies]
+# Needed for `examples/fuzz_basic.rs` — round-tripping an Announcement
+# through postcard + JSON to exercise the same assertions as
+# `fuzz_targets/parse_announcement.rs` without invoking the fuzz
+# entrypoint. `postcard` here uses the `alloc` feature so we can call
+# `to_allocvec`; `chrono` lets us stamp a fresh timestamp.
+chrono   = { workspace = true }
+postcard = { workspace = true, features = ["alloc"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# `adnet-fuzz` is a libfuzzer entry-point (`#![no_main]`); `cargo test`
+# cannot link it as a unit-test binary. We:
+#   1. Move the real entrypoint into `src/fuzz_main.rs` so the auto
+#      `src/lib.rs` discovery does not pick it up.
+#   2. Provide a thin `src/lib.rs` that re-exports the symbols the
+#      fuzz targets need (so the lib check / workspace still works).
+#   3. Disable the default lib's tests so cargo test --workspace
+#      does not try to link the no-main entrypoint.
+[lib]
+name = "adnet_fuzz_support"
+path = "src/support.rs"
+test = false
+doctest = false

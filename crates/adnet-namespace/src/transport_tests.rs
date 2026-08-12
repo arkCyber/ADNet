@@ -173,3 +173,42 @@ fn encoded_packet_rejects_name_mismatch() {
     let res = PkarrTransport::decode_packet("bob", &bytes);
     assert!(res.is_err());
 }
+
+/// Test DHT transport health reporting with local backend.
+#[tokio::test]
+#[cfg(feature = "dht")]
+async fn dht_transport_local_health() {
+    use crate::transport::dht::DhtIpnTransport;
+
+    let store = adnet_dht::store::new_in_memory_store();
+    let transport = DhtIpnTransport::local(store);
+
+    // Local backend is always healthy (even with no values stored)
+    let h = transport.health().await.unwrap();
+    assert!(h == TransportHealth::Healthy || h == TransportHealth::Degraded);
+}
+
+/// Test that DHT transport health reflects backend state.
+#[tokio::test]
+#[cfg(feature = "dht")]
+async fn dht_transport_local_health_with_values() {
+    use crate::transport::dht::DhtIpnTransport;
+
+    let store = adnet_dht::store::new_in_memory_store();
+    let transport = DhtIpnTransport::local(store);
+
+    // Initially degraded (no peers, just values)
+    let h1 = transport.health().await.unwrap();
+    assert_eq!(h1, TransportHealth::Degraded);
+
+    // Add a record
+    let key = Ed25519SecretKey::generate();
+    let name = key.ipns_name();
+    let mut record = IpnRecord::with_name_value(name.clone(), "/ipfs/QmHealth".to_string());
+    record.sign(&key).unwrap();
+    transport.publish(&record).await.expect("publish to DHT");
+
+    // Still degraded (no peers, but has values)
+    let h2 = transport.health().await.unwrap();
+    assert_eq!(h2, TransportHealth::Degraded);
+}

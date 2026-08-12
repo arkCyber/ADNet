@@ -13,6 +13,7 @@ workspace = true
 # --- Workspace members ----------------------------------------------------
 adnet-types    = { workspace = true }
 adnet-identity = { workspace = true }
+adnet-userstore = { workspace = true }
 
 # --- Async runtime / utilities -------------------------------------------
 tokio        = { workspace = true }
@@ -24,6 +25,7 @@ tracing      = { workspace = true }
 anyhow       = { workspace = true }
 clap         = { workspace = true }
 dirs         = { workspace = true }
+parking_lot  = { workspace = true }
 
 # --- Serialization --------------------------------------------------------
 serde        = { workspace = true }

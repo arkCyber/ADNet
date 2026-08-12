@@ -455,6 +455,16 @@ pub trait NamespaceWrite: NamespaceRead {
         &self,
         from: &PathSegments,
         to: &PathSegments,
+        overwrite: bool,
+        audit: &AuditContext,
+        clock: &dyn Clock,
+    ) -> Result<(), NamespaceError>;
+
+    fn copy(
+        &self,
+        from: &PathSegments,
+        to: &PathSegments,
+        overwrite: bool,
         audit: &AuditContext,
         clock: &dyn Clock,
     ) -> Result<(), NamespaceError>;
@@ -985,6 +995,7 @@ impl NamespaceWrite for Nas {
         &self,
         from: &PathSegments,
         to: &PathSegments,
+        overwrite: bool,
         audit: &AuditContext,
         clock: &dyn Clock,
     ) -> Result<(), NamespaceError> {
@@ -995,11 +1006,16 @@ impl NamespaceWrite for Nas {
         // can't undo, so we **double-check** the destination
         // existence before removing `from`.
         let next_res = self.mutate_with(|m| -> Result<(), NamespaceError> {
-            // 1. Validate `to` does not collide (read-only borrow).
+            // 1. Check destination exists (if overwrite is false)
             if Self::exists(m, to) {
-                return Err(NamespaceError::Traversal(format!(
-                    "destination {to} exists"
-                )));
+                if !overwrite {
+                    return Err(NamespaceError::Traversal(format!(
+                        "destination {to} exists and Overwrite is F"
+                    )));
+                }
+                // Remove destination if overwrite is true
+                let (to_parent, to_leaf) = Self::split_walk(m, to)?;
+                to_parent.remove(&to_leaf);
             }
             // 2. Walk `from`, capture the entry by value so the
             //    borrow ends before the next step.
@@ -1029,6 +1045,62 @@ impl NamespaceWrite for Nas {
         };
         self.write_audit(&record)?;
         self.persist_manifest(&next)?;
+        Ok(())
+    }
+
+    fn copy(
+        &self,
+        from: &PathSegments,
+        to: &PathSegments,
+        overwrite: bool,
+        audit: &AuditContext,
+        clock: &dyn Clock,
+    ) -> Result<(), NamespaceError> {
+        // Copy: read the source entry, then insert a clone at destination.
+        // Unlike rename, we don't remove the source.
+        let entry = self
+            .lookup(from)
+            .ok_or_else(|| NamespaceError::NotFound(from.to_string()))?;
+
+        let (next, _) = self.mutate_with(|m| {
+            // Check destination exists (if overwrite is false)
+            if Self::exists(m, to) {
+                if !overwrite {
+                    return Err(NamespaceError::Traversal(format!(
+                        "destination {to} exists and Overwrite is F"
+                    )));
+                }
+                // Remove destination if overwrite is true
+                let (to_parent, to_leaf) = Self::split_walk(m, to)?;
+                to_parent.remove(&to_leaf);
+            }
+            // Walk parent of destination, creating intermediates
+            let parent_children = Self::split_walk_or_create(m, to)?;
+            if parent_children.len() >= MAX_CHILDREN_PER_DIR {
+                return Err(NamespaceError::TooManyChildren {
+                    max: MAX_CHILDREN_PER_DIR,
+                });
+            }
+            let leaf_name = to.0.last().cloned().unwrap();
+            parent_children.insert(leaf_name, entry.clone());
+            m.generation += 1;
+            Ok(())
+        })?;
+
+        let seq = next.generation;
+        let record = AuditRecord {
+            schema: AUDIT_SCHEMA_VERSION,
+            seq,
+            timestamp_unix_ms: clock.unix_ms(),
+            op: "copy".to_string(),
+            path: format!("{from} -> {to}"),
+            hash: None,
+            capability_id: audit.capability_id.clone(),
+            note: audit.note.clone(),
+        };
+        self.write_audit(&record)?;
+        self.persist_manifest(&next)?;
+        debug!(from = %from, to = %to, "namespace COPY committed");
         Ok(())
     }
 

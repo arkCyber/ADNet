@@ -1,0 +1,37 @@
+[package]
+name        = "adnet-webhook"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Webhook event sink for ADNet — fan out gossip announcements (and any future event type) to HTTP endpoints with HMAC signing, retry, and optional disk-backed spool."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types      = { workspace = true }
+tokio            = { workspace = true, features = ["full"] }
+async-trait      = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+hex              = { workspace = true }
+sha2             = { workspace = true }
+hmac             = "0.12"
+chrono           = { workspace = true }
+http             = "1"
+parking_lot      = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[[example]]
+name = "webhook_smoke"
+path = "examples/webhook_smoke.rs"
+
+[[example]]
+name = "webhook_pump_smoke"
+path = "examples/webhook_pump_smoke.rs"

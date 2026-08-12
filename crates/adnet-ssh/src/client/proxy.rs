@@ -35,6 +35,25 @@ use crate::metrics;
 /// Default binary name to exec as the SSH ProxyCommand.
 pub const DEFAULT_PROXY_BINARY: &str = "ssh";
 
+/// Default binary name for SFTP file transfers.
+pub const DEFAULT_SFTP_BINARY: &str = "sftp";
+
+/// Configuration for an SFTP file-transfer session.
+///
+/// Passed to [`run_sftp`] to open an SFTP connection over the ADNet
+/// SSH tunnel.
+#[derive(Debug, Clone, Default)]
+pub struct SftpConfig {
+    /// Binary to invoke. Defaults to `"sftp"`.
+    pub binary: String,
+    /// Recursive copy mode (`-r`). Defaults to `false`.
+    pub recursive: bool,
+    /// Preserve file attributes (`-p`). Defaults to `false`.
+    pub preserve: bool,
+    /// Override the remote subsystem. Defaults to `"sftp"`.
+    pub subsystem: String,
+}
+
 /// Parsed `user@<endpoint>` invite string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedInvite {
@@ -118,6 +137,169 @@ pub async fn run(token: &InviteToken, data_dir: &std::path::Path) -> SshResult<(
     run_with(ssh, &parsed, DEFAULT_PROXY_BINARY).await
 }
 
+/// Run an SFTP file-transfer session over the ADNet SSH tunnel.
+///
+/// This is a convenience wrapper that bridges the iroh QUIC stream to
+/// the local `sftp` binary, which speaks the SFTP protocol (SSH file
+/// transfer) over the tunneled SSH connection. The peer's sshd must have
+/// the SFTP subsystem enabled (typically `Subsystem sftp /usr/lib/ssh/sftp-server`).
+///
+/// # Usage
+///
+/// ```no_run
+/// # #[cfg(feature = "iroh")] {
+/// # async fn demo() -> anyhow::Result<()> {
+/// use adnet_ssh::client::proxy::{run_sftp, SftpConfig};
+///
+/// let config = SftpConfig {
+///     binary: "sftp".into(),
+///     recursive: true,
+///     preserve: true,
+///     subsystem: "sftp".into(),
+/// };
+/// // Transfer a file: sftp user@remote:/remote/path /local/path
+/// let status = run_sftp(
+///     "alice@<endpoint-id>",
+///     std::path::Path::new("./.adnet-data"),
+///     &config,
+///     &["/remote/path", "/local/path"],
+/// ).await?;
+/// # Ok(()) }
+/// # }
+/// ```
+///
+/// # Arguments
+///
+/// - `token` — `user@<endpoint-id>` invite string.
+/// - `data_dir` — ADNet data directory (for persistent identity).
+/// - `config` — SFTP binary configuration.
+/// - `sftp_args` — arguments passed to the `sftp` binary (e.g.
+///   `["user@remote:/remote/path", "/local/path"]` for a get operation).
+///
+/// Returns `Ok(())` if the SFTP process exits with status 0.
+pub async fn run_sftp(
+    token: &str,
+    data_dir: &std::path::Path,
+    config: &SftpConfig,
+    sftp_args: &[&str],
+) -> SshResult<()> {
+    let parsed = parse_invite(token)?;
+    let ssh = IrohSshBuilder::new(data_dir)
+        .accept_incoming(false)
+        .accept_port(22)
+        .build()
+        .await?;
+    run_sftp_with(ssh, &parsed, config, sftp_args).await
+}
+
+/// Lower-level SFTP runner with a pre-built [`IrohSsh`].
+pub async fn run_sftp_with(
+    ssh: IrohSsh,
+    parsed: &ParsedInvite,
+    config: &SftpConfig,
+    sftp_args: &[&str],
+) -> SshResult<()> {
+    let (quic_send, quic_recv) =
+        crate::client::connect(ssh.endpoint(), parsed.endpoint_id).await?;
+    sftp_bridge(&config.binary, parsed, quic_send, quic_recv, config, sftp_args).await
+}
+
+/// Internal helper: bidirectionally copy bytes between the
+/// local SFTP process and the QUIC stream.
+async fn sftp_bridge(
+    sftp_binary: &str,
+    parsed: &ParsedInvite,
+    quic_send: SendStream,
+    quic_recv: RecvStream,
+    config: &SftpConfig,
+    sftp_args: &[&str],
+) -> SshResult<()> {
+    metrics::CLIENT_BRIDGES_STARTED.inc();
+    metrics::CLIENT_BRIDGES_IN_FLIGHT.inc();
+    let res = sftp_bridge_inner(sftp_binary, parsed, quic_send, quic_recv, config, sftp_args).await;
+    metrics::CLIENT_BRIDGES_IN_FLIGHT.dec();
+    res
+}
+
+async fn sftp_bridge_inner(
+    sftp_binary: &str,
+    parsed: &ParsedInvite,
+    mut quic_send: SendStream,
+    mut quic_recv: RecvStream,
+    config: &SftpConfig,
+    sftp_args: &[&str],
+) -> SshResult<()> {
+    let mut cmd = Command::new(sftp_binary);
+    cmd.arg("-o").arg("ProxyUseFdpass=no");
+    cmd.arg("-o").arg("BatchMode=yes");
+    if config.recursive {
+        cmd.arg("-r");
+    }
+    if config.preserve {
+        cmd.arg("-p");
+    }
+    // Pass the remote user so sftp connects as the right user.
+    cmd.arg(format!("{}@{}", parsed.user, parsed.endpoint_id));
+    for arg in sftp_args {
+        cmd.arg(arg);
+    }
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::inherit());
+
+    let mut child = cmd.spawn().map_err(|e| SshError::SpawnSsh {
+        binary: sftp_binary.to_string(),
+        source: e,
+    })?;
+
+    let mut child_stdin = child.stdin.take().ok_or_else(|| SshError::SpawnSsh {
+        binary: sftp_binary.to_string(),
+        source: std::io::Error::other("no stdin pipe"),
+    })?;
+    let mut child_stdout = child.stdout.take().ok_or_else(|| SshError::SpawnSsh {
+        binary: sftp_binary.to_string(),
+        source: std::io::Error::other("no stdout pipe"),
+    })?;
+
+    let quic_to_sftp = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match quic_recv.read(&mut buf).await {
+                Ok(Some(0)) | Err(_) | Ok(None) => break,
+                Ok(Some(n)) => {
+                    if child_stdin.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        child_stdin.shutdown().await.ok();
+    });
+
+    let sftp_to_quic = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match child_stdout.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if quic_send.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        quic_send.finish().ok();
+    });
+
+    let _ = tokio::join!(quic_to_sftp, sftp_to_quic);
+    let status = child.wait().await.map_err(|e| SshError::Other(format!("wait sftp: {e}")))?;
+    if !status.success() {
+        return Err(SshError::Other(format!("sftp exited {status}")));
+    }
+    metrics::CLIENT_BRIDGES_COMPLETED.inc();
+    Ok(())
+}
+
 /// Lower-level: run with a pre-built [`IrohSsh`]. Useful for
 /// tests and for callers that want to inject their own identity.
 pub async fn run_with(
@@ -199,7 +381,7 @@ async fn proxy_bridge_inner(
     // local ssh process's stdin. When the remote closes the
     // QUIC stream we half-close the ssh process's stdin so it
     // sees EOF and can finish its response.
-    let mut quic_to_ssh = tokio::spawn(async move {
+    let quic_to_ssh = tokio::spawn(async move {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
             match quic_recv.read(&mut buf).await {
@@ -218,7 +400,7 @@ async fn proxy_bridge_inner(
     // bytes the local ssh process emits on stdout are written
     // back to the QUIC stream. When the ssh process exits we
     // finish the QUIC send stream so the remote sees EOF.
-    let mut ssh_to_quic = tokio::spawn(async move {
+    let ssh_to_quic = tokio::spawn(async move {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
             match child_stdout.read(&mut buf).await {
@@ -233,13 +415,16 @@ async fn proxy_bridge_inner(
         quic_send.finish().ok();
     });
 
-    // Wait for both directions to finish. Whichever finishes
-    // first, the other will receive the half-close signal on
-    // its next read/write and unwind naturally. We do not
-    // abort the survivor — that's a leaky-choice waiting to
-    // happen because the survivor may still be mid-flight
-    // sending the response we want the remote to see.
-    let _ = tokio::join!(&mut quic_to_ssh, &mut ssh_to_quic);
+    // Wait for both directions to finish. We pass the `JoinHandle`s
+    // *directly* (not `&mut JoinHandle`) because `tokio::join!`
+    // takes ownership of its arguments — both futures must be
+    // `Unpin` or the macro rejects them. `JoinHandle` is `!Unpin`
+    // (it owns a `task::Waker`), so we join by ownership. Whichever
+    // direction finishes first propagates a half-close signal to the
+    // other, causing it to unwind naturally. We deliberately do NOT
+    // `abort()` the survivor — aborting mid-flight discards the
+    // in-flight bytes the remote is waiting to receive.
+    let _ = tokio::join!(quic_to_ssh, ssh_to_quic);
     let status = child.wait().await.map_err(|e| SshError::Other(format!("wait ssh: {e}")))?;
     if !status.success() {
         return Err(SshError::Other(format!("ssh exited {status}")));

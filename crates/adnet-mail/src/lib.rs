@@ -1,4 +1,4 @@
-//! `adnet-mail` — SMTP send + IMAP receive for the ADNet workspace.
+//! `adnet-mail` — SMTP/IMAP client + spam filtering for the ADNet workspace.
 //!
 //! ## Scope (vs. chatmail@core)
 //!
@@ -17,10 +17,10 @@
 //! | `login_param.rs`                   | `peer_channels.rs`, `webxdc/`, `ephemeral/`, `receive_imf.rs` |
 //! | `transport.rs` (Socket enum)       | `scheduler.rs`, `securejoin.rs`         |
 //!
-//! The E2EE / Autocrypt layers live in chatmail@core unchanged. If a
-//! downstream caller wants encrypted mail, they wire our crate's
-//! `Mail::from_wire_bytes` / `Mail::to_wire_bytes` to whatever
-//! decryption frontend they prefer (chatmail, rpgp, etc.).
+//! ## New ADNet-specific modules
+//!
+//! - [`spam`] — Client-side spam filtering with header/content analysis.
+//! - [`user_integration`] — Bridge to ADNet identity and user systems.
 //!
 //! ## Crate layout
 //!
@@ -31,6 +31,8 @@
 //! - [`imap`] — IMAP connect / IDLE / fetch.
 //! - [`smtp`] — SMTP connect / send.
 //! - [`account`] — `MailAccount` high-level facade (both transports).
+//! - [`spam`] — Spam filtering with multi-signal analysis.
+//! - [`user_integration`] — ADNet identity and user system integration.
 //!
 //! See `examples/` for a runnable end-to-end demo.
 
@@ -44,6 +46,8 @@ pub mod mime;
 pub mod provider;
 pub mod retry;
 pub mod smtp;
+pub mod spam;
+pub mod user_integration;
 mod tls_danger;
 
 /// Convenience re-exports.
@@ -59,6 +63,8 @@ pub mod prelude {
     pub use crate::provider::{BUILTIN_PROVIDERS, Provider, ServerTemplate, auto_configure};
     pub use crate::retry::{RetryPolicy, send_with_retry, send_with_retry_infallible};
     pub use crate::smtp::{SendOutcome, connect as smtp_connect, send as smtp_send};
+    pub use crate::spam::{SpamFilter, SpamFilterConfig, SpamScore, SpamSignals};
+    pub use crate::user_integration::{EmailIdentity, IdentityResolver};
 }
 
 // Bring `Result` into the crate root namespace.

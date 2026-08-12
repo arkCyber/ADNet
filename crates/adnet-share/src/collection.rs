@@ -133,7 +133,7 @@ impl Collection {
     /// Serialise to bytes. The wire format is `postcard(Vec<(String, ContentHash)>)`,
     /// matching `iroh_blobs::format::collection::Collection`.
     pub fn to_bytes(&self) -> ShareResult<Vec<u8>> {
-        postcard::to_allocvec(&self.entries)
+        postcard::to_stdvec(&self.entries)
             .map_err(|e| ShareError::Backend(format!("collection serialize: {e}")))
     }
 
@@ -255,7 +255,7 @@ mod tests {
                 .unwrap(),
             );
         }
-        let bytes = postcard::to_allocvec(&entries).unwrap();
+        let bytes = postcard::to_stdvec(&entries).unwrap();
         let err = Collection::from_bytes(&bytes).unwrap_err();
         match err {
             ShareError::CollectionTooLarge { got, max } => {

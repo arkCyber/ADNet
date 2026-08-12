@@ -1871,7 +1871,7 @@ mod tests {
 
     #[test]
     fn test_want_manager_local_block() {
-        let mut wants = WantManager::new();
+        let wants = WantManager::new();
         let block = ContentHash::from_bytes(b"test");
 
         assert!(!wants.has_local(&block));

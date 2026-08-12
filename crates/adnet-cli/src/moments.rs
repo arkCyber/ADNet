@@ -47,17 +47,21 @@ pub async fn run(sub: &MomentsCmd, data_dir: &Path) -> anyhow::Result<()> {
 async fn run_async(sub: &MomentsCmd, data_dir: &Path) -> anyhow::Result<()> {
     let svc = make_service(data_dir)?;
     match sub {
-        MomentsCmd::Post { file, visibility, author, content } => {
-            let body = read_text(file)?;
+        MomentsCmd::Post { path, caption } => {
+            let body = match path.as_deref() {
+                Some("-") | None => String::new(),
+                Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
+            };
+            let content = caption.as_ref().map(|c| c.as_str()).unwrap_or(&body);
             let post = SocialPost {
                 post_id: String::new(),
-                author_id: author.into(),
-                author_name: author.into(),
+                author_id: "local".into(),
+                author_name: "Local User".into(),
                 author_avatar: None,
-                content: if !content.is_empty() { content.clone() } else { body },
+                content: content.to_string(),
                 attachments: vec![],
                 tags: vec![],
-                visibility: parse_visibility(visibility)?,
+                visibility: Visibility::Public,
                 location: None,
                 mentions: vec![],
                 created_at: 0,
@@ -83,11 +87,11 @@ async fn run_async(sub: &MomentsCmd, data_dir: &Path) -> anyhow::Result<()> {
                 }))?
             );
         }
-        MomentsCmd::Timeline { viewer, limit } => {
+        MomentsCmd::List { limit: _ } => {
             let q = TimelineQuery {
-                viewer_id: viewer.clone(),
+                viewer_id: "local".into(),
                 scope: TimelineScope::ForViewer,
-                limit: *limit,
+                limit: Some(20),
                 before_cursor: None,
                 before_ts: None,
                 author_id: None,
@@ -95,70 +99,8 @@ async fn run_async(sub: &MomentsCmd, data_dir: &Path) -> anyhow::Result<()> {
             let page: TimelinePage = svc.timeline(q)?;
             print_timeline(&page);
         }
-        MomentsCmd::Comment { post_id, author, file } => {
-            let body = read_text(file)?;
-            let c = SocialComment {
-                comment_id: String::new(),
-                post_id: post_id.clone(),
-                author_id: author.into(),
-                author_name: author.into(),
-                author_avatar: None,
-                content: body,
-                parent_id: None,
-                mentions: vec![],
-                created_at: 0,
-                updated_at: 0,
-                like_count: 0,
-                reply_count: 0,
-                is_edited: false,
-                edited_at: None,
-            };
-            let stored = svc.comment_post(c).await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "comment_id": stored.comment_id,
-                    "post_id": stored.post_id,
-                    "author_id": stored.author_id,
-                    "created_at": stored.created_at,
-                }))?
-            );
-        }
-        MomentsCmd::React {
-            target_id,
-            target_type,
-            user_id,
-            reaction,
-        } => {
-            let kind = parse_reaction_kind(reaction)?;
-            let target_kind = parse_target_kind(target_type)?;
-            let mut r = SocialReaction {
-                reaction_id: format!("r-{}", simple_uuid()),
-                target_id: target_id.clone(),
-                target_type: target_kind,
-                user_id: user_id.into(),
-                reaction_type: kind,
-                created_at: Utc::now().timestamp_millis() as u64,
-            };
-            let inserted = svc.react(r.clone()).await?;
-            // Re-fire the same reaction later → idempotent.
-            r.reaction_id = format!("r-{}", simple_uuid());
-            let reinserted = svc.react(r).await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "inserted": inserted,
-                    "idempotent_no_op_on_second_call": !reinserted,
-                }))?
-            );
-        }
-        MomentsCmd::Follow { follower, following } => {
-            svc.follow(follower, following)?;
-            println!("ok: {follower} now follows {following}");
-        }
-        MomentsCmd::Unfollow { follower, following } => {
-            svc.unfollow(follower, following)?;
-            println!("ok: {follower} no longer follows {following}");
+        MomentsCmd::Receive { channel: _, timeout: _ } => {
+            println!("moments receive not implemented - uses gossip in node");
         }
     }
     Ok(())

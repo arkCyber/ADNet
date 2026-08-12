@@ -15,11 +15,11 @@ path = "src/main.rs"
 
 [dependencies]
 adnet-types     = { workspace = true }
-adnet-blobstore = { workspace = true }
+adnet-blobstore = { workspace = true, features = ["scope", "bitswap"] }
 adnet-gossip    = { workspace = true }
 adnet-mesh      = { workspace = true }
 adnet-transport = { workspace = true }
-adnet-node      = { workspace = true }
+adnet-node      = { workspace = true, features = ["bitswap"] }
 tokio           = { workspace = true }
 clap            = { workspace = true }
 anyhow          = { workspace = true }
@@ -29,3 +29,36 @@ tracing         = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono          = { workspace = true }
 hex             = { workspace = true }
+futures         = { workspace = true }
+blake3          = { workspace = true }
+postcard        = { workspace = true, features = ["use-std"] }
+
+# Extended features
+adnet-roster        = { workspace = true }
+adnet-share         = { workspace = true }
+adnet-socialfeed    = { workspace = true }
+adnet-news          = { workspace = true }
+adnet-userstore     = { workspace = true }
+adnet-observability = { workspace = true, features = ["http-server"] }
+adnet-tui          = { workspace = true }
+adnet-relay         = { workspace = true }
+adnet-namespace     = { workspace = true }
+adnet-ipc           = { workspace = true }
+thiserror           = { workspace = true }
+tokio-stream        = "0.1"
+indicatif           = { workspace = true }
+dirs                = "5"
+json5               = "1.3"
+tempfile            = "3"
+
+# Surface the device-pairing, email-invite, QR provisioning and
+# mesh-coordinator crates that already ship as workspace members
+# but were previously unreachable from the CLI.
+adnet-pairing            = { workspace = true }
+adnet-invite             = { workspace = true }
+adnet-qr                 = { workspace = true }
+adnet-mesh-coordinator   = { workspace = true }
+adnet-mesh-firewall      = { workspace = true }
+adnet-webhook            = { workspace = true }
+rand                     = { workspace = true }
+base64                   = { workspace = true }

@@ -7,18 +7,50 @@
 //! - Cleanup of expired records
 
 use std::collections::HashMap;
+use std::fs;
+use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::Instant;
+use tracing::{debug, info, warn};
 
 use adnet_types::NodeId;
 
-use crate::bucket::RoutingTable;
+use crate::bucket::{Contact, RoutingTable};
 use crate::network::DhtNetworkSender;
 use crate::record::DhtKey;
 use crate::store::SharedDhtStore;
+
+/// File name for persisting routing table state.
+const ROUTING_TABLE_FILE: &str = "dht_routing_table.json";
+
+/// File name for persisting DHT configuration.
+const CONFIG_FILE: &str = "dht_config.json";
+
+/// Serializable version of Contact for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SerializableContact {
+    node_id: Vec<u8>,
+    addrs: Vec<String>,
+    last_contacted: u64,
+    last_seen: u64,
+    trusted: bool,
+}
+
+/// Serializable version of DhtServiceConfig for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SerializableConfig {
+    refresh_interval_secs: u64,
+    provider_republish_interval_secs: u64,
+    peer_check_interval_secs: u64,
+    provider_ttl_secs: u64,
+    query_parallelism: usize,
+    query_timeout_secs: u64,
+}
 
 /// Service configuration.
 #[derive(Debug, Clone)]
@@ -117,6 +149,11 @@ impl DhtService {
         let parallelism = self.config.query_parallelism;
         let timeout = self.config.query_timeout;
 
+        info!(
+            "DHT service starting: refresh_interval={:?}, parallelism={}, timeout={:?}",
+            refresh_interval, parallelism, timeout
+        );
+
         tokio::spawn(async move {
             Self::refresh_task(
                 routing_table,
@@ -128,6 +165,7 @@ impl DhtService {
                 timeout,
                 stop_rx,
             ).await;
+            info!("DHT refresh task stopped");
         });
 
         DhtServiceTask { stop_tx }
@@ -137,13 +175,15 @@ impl DhtService {
     pub async fn stop(&self) {
         let mut running = self.running.write().await;
         *running = false;
+        info!("DHT service stopping");
     }
 
     /// Announce that we provide content.
     pub async fn announce(&self, key: DhtKey) {
         let mut providers = self.local_providers.write().await;
         let expiry = Instant::now() + self.config.provider_ttl;
-        providers.insert(key, expiry);
+        providers.insert(key.clone(), expiry);
+        debug!("Provider announced for key: {:?}", key);
     }
 
     /// Get local provider keys.
@@ -155,6 +195,98 @@ impl DhtService {
             .filter(|(_, expiry)| **expiry > now)
             .map(|(key, _)| key.clone())
             .collect()
+    }
+
+    /// Save routing table to disk.
+    pub async fn save_routing_table(&self, path: &Path) -> std::io::Result<()> {
+        let rt = self.routing_table.read().await;
+        let contacts: Vec<SerializableContact> = rt
+            .all_contacts()
+            .map(|c| SerializableContact {
+                node_id: c.id.as_bytes(),
+                addrs: c.addrs.iter().map(|a| a.to_string()).collect(),
+                last_contacted: c.last_contacted.elapsed().as_secs(),
+                last_seen: c.last_seen.elapsed().as_secs(),
+                trusted: c.trusted,
+            })
+            .collect();
+        
+        let count = contacts.len();
+        let json = serde_json::to_string_pretty(&contacts)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        
+        fs::write(path.join(ROUTING_TABLE_FILE), json)?;
+        debug!("Saved {} contacts to routing table file", count);
+        Ok(())
+    }
+
+    /// Load routing table from disk.
+    pub async fn load_routing_table(&self, path: &Path) -> std::io::Result<()> {
+        let file_path = path.join(ROUTING_TABLE_FILE);
+        if !file_path.exists() {
+            debug!("No routing table file found at {:?}", file_path);
+            return Ok(());
+        }
+        
+        let json = fs::read_to_string(&file_path)?;
+        let contacts: Vec<SerializableContact> = serde_json::from_str(&json)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        
+        let mut rt = self.routing_table.write().await;
+        let mut loaded = 0;
+        for sc in contacts {
+            if let Ok(node_id) = NodeId::from_bytes(&sc.node_id) {
+                for addr_str in &sc.addrs {
+                    if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+                        let mut contact = Contact::new(node_id.clone(), addr);
+                        contact.trusted = sc.trusted;
+                        let _ = rt.insert(contact);
+                        loaded += 1;
+                    }
+                }
+            }
+        }
+        info!("Loaded {} contacts from routing table file", loaded);
+        Ok(())
+    }
+
+    /// Save DHT configuration to disk.
+    pub fn save_config(&self, path: &Path) -> std::io::Result<()> {
+        let config = SerializableConfig {
+            refresh_interval_secs: self.config.refresh_interval.as_secs(),
+            provider_republish_interval_secs: self.config.provider_republish_interval.as_secs(),
+            peer_check_interval_secs: self.config.peer_check_interval.as_secs(),
+            provider_ttl_secs: self.config.provider_ttl.as_secs(),
+            query_parallelism: self.config.query_parallelism,
+            query_timeout_secs: self.config.query_timeout.as_secs(),
+        };
+        
+        let json = serde_json::to_string_pretty(&config)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        
+        fs::write(path.join(CONFIG_FILE), json)?;
+        Ok(())
+    }
+
+    /// Load DHT configuration from disk.
+    pub fn load_config(path: &Path) -> std::io::Result<DhtServiceConfig> {
+        let file_path = path.join(CONFIG_FILE);
+        if !file_path.exists() {
+            return Ok(DhtServiceConfig::default());
+        }
+        
+        let json = fs::read_to_string(&file_path)?;
+        let config: SerializableConfig = serde_json::from_str(&json)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        
+        Ok(DhtServiceConfig {
+            refresh_interval: Duration::from_secs(config.refresh_interval_secs),
+            provider_republish_interval: Duration::from_secs(config.provider_republish_interval_secs),
+            peer_check_interval: Duration::from_secs(config.peer_check_interval_secs),
+            provider_ttl: Duration::from_secs(config.provider_ttl_secs),
+            query_parallelism: config.query_parallelism,
+            query_timeout: Duration::from_secs(config.query_timeout_secs),
+        })
     }
 
     /// Routing table refresh task.
@@ -202,6 +334,12 @@ impl DhtService {
             rt.closest(&target_id, parallelism)
         };
 
+        debug!(
+            "DHT refresh: targeting {} with {} peers",
+            target_id.short(),
+            peers.len()
+        );
+
         // Query each peer
         for peer in peers {
             let sender = sender.clone();
@@ -212,15 +350,25 @@ impl DhtService {
                 let result = sender.find_node(&peer.id, &key).await;
                 if let Ok(response) = result {
                     // Add discovered peers to routing table
+                    let mut discovered = 0;
                     for nc in response.nodes {
                         let contact = crate::bucket::Contact::new(
-                            nc.id,
+                            nc.id.clone(),
                             nc.addrs.first()
                                 .and_then(|a| a.parse().ok())
                                 .unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()),
                         );
                         let mut rt = routing_table.write().await;
-                        let _ = rt.insert(contact);
+                        if rt.insert(contact).is_ok() {
+                            discovered += 1;
+                        }
+                    }
+                    if discovered > 0 {
+                        debug!(
+                            "DHT refresh: discovered {} new peers from {}",
+                            discovered,
+                            peer.id.short()
+                        );
                     }
                 }
             });

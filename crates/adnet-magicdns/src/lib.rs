@@ -40,10 +40,16 @@
 #![forbid(unsafe_code)]
 #![deny(unused_must_use)]
 
+pub mod config;
 pub mod error;
+pub mod forwarder;
 pub mod query;
 pub mod resolver;
+pub mod server;
 
+pub use config::ResolverConfig;
 pub use error::{MagicError, MagicResult};
+pub use forwarder::{ForwarderError, ForwarderResult, TunDnsForwarder};
 pub use query::{MagicName, MagicQuery, MAX_NAME_LEN, TLD_SUFFIX};
-pub use resolver::{Resolver, ResolverConfig, ResolverSnapshot};
+pub use resolver::{Resolver, ResolverSnapshot};
+pub use server::{DnsServer, DnsServerHandle, ServeError};

@@ -1,0 +1,36 @@
+[package]
+name        = "adnet-verify"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Formal verification for ADNet protocols using Kani model checker."
+readme      = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[features]
+default = []
+
+# Kani model checker integration.
+#
+# NOTE: Kani is *not* a Cargo dependency; it is a separate cargo subcommand
+# installed with `cargo install --locked kani-verifier && cargo kani setup`.
+# The `#[kani::proof]` attribute and `kani::assert` are resolved by the
+# Kani compiler at verification time, not by rustc.
+#
+# This feature is therefore intentionally a no-op. It is kept for
+# documentation/UI discoverability and so that `cargo build --features kani`
+# (run by humans and CI) succeeds. The Kani harnesses in `src/dht.rs`,
+# `src/bitswap.rs`, and `src/gossip.rs` are gated behind `#[cfg(feature =
+# "kani")]`; they are intended to be compiled with `cargo kani`, not by
+# regular `cargo build`. Do *not* add `kani` as a `[dev-dependencies]` entry
+# here — Kani rewrites the crate graph itself when invoked.
+kani = []

@@ -47,6 +47,8 @@ fn make_announcement(publisher: &NodeId, room: &RoomId, seq: u32) -> Announcemen
         source_url: None,
         ticket: None,
         timestamp: Utc::now(),
+        message_id: None,
+        ttl_secs: None,
         signer: None,
         signature: None,
     }

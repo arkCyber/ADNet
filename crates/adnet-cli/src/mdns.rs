@@ -80,7 +80,31 @@ pub fn run_mdns_subcmd(sub: &MdnsCmd, data_dir: &Path) -> Result<()> {
     }
 }
 
-/// Run `adnet mdns status` command.
+/// Run `adnet mdns <sub>` (top-level dispatcher).
+pub fn run_mdns(sub: &crate::cli::MdnsCmd, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    use crate::cli::MdnsCmd as CliMdnsCmd;
+    match sub {
+        CliMdnsCmd::Discover { timeout } => {
+            // Discover peers via mDNS — shows what would be discovered
+            if *timeout > 0 {
+                println!("mDNS discovery for {}s...", timeout);
+                println!("(mDNS discovery requires a running node)");
+            }
+            println!("discovered peers: (none — mDNS requires runtime)");
+            Ok(())
+        }
+        CliMdnsCmd::Announce { info } => {
+            // Announce via mDNS
+            if let Some(i) = info {
+                println!("mDNS announce: {}", i);
+            } else {
+                println!("mDNS announce (default)");
+            }
+            println!("(mDNS announce requires a running node)");
+            Ok(())
+        }
+    }
+}
 /// Shows current mDNS discovery status.
 pub fn run_mdns_status(data_dir: &Path, json: bool) -> Result<()> {
     // Load config to check if mDNS is enabled

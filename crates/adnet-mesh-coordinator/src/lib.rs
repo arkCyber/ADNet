@@ -21,15 +21,14 @@
 //!
 //! ## What this crate does NOT do
 //!
-//! - It does **not** generate the cryptographic signatures
-//!   that authenticate the roster. Signing is performed by
-//!   the `adnet-identity` crate; this crate only knows the
-//!   wire format. A future iteration will plug the signing
-//!   in here.
 //! - It does **not** persist the coordinator state to disk.
 //!   The default [`InMemoryCoordinator`] is a thin wrapper
 //!   around the in-process state. Production deployments
 //!   wire a SQLite-backed store on top of the trait.
+//! - It does **not** gossip rosters on its own. The gossip
+//!   fan-out layer lives above this crate; this crate only
+//!   signs and verifies rosters against the coordinator's
+//!   Ed25519 pubkey via [`RosterSigner`] and [`RosterVerifier`].
 //!
 //! ## Layering
 //!
@@ -50,6 +49,7 @@ pub mod error;
 pub mod peering;
 pub mod peering_sign;
 pub mod request;
+pub mod roster_sign;
 pub mod store;
 
 pub use error::{CoordinatorError, CoordinatorResult};
@@ -61,6 +61,9 @@ pub use peering_sign::{
     CoordinatorPubkeyRegistry, PeeringGrantSigner, PeeringGrantVerifier, StaticPubkeyRegistry,
 };
 pub use request::{JoinRequest, JoinRequestId, JoinRequestStatus};
+pub use roster_sign::{
+    verify_with_trait as verify_roster_with_trait, RosterSigner, RosterVerifier,
+};
 pub use store::{
     Coordinator, CoordinatorConfig, InMemoryCoordinator, MAX_INVITE_TTL, MAX_REQUESTS,
 };

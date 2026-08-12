@@ -34,6 +34,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config_wizard;
+use crate::bytes::{parse_bytes, ADNET_STORAGE_TOTAL_BYTES_ENV, DEFAULT_TOTAL_BYTES};
+
 #[cfg(feature = "qr")]
 use adnet_qr::generator::QrErrorCorrectionLevel as QrCodeEcc;
 
@@ -97,6 +100,18 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg(feature = "qr")]
     pub qr: Option<QrConfigToml>,
+
+    /// Storage capacity & quota policy. Surfaced to the CLI
+    /// `adnet storage` subcommands and the `adbnet-blobstore` topology
+    /// open path. The block is additive — old configs that omit it
+    /// silently pick up the defaults (`20 GiB` total, 50/50 split)
+    /// so existing deployments don't have to be reissued.
+    ///
+    /// Override order (highest priority first):
+    /// 1. `$ADNET_STORAGE_TOTAL_BYTES` env var (when set + parseable).
+    /// 2. `storage.totalBytes` in this file (when `Some`).
+    /// 3. The block-level default (`Some(20 GiB)`).
+    pub storage: StorageConfig,
 }
 
 impl Default for AppConfig {
@@ -112,6 +127,131 @@ impl Default for AppConfig {
             iroh: None,
             #[cfg(feature = "qr")]
             qr: None,
+            storage: StorageConfig::default(),
+        }
+    }
+}
+
+/// Storage budget / quota policy that the CLI hands to the
+/// `adnet-blobstore` topology. Every field is optional so a
+/// partial config still works; missing fields fall back to the
+/// defaults declared on `QuotaPolicy::default_split` inside the
+/// blobstore crate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageConfig {
+    /// Total storage budget in bytes. Accepts either a raw integer
+    /// (`"10737418240"`) or a human-readable suffix (`"10GiB"`,
+    /// `"512MB"`, …). When `None`, the CLI falls back to the
+    /// `adbnet-blobstore` default (`20 GiB`) — see
+    /// [`StorageConfig::resolved_total_bytes`].
+    #[serde(skip_serializing_if = "Option::is_none", alias = "total_bytes")]
+    pub total_bytes: Option<String>,
+
+    /// Fraction of [`total_bytes`] allocated to the private scope
+    /// (`0.0..=1.0`). The complementary value is used for the shared
+    /// scope. `None` means use the blobstore default split (50/50).
+    ///
+    /// The wire value is a `f64` in `[0.0, 1.0]`. Values outside the
+    /// range are rejected at the CLI boundary, not here, so JSON files
+    /// from a future schema version can still be parsed.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "private_fraction")]
+    pub private_fraction: Option<f64>,
+
+    /// Hard cap on the private scope in bytes (overrides the
+    /// fraction-derived value). When `Some`, the CLI uses this
+    /// directly instead of `private_fraction * total_bytes`. This
+    /// lets an operator cap the private scope at, say, `4 GiB`
+    /// while keeping the total at `100 GiB`.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "private_hard_cap_bytes")]
+    pub private_hard_cap_bytes: Option<String>,
+
+    /// Hard cap on the shared scope in bytes. Same semantics as
+    /// `private_hard_cap_bytes`.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "shared_hard_cap_bytes")]
+    pub shared_hard_cap_bytes: Option<String>,
+
+    /// Seal the shared scope on boot, blocking the replication
+    /// protocol from further writes. Defaults to `false` so the
+    /// legacy CLI behaviour is preserved.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "seal_shared_scope")]
+    pub seal_shared_scope: Option<bool>,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            total_bytes: None,
+            private_fraction: None,
+            private_hard_cap_bytes: None,
+            shared_hard_cap_bytes: None,
+            seal_shared_scope: None,
+        }
+    }
+}
+
+impl StorageConfig {
+    /// Resolve the effective total budget considering the env-var
+    /// override. Returns the configured value (parsed) or the
+    /// blobstore default when nothing is set.
+    ///
+    /// The closure seam lets the unit tests inject a synthetic env
+    /// reader without touching the global `std::env` table.
+    pub fn resolved_total_bytes_with<F: Fn(&str) -> Option<String>>(
+        &self,
+        env: F,
+    ) -> Result<u64, crate::bytes::BytesError> {
+        if let Some(raw) = env(ADNET_STORAGE_TOTAL_BYTES_ENV)
+            && !raw.trim().is_empty()
+        {
+            return parse_bytes(&raw);
+        }
+        self.parsed_total_bytes()
+    }
+
+    /// Same as [`resolved_total_bytes_with`] but uses the real
+    /// `std::env` table. Convenience wrapper for the CLI.
+    pub fn resolved_total_bytes(&self) -> Result<u64, crate::bytes::BytesError> {
+        self.resolved_total_bytes_with(|k| std::env::var(k).ok())
+    }
+
+    /// Parse the configured `total_bytes` string into a `u64`. Falls
+    /// back to the blobstore default when the field is `None`.
+    pub fn parsed_total_bytes(&self) -> Result<u64, crate::bytes::BytesError> {
+        match &self.total_bytes {
+            None => Ok(DEFAULT_TOTAL_BYTES),
+            Some(raw) => parse_bytes(raw),
+        }
+    }
+
+    /// Parse the budget hard-cap strings (if any). Returns
+    /// `(Some(private), Some(shared))` with parsed byte values, or
+    /// `None` for whichever side is unconfigured.
+    ///
+    /// Both errors are surfaced individually so the CLI can fail
+    /// with a single, recoverable message rather than two separate
+    /// validations.
+    pub fn parsed_hard_caps(
+        &self,
+    ) -> Result<
+        (Option<u64>, Option<u64>),
+        (crate::bytes::BytesError, crate::bytes::BytesError),
+    > {
+        let p = self
+            .private_hard_cap_bytes
+            .as_deref()
+            .map(parse_bytes)
+            .transpose();
+        let s = self
+            .shared_hard_cap_bytes
+            .as_deref()
+            .map(parse_bytes)
+            .transpose();
+        match (p, s) {
+            (Ok(p), Ok(s)) => Ok((p, s)),
+            (Err(pe), Err(se)) => Err((pe, se)),
+            (Err(pe), _) => Err((pe, crate::bytes::BytesError::Empty)),
+            (_, Err(se)) => Err((crate::bytes::BytesError::Empty, se)),
         }
     }
 }
@@ -560,6 +700,7 @@ fn warn_unknown_top_level_fields(value: &serde_json::Value) {
         "gossipValidation",
         "gossip_validation",
         "iroh",
+        "storage",
         #[cfg(feature = "qr")]
         "qr",
     ];
@@ -594,6 +735,29 @@ fn apply_env_overrides_with<F: Fn(&str) -> Option<String>>(cfg: &mut AppConfig, 
             other => warn!(
                 value = %other,
                 "unknown ADNET_LOG_FORMAT, expected 'compact' or 'json'"
+            ),
+        }
+    }
+    // The storage env override is intentionally a *fail-soft warn* —
+    // a typo in `ADNET_STORAGE_TOTAL_BYTES` should not crash a
+    // screaming-the-kernel debugger. We log the parse error and let
+    // the configured value take its place.
+    if let Some(raw) = env(ADNET_STORAGE_TOTAL_BYTES_ENV)
+        && !raw.trim().is_empty()
+    {
+        match parse_bytes(&raw) {
+            Ok(_) => {
+                // Resolve path remains the same; just record that the
+                // override was accepted so it shows up in debug logs.
+                tracing::debug!(
+                    value = %raw,
+                    "applying ADNET_STORAGE_TOTAL_BYTES override"
+                );
+            }
+            Err(e) => warn!(
+                value = %raw,
+                error = %e,
+                "ignoring ADNET_STORAGE_TOTAL_BYTES: invalid byte size"
             ),
         }
     }
@@ -722,6 +886,36 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"{
   //   "quietZone": 4,
   //   // Output module size in pixels (SVG renderer only).
   //   "moduleSize": 8
+  // },
+
+  // Storage budget. The CLI hands this to `adnet-blobstore` whenever
+  // it opens a storage topology. The total is split between the
+  // private and shared scopes — see `privateFraction` below.
+  //
+  // Override order (highest priority first):
+  //   1. `$ADNET_STORAGE_TOTAL_BYTES` env var (e.g. "100GiB")
+  //   2. `storage.totalBytes` here
+  //   3. 20 GiB default (matches `QuotaPolicy::default()`)
+  //
+  // Accepted formats include raw integers ("10737418240") and
+  // human-readable suffixes ("10GiB", "512MB", "1TiB"). Decimals
+  // (KB, MB, GB, TB) are decimal; binary (KiB, MiB, GiB, TiB) are
+  // powers of 1024.
+  // "storage": {
+  //   // Total storage budget. Default: 20 GiB.
+  //   // "totalBytes": "100GiB",
+  //   // Fraction of `totalBytes` allocated to the private scope.
+  //   // The shared scope gets the complementary value. Default: 0.5.
+  //   // "privateFraction": 0.5,
+  //   // Optional explicit hard caps (override the fraction-derived
+  //   // values). When both are set, the totals do not have to add
+  //   // up to `totalBytes` — the divergence is logged so an
+  //   // operator can spot a typo.
+  //   // "privateHardCapBytes": null,
+  //   // "sharedHardCapBytes": null,
+  //   // Set to true to seal the shared scope on boot (the
+  //   // replication protocol cannot grow it after that). Default: false.
+  //   // "sealSharedScope": false
   // }
 }
 "#;
@@ -731,6 +925,75 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"{
 pub fn ensure_cli_override_usable(path: &Path) -> Result<()> {
     if !path.exists() {
         return Err(anyhow!("--config path {} does not exist", path.display()));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Top-level dispatcher for `adnet config <sub>`
+// ---------------------------------------------------------------------------
+
+/// Apply a `ConfigCmd` (from clap) against the local config file.
+/// This is an offline command: it only touches the JSON5 file on disk.
+pub fn run_config(sub: &crate::cli::ConfigCmd, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    use crate::cli::ConfigCmd as CliConfigCmd;
+
+    let config_path = data_dir.join("config.json");
+
+    match sub {
+        CliConfigCmd::Show { json } => {
+            let loaded = load_for_cli(Some(&config_path))?;
+            if *json {
+                let json_str = show_effective(&loaded.config)?;
+                println!("{}", json_str);
+            } else {
+                println!("Config file: {}", loaded.source.path.as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(in-memory)".to_string()));
+                println!("{}", show_effective(&loaded.config)?);
+            }
+        }
+        CliConfigCmd::Set { key, value } => {
+            set_value(&config_path, key, value)?;
+            println!("set {} = {}", key, value);
+        }
+        CliConfigCmd::Reset { yes } => {
+            if !yes {
+                eprintln!("adnet: about to reset config to defaults");
+                eprintln!("hint: pass --yes to skip this prompt");
+                eprintln!("continue? [y/N]");
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    eprintln!("aborted");
+                    std::process::exit(2);
+                }
+            }
+            reset(&config_path)?;
+            println!("reset config to defaults");
+        }
+        CliConfigCmd::Edit => {
+            edit(&config_path)?;
+        }
+        CliConfigCmd::Validate { file } => {
+            let path = file.as_ref().map(std::path::PathBuf::from)
+                .unwrap_or_else(|| config_path.clone());
+            match validate(&path) {
+                Ok(cfg) => {
+                    println!("config at {} is valid", path.display());
+                    if let Ok(json) = show_effective(&cfg) {
+                        println!("{}", json);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("config validation failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        CliConfigCmd::Wizard => {
+            config_wizard::run_wizard(&config_path)?;
+        }
     }
     Ok(())
 }
@@ -872,6 +1135,21 @@ const KNOWN_DOTTED_KEYS: &[&str] = &[
     "qr.moduleSize",
     #[cfg(feature = "qr")]
     "qr.module_size",
+    // Storage quota. Keys are exposed in both camelCase and
+    // snake_case so `adnet config set storage.total_bytes 50GiB`
+    // and `… totalBytes 50GiB` both work. The values are strings
+    // (e.g. "10GiB", "10737418240") so they can be set without
+    // a JSON-aware shell.
+    "storage.totalBytes",
+    "storage.total_bytes",
+    "storage.privateFraction",
+    "storage.private_fraction",
+    "storage.privateHardCapBytes",
+    "storage.private_hard_cap_bytes",
+    "storage.sharedHardCapBytes",
+    "storage.shared_hard_cap_bytes",
+    "storage.sealSharedScope",
+    "storage.seal_shared_scope",
     // `relay.*` is intentionally not whitelisted: RelayConfig has
     // many fields and the typed builder is the safer surface for
     // editing them. Operators can still set `relay` via the file
@@ -1332,13 +1610,11 @@ mod tests {
     #[test]
     fn mesh_config_roundtrip() {
         let raw = r#"{
-            "mesh": { "host": "127.0.0.1", "port": 8080, "routePrefix": "/mesh" }
+            "mesh": { "bind_addr": "127.0.0.1:8080" }
         }"#;
         let cfg: AppConfig = json5::from_str(raw).unwrap();
         let mesh = cfg.mesh.expect("mesh present");
-        assert_eq!(mesh.host, "127.0.0.1");
-        assert_eq!(mesh.port, 8080);
-        assert_eq!(mesh.route_prefix, "/mesh");
+        assert_eq!(mesh.bind_addr.as_deref(), Some("127.0.0.1:8080"));
     }
 
     /// P0-a regression: a JSON5 config that supplies a `relay` block
@@ -1358,7 +1634,7 @@ mod tests {
                 "serveBind": "0.0.0.0",
                 "hostPolicy": "allow-loopback-only",
                 "maxBodyBytes": 4096,
-                "upstreamTimeoutMs": 12000,
+                "upstreamTimeoutSecs": 12,
                 "maxRedirects": 5
             }
         }"#;
@@ -1373,13 +1649,13 @@ mod tests {
             "loopback-only",
             "hostPolicy must round-trip as AllowLoopbackOnly"
         );
-        assert_eq!(relay.max_body_bytes, 4096);
+        assert_eq!(relay.max_body_bytes, Some(4096));
         assert_eq!(
-            relay.upstream_timeout,
-            std::time::Duration::from_millis(12000),
-            "upstreamTimeoutMs must round-trip as a Duration"
+            relay.upstream_timeout_secs,
+            Some(12),
+            "upstreamTimeoutSecs must round-trip"
         );
-        assert_eq!(relay.max_redirects, 5);
+        assert_eq!(relay.max_redirects, Some(5));
     }
 
     /// P0-a regression: `AppConfig::default()` must have `relay: None`
@@ -2090,6 +2366,7 @@ mod tests {
             relay: None,
             gossip_validation: None,
             iroh: None,
+            storage: StorageConfig::default(),
             #[cfg(feature = "qr")]
             qr: None,
         };
@@ -2158,6 +2435,7 @@ mod tests {
             relay: None,
             gossip_validation: Some(GossipValidation::Lenient),
             iroh: None,
+            storage: StorageConfig::default(),
             #[cfg(feature = "qr")]
             qr: None,
         };
@@ -2269,20 +2547,16 @@ mod tests {
     }
 
     #[test]
-    fn mesh_config_with_route_prefix() {
+    fn mesh_config_with_bind_addr() {
         let raw = r#"{
             "mesh": {
-                "host": "0.0.0.0",
-                "port": 9000,
-                "routePrefix": "/api/v1"
+                "bind_addr": "0.0.0.0:9000"
             },
             "log": { "level": "info" }
         }"#;
         let cfg: AppConfig = json5::from_str(raw).unwrap();
         let mesh = cfg.mesh.unwrap();
-        assert_eq!(mesh.host, "0.0.0.0");
-        assert_eq!(mesh.port, 9000);
-        assert_eq!(mesh.route_prefix, "/api/v1");
+        assert_eq!(mesh.bind_addr.as_deref(), Some("0.0.0.0:9000"));
     }
 
     #[test]
@@ -2313,5 +2587,287 @@ mod tests {
         // Instead verify the function exists and is callable.
         let loaded = load(Some(&path)).unwrap();
         assert_eq!(loaded.config.log.level, "info");
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Storage quota: app.toml surface, env override, dotted-key
+    // whitelist, default fallback, parser round-trip.
+    // ───────────────────────────────────────────────────────────────
+
+    /// Backward-compat: a config file that omits the `storage` block
+    /// must still parse — the new surface is additive.
+    #[test]
+    fn storage_block_default_when_missing() {
+        let cfg: AppConfig = json5::from_str("{}").unwrap();
+        assert!(cfg.storage.total_bytes.is_none());
+        assert!(cfg.storage.private_fraction.is_none());
+        assert!(cfg.storage.private_hard_cap_bytes.is_none());
+        assert!(cfg.storage.shared_hard_cap_bytes.is_none());
+        assert!(cfg.storage.seal_shared_scope.is_none());
+        // The CLI resolves to the blobstore default when nothing is set.
+        assert_eq!(
+            cfg.storage.parsed_total_bytes().unwrap(),
+            crate::bytes::DEFAULT_TOTAL_BYTES
+        );
+    }
+
+    /// Empty env returns the configured value (positive case).
+    #[test]
+    fn storage_resolved_total_bytes_uses_file_when_no_env() {
+        let cfg = StorageConfig {
+            total_bytes: Some("500GiB".into()),
+            ..StorageConfig::default()
+        };
+        let resolved = cfg
+            .resolved_total_bytes_with(|_| None)
+            .expect("no env override should fall through to config");
+        assert_eq!(resolved, 500 * 1024 * 1024 * 1024);
+    }
+
+    /// Env wins over the file.
+    #[test]
+    fn storage_resolved_total_bytes_env_beats_file() {
+        let cfg = StorageConfig {
+            total_bytes: Some("500GiB".into()),
+            ..StorageConfig::default()
+        };
+        let resolved = cfg
+            .resolved_total_bytes_with(|k| {
+                if k == crate::bytes::ADNET_STORAGE_TOTAL_BYTES_ENV {
+                    Some("1TiB".into())
+                } else {
+                    None
+                }
+            })
+            .expect("env override should succeed");
+        assert_eq!(resolved, 1024u64.pow(4));
+    }
+
+    /// An empty env value is treated as "unset" — the file value wins.
+    #[test]
+    fn storage_resolved_total_bytes_empty_env_is_no_op() {
+        let cfg = StorageConfig {
+            total_bytes: Some("2GiB".into()),
+            ..StorageConfig::default()
+        };
+        let resolved = cfg
+            .resolved_total_bytes_with(|k| {
+                if k == crate::bytes::ADNET_STORAGE_TOTAL_BYTES_ENV {
+                    Some("   ".into())
+                } else {
+                    None
+                }
+            })
+            .expect("empty env must be ignored");
+        assert_eq!(resolved, 2 * 1024 * 1024 * 1024);
+    }
+
+    /// A misconfigured env value surfaces a parse error so the CLI
+    /// can fail loudly instead of silently using the wrong budget.
+    #[test]
+    fn storage_resolved_total_bytes_propagates_invalid_env() {
+        let cfg = StorageConfig::default();
+        let err = cfg
+            .resolved_total_bytes_with(|k| {
+                if k == crate::bytes::ADNET_STORAGE_TOTAL_BYTES_ENV {
+                    Some("lots".into())
+                } else {
+                    None
+                }
+            })
+            .unwrap_err();
+        assert!(matches!(err, crate::bytes::BytesError::InvalidNumber { .. }), "{err:?}");
+    }
+
+    /// Default total bytes is 20 GiB — same as the legacy hard-code.
+    #[test]
+    fn storage_default_total_bytes_matches_legacy_20gib() {
+        assert_eq!(
+            crate::bytes::DEFAULT_TOTAL_BYTES,
+            20 * 1024 * 1024 * 1024,
+            "operators who don't configure storage must keep the legacy 20 GiB"
+        );
+    }
+
+    /// Both keyed spellings (camelCase + snake_case) round-trip.
+    #[test]
+    fn storage_block_parses_camel_and_snake_case() {
+        let raw = r#"{
+            "storage": {
+                "totalBytes": "10GiB",
+                "privateFraction": 0.7,
+                "privateHardCapBytes": "8GiB",
+                "sharedHardCapBytes": "2GiB",
+                "sealSharedScope": true
+            }
+        }"#;
+        let cfg: AppConfig = json5::from_str(raw).unwrap();
+        let s = cfg.storage;
+        assert_eq!(s.total_bytes.as_deref(), Some("10GiB"));
+        assert_eq!(s.private_fraction, Some(0.7));
+        assert_eq!(s.private_hard_cap_bytes.as_deref(), Some("8GiB"));
+        assert_eq!(s.shared_hard_cap_bytes.as_deref(), Some("2GiB"));
+        assert_eq!(s.seal_shared_scope, Some(true));
+
+        let raw = r#"{
+            "storage": {
+                "total_bytes": "10GiB",
+                "private_fraction": 0.7,
+                "private_hard_cap_bytes": "8GiB",
+                "shared_hard_cap_bytes": "2GiB",
+                "seal_shared_scope": true
+            }
+        }"#;
+        let cfg: AppConfig = json5::from_str(raw).unwrap();
+        let s = cfg.storage;
+        assert_eq!(s.total_bytes.as_deref(), Some("10GiB"));
+        assert_eq!(s.private_fraction, Some(0.7));
+        assert_eq!(s.private_hard_cap_bytes.as_deref(), Some("8GiB"));
+        assert_eq!(s.shared_hard_cap_bytes.as_deref(), Some("2GiB"));
+        assert_eq!(s.seal_shared_scope, Some(true));
+    }
+
+    /// The dotted-key whitelist must accept every storage.* key —
+    /// both camelCase and snake_case.
+    #[test]
+    fn storage_dotted_keys_are_whitelisted() {
+        for k in [
+            "storage.totalBytes",
+            "storage.total_bytes",
+            "storage.privateFraction",
+            "storage.private_fraction",
+            "storage.privateHardCapBytes",
+            "storage.private_hard_cap_bytes",
+            "storage.sharedHardCapBytes",
+            "storage.shared_hard_cap_bytes",
+            "storage.sealSharedScope",
+            "storage.seal_shared_scope",
+        ] {
+            validate_known_dotted_key(k).unwrap_or_else(|e| panic!("{k} must be whitelisted: {e}"));
+        }
+    }
+
+    /// `set_value` round-trips a `storage.total_bytes` change into
+    /// the on-disk JSON5 file and the typed config.
+    #[test]
+    fn set_value_storage_total_bytes_writes_and_reads() {
+        let dir = tempdir();
+        let path = dir.0.join("config.json");
+        set_value(&path, "storage.total_bytes", "\"50GiB\"").unwrap();
+        let cfg = validate(&path).unwrap();
+        assert_eq!(
+            cfg.storage.total_bytes.as_deref(),
+            Some("50GiB"),
+            "dotted-key set must round-trip into the typed config"
+        );
+        assert_eq!(
+            cfg.storage.parsed_total_bytes().unwrap(),
+            50 * 1024 * 1024 * 1024
+        );
+    }
+
+    /// Mis-typed dotted keys for storage are still rejected with a
+    /// helpful message.
+    #[test]
+    fn set_value_unknown_storage_key_is_rejected() {
+        let dir = tempdir();
+        let path = dir.0.join("config.json");
+        let err = set_value(&path, "storage.totals", "\"50GiB\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown config key"), "{err}");
+        // The file must not be created on a bad key.
+        assert!(!path.exists(), "unknown key must not bootstrap the file");
+    }
+
+    /// The warn-only env override path does not panic on bad input.
+    #[test]
+    fn env_overrides_invalid_storage_total_is_warned() {
+        let mut cfg = AppConfig::default();
+        let env = |k: &str| match k {
+            crate::bytes::ADNET_STORAGE_TOTAL_BYTES_ENV => Some("lots".to_string()),
+            _ => None,
+        };
+        apply_env_overrides_with(&mut cfg, env);
+        // The config is left untouched when the env value is invalid.
+        assert!(cfg.storage.total_bytes.is_none());
+    }
+
+    /// The warn-only env override accepts a valid value but does not
+    /// mutate the typed config (the resolution happens at the CLI
+    /// entry point). All we verify here is that the loader does not
+    /// crash on a well-formed value.
+    #[test]
+    fn env_overrides_valid_storage_total_is_accepted() {
+        let mut cfg = AppConfig::default();
+        let env = |k: &str| match k {
+            crate::bytes::ADNET_STORAGE_TOTAL_BYTES_ENV => Some("100GiB".to_string()),
+            _ => None,
+        };
+        apply_env_overrides_with(&mut cfg, env);
+        // The typed config is untouched — the loader only validates.
+        assert!(cfg.storage.total_bytes.is_none());
+    }
+
+    /// The default template must mention the new storage block so an
+    /// operator running `adbnet config edit` on a fresh install sees
+    /// the knob.
+    #[test]
+    fn default_template_documents_storage_block() {
+        assert!(
+            DEFAULT_CONFIG_TEMPLATE.contains("storage"),
+            "template must document the new storage block"
+        );
+        assert!(
+            DEFAULT_CONFIG_TEMPLATE.contains("totalBytes"),
+            "template must show the totalBytes field"
+        );
+        assert!(
+            DEFAULT_CONFIG_TEMPLATE.contains("100GiB"),
+            "template must show a worked example"
+        );
+    }
+
+    /// Hard-cap parser handles both scopes in one call.
+    #[test]
+    fn storage_parsed_hard_caps_returns_both_values() {
+        let cfg = StorageConfig {
+            private_hard_cap_bytes: Some("60GiB".into()),
+            shared_hard_cap_bytes: Some("40GiB".into()),
+            ..StorageConfig::default()
+        };
+        let (p, s) = cfg.parsed_hard_caps().unwrap();
+        assert_eq!(p, Some(60 * 1024 * 1024 * 1024));
+        assert_eq!(s, Some(40 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn storage_parsed_hard_caps_optional_sides() {
+        let cfg = StorageConfig::default();
+        let (p, s) = cfg.parsed_hard_caps().unwrap();
+        assert_eq!(p, None);
+        assert_eq!(s, None);
+    }
+
+    /// The CLI must surface the dotted-key whitelist in the warning
+    /// path so it grows with the new keys.
+    #[test]
+    fn validate_known_dotted_key_suggests_storage_subkeys() {
+        let err = validate_known_dotted_key("storage.totalbytes")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("storage.totalBytes"), "{err}");
+    }
+
+    /// Backward-compat: the existing 20 GiB hard-code is still in
+    /// `bytes::DEFAULT_TOTAL_BYTES`, so a config that omits the new
+    /// block keeps the legacy behaviour.
+    #[test]
+    fn backward_compat_legacy_20gib_default() {
+        let cfg = AppConfig::default();
+        assert_eq!(
+            cfg.storage.parsed_total_bytes().unwrap(),
+            20 * 1024 * 1024 * 1024
+        );
     }
 }

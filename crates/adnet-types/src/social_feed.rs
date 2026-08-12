@@ -25,8 +25,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::ContentHash;
 use crate::error::{AdnetError, Result};
+use crate::group_chat::{Validate, MAX_SEQUENCE};
 use crate::invariants::{
-    self, AttachmentKind, MAX_ATTACHMENTS, MAX_MENTIONS, MAX_SEQUENCE, MAX_TAGS, ReactionTarget,
+    self, AttachmentKind, MAX_ATTACHMENTS, MAX_MENTIONS, MAX_TAGS, ReactionTarget,
     ReactionType, Sequence, Visibility, validate_content, validate_id, validate_name,
     validate_ordered, validate_url,
 };
@@ -184,6 +185,12 @@ impl SocialPost {
     }
 }
 
+impl Validate for SocialPost {
+    fn validate(&self) -> Result<()> {
+        self.validate()
+    }
+}
+
 /// A media attachment on a [`SocialPost`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -227,6 +234,12 @@ impl PostAttachment {
             validate_name("caption", c)?;
         }
         Ok(())
+    }
+}
+
+impl Validate for PostAttachment {
+    fn validate(&self) -> Result<()> {
+        self.validate()
     }
 }
 
@@ -287,6 +300,12 @@ impl SocialComment {
     }
 }
 
+impl Validate for SocialComment {
+    fn validate(&self) -> Result<()> {
+        self.validate()
+    }
+}
+
 /// A reaction (like / love / laugh / …) on a post or comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -305,6 +324,12 @@ impl SocialReaction {
         validate_id("target_id", &self.target_id)?;
         validate_id("user_id", &self.user_id)?;
         Ok(())
+    }
+}
+
+impl Validate for SocialReaction {
+    fn validate(&self) -> Result<()> {
+        self.validate()
     }
 }
 
@@ -327,6 +352,12 @@ impl FollowRelationship {
             ));
         }
         Ok(())
+    }
+}
+
+impl Validate for FollowRelationship {
+    fn validate(&self) -> Result<()> {
+        self.validate()
     }
 }
 

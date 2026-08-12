@@ -11,9 +11,11 @@ use crate::{
     device::Device,
     discovery::{DiscoveryEvent, DiscoveryManager, DiscoveryProtocol},
     error::{Result, SmartHomeError},
+    homekit::HomeKitBridge,
     matter::MatterClient,
     miot::{MiotAuth, MiotClient, Property, PropertyValue},
     registry::DeviceRegistry,
+    scene::{Scene, SceneManager},
 };
 use chrono::{Local, Timelike};
 use serde::{Deserialize, Serialize};
@@ -71,6 +73,10 @@ pub struct SmartHomeHub {
     miot: Option<Arc<MiotClient>>,
     /// Matter controller, populated via `with_matter()`.
     matter: Option<Arc<MatterClient>>,
+    /// Scene manager
+    scenes: Arc<SceneManager>,
+    /// HomeKit bridge
+    homekit: Arc<HomeKitBridge>,
     events: broadcast::Sender<HubEvent>,
     automations: Arc<RwLock<HashMap<String, Automation>>>,
 }
@@ -86,6 +92,8 @@ impl SmartHomeHub {
             discovery: Arc::new(DiscoveryManager::new()),
             miot: None,
             matter: None,
+            scenes: Arc::new(SceneManager::new(&config.data_dir)),
+            homekit: Arc::new(HomeKitBridge::new(crate::homekit::HomeKitConfig::default())),
             events,
             automations: Arc::new(RwLock::new(HashMap::new())),
             config,
@@ -270,6 +278,90 @@ impl SmartHomeHub {
             .ok_or_else(|| SmartHomeError::NotSupported("MIoT not configured".into()))?;
 
         miot.invoke_action(device_id, crate::miot::Action { siid, aiid, input }).await
+    }
+
+    // ── Matter API ────────────────────────────────────────────────────────
+
+    /// Commission a Matter device using QR code payload or manual pairing code.
+    pub async fn matter_commission(
+        &self,
+        payload: &str,
+        label: Option<String>,
+    ) -> Result<crate::matter::MatterNode> {
+        let matter = self.matter.as_ref()
+            .ok_or_else(|| SmartHomeError::NotSupported("Matter not configured".into()))?;
+
+        let node = matter.commission(payload, label).await?;
+        let device = node.clone().into_device();
+        self.registry.add(device).await?;
+        Ok(node)
+    }
+
+    /// List all commissioned Matter node IDs.
+    pub async fn list_matter_nodes(&self) -> Result<Vec<u64>> {
+        let matter = self.matter.as_ref()
+            .ok_or_else(|| SmartHomeError::NotSupported("Matter not configured".into()))?;
+        matter.list_nodes().await
+    }
+
+    // ── Scene API ─────────────────────────────────────────────────────────
+
+    /// Add or update a scene.
+    pub async fn add_scene(&self, scene: Scene) -> Result<()> {
+        self.scenes.add(scene).await
+    }
+
+    /// Get a scene by ID.
+    pub async fn get_scene(&self, id: &str) -> Option<Scene> {
+        self.scenes.get(id).await
+    }
+
+    /// List all scenes.
+    pub async fn list_scenes(&self) -> Vec<Scene> {
+        self.scenes.list_all().await
+    }
+
+    /// Remove a scene.
+    pub async fn remove_scene(&self, id: &str) -> Result<()> {
+        self.scenes.remove(id).await
+    }
+
+    /// Activate a scene by executing all its actions.
+    pub async fn activate_scene(&self, id: &str) -> Result<()> {
+        let scene = self.scenes.get(id).await
+            .ok_or_else(|| SmartHomeError::Storage(format!("scene not found: {}", id)))?;
+
+        for action in &scene.actions {
+            match action {
+                crate::scene::SceneAction::SetProperty { device_id, siid, piid, value } => {
+                    self.set_property(device_id, *siid, *piid, value.clone()).await?;
+                }
+                crate::scene::SceneAction::Delay { millis } => {
+                    tokio::time::sleep(Duration::from_millis(*millis)).await;
+                }
+                crate::scene::SceneAction::InvokeAction { device_id, siid, aiid, input } => {
+                    let miot = self.miot.as_ref()
+                        .ok_or_else(|| SmartHomeError::NotSupported("MIoT not configured".into()))?;
+                    miot.invoke_action(device_id, crate::miot::Action {
+                        siid: *siid,
+                        aiid: *aiid,
+                        input: input.clone(),
+                    }).await?;
+                }
+            }
+        }
+
+        // Mark scene as active
+        self.scenes.set_active(id).await?;
+        info!("Scene '{}' activated", id);
+        Ok(())
+    }
+
+    // ── HomeKit API ───────────────────────────────────────────────────────
+
+    /// List all HomeKit accessories.
+    pub async fn list_homekit_accessories(&self) -> Vec<crate::homekit::HomeKitAccessory> {
+        self.homekit.list_accessories().await
     }
 
     // ── automation API ───────────────────────────────────────────────────────

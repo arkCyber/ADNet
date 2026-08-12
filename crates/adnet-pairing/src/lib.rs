@@ -65,13 +65,18 @@ pub mod transport_identity;
 pub mod trusted_device;
 pub mod wire;
 
+// Re-export the signing Wallet so downstream crates (CLI, invite
+// mailer, …) can build `SignedInvitation`s without having to also
+// depend on `adnet-identity` for the type itself.
+pub use adnet_identity::wallet::{Wallet, WalletPublic};
+
 pub use capability::{Capability, CapabilitySet};
 pub use code::InvitationCode;
 pub use error::{PairingError, PairingResult};
 pub use invitation::{InvitationPayload, SignedInvitation};
 pub use store::{TrustedDeviceStore, TrustedDeviceStoreConfig};
 pub use transport_identity::{
-    CredentialId, MAX_TIMESTAMP_SKEW_SECONDS, Nonce32, PairingRequest, PairingRequestBuilder,
+    MAX_TIMESTAMP_SKEW_SECONDS, PairingRequest, PairingRequestBuilder,
     PairingResponse, PairingResponseBuilder, TRANSPORT_SCHEME_ED25519, pairing_invitation_digest,
     pairing_request_digest, pairing_response_digest, verify_pairing_request,
     verify_pairing_response,

@@ -21,6 +21,44 @@ members = [
     "crates/adnet-ipc-adapter",
     "crates/adnet-identity",
     "crates/adnet-token",
+    "crates/adnet-roster",
+    "crates/adnet-share",
+    "crates/adnet-socialfeed",
+    "crates/adnet-news",
+    "crates/adnet-userstore",
+    "crates/adnet-bench",
+    "crates/adnet-simulator",
+    "crates/adnet-fuzz",
+    "crates/adnet-integration-tests",
+    "crates/adnet-tui",
+    "crates/adnet-security",
+    "crates/adnet-database",
+    "crates/adnet-nat-traversal",
+    "crates/adnet-verify",
+    "crates/adnet-chaos",
+    "crates/adnet-mail",
+    "crates/adnet-ssh",
+    "crates/adnet-webdav",
+    "crates/adnet-smarthome",
+    "crates/adnet-magicdns",
+    "crates/adnet-pairing",
+    "crates/adnet-invite",
+    "crates/adnet-qr",
+    "crates/adnet-agent",
+    "crates/adnet-tun",
+    "crates/adnet-dns-server",
+    "crates/adnet-chain",
+    "crates/adnet-model-catalog",
+    "crates/adnet-media",
+    "crates/adnet-ffi",
+    "crates/adnet-reputation",
+    "crates/adnet-mesh-coordinator",
+    "crates/adnet-mesh-firewall",
+    "crates/adnet-rpc",
+    "crates/adnet-webhook",
+    "crates/adnet-backup",
+    "crates/adnet-webrtc",
+    "crates/adnet-webtransport",
 ]
 
 # Shared metadata used by every workspace member via `{ workspace = true }`.
@@ -44,17 +82,22 @@ tokio        = { version = "1.40", features = ["full"] }
 futures      = "0.3"
 async-trait  = "0.1"
 async-stream = "0.3"
+tokio-stream = "0.1"
 thiserror    = "1.0"
 anyhow       = "1.0"
 once_cell    = "1.19"
 parking_lot  = "0.12"
 
 # --- Serialization ----------------------------------------------------------
-serde      = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-bincode    = "1.3"
-hex        = "0.4"
-url        = { version = "2.5", features = ["serde"] }
+serde          = { version = "1.0", features = ["derive"] }
+serde_json     = "1.0"
+serde_bytes    = "1.0"
+bincode        = "1.3"
+hex            = "0.4"
+url            = { version = "2.5", features = ["serde"] }
+postcard       = "1.0"
+bytes          = "1.7"
+base64         = "0.22"
 
 # --- Time / IDs / Misc -------------------------------------------------------
 chrono   = { version = "0.4", features = ["serde", "clock"] }
@@ -62,18 +105,68 @@ uuid     = { version = "1.10", features = ["v4", "serde"] }
 tracing  = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs     = "5.0"
+mailparse = "0.15"
+
+# --- OpenTelemetry / Distributed Tracing ------------------------------------
+opentelemetry = { version = "0.32", default-features = false }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["tonic", "http-proto"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["rt-tokio"] }
+tracing-opentelemetry = { version = "0.27" }
 
 # --- Crypto / content addressing --------------------------------------------
 blake3 = "1.5"
 sha2   = "0.10"
 rand   = "0.8"
 ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
+argon2 = "0.5"
+# AEAD for the optional encrypted-blob-store wrapper. XChaCha20-
+# Poly1305 has a 24-byte nonce which makes random-nonce chunk
+# encryption safe (no per-message nonce bookkeeping required).
+chacha20poly1305 = "0.10"
+# Securely wipe key material on drop — required for the encrypted
+# store so the on-disk key file's contents don't linger in heap
+# after the CLI exits.
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+
+# --- Iroh (always available; members gate with `optional = true, dep:iroh`) -
+iroh        = { version = "=1.0.3", default-features = false, features = ["tls-ring"] }
+iroh-blobs  = { version = "=0.103.0", default-features = false, features = ["fs-store"] }
+iroh-gossip = { version = "=0.101.0", default-features = false, features = ["net"] }
+iroh-docs   = { version = "=0.101.0", default-features = false, features = ["fs-store"] }
+
+# --- Misc small deps --------------------------------------------------------
+log             = "0.4"
+dashmap         = "6"
+indexmap        = { version = "2", features = ["serde"] }
+percent-encoding = "2"
+qrcodegen       = "1.8"
+http            = "1"
 
 # --- Networking (HTTP fallback / QUIC) ---------------------------------------
 reqwest = { version = "0.12", features = ["json", "stream"] }
 quinn   = "0.11"
 rustls  = { version = "0.23", default-features = false, features = ["ring"] }
 rcgen   = "0.13"
+
+# --- WebRTC / WebTransport ---------------------------------------------------
+# `webrtc` (webrtc-rs) is the Pion port; it implements SDP, ICE, DTLS, SCTP and
+# DataChannel entirely in pure Rust. The default build never pulls it in; opt-in
+# via `adnet-webrtc`'s `webrtc` feature flag.
+webrtc      = { version = "0.13", default-features = false }
+# `snow` provides the Noise_XX handshake primitives used by the WebRTC and
+# WebTransport paths. We re-use the same primitives already used by adnet-dht
+# (see `adnet-dht::noise::NoiseHandshake`) so the handshake shape stays
+# uniform across transports.
+snow        = { version = "0.9", default-features = false, features = ["default-resolver"] }
+# `wtransport` is the pure-Rust WebTransport (HTTP/3) server + client. It also
+# depends on rustls + quinn, both of which are already in the tree.
+wtransport  = { version = "0.7", default-features = false, features = ["ring"] }
+# `pkarr` is the public-key addressable resource record system. We use it as a
+# lightweight signaling channel — peer A publishes its SDP offer to
+# `<hash(node_id)>.pkarr`, peer B reads it. Already a transitive dep through the
+# `iroh` feature; we pin it directly under the new `webrtc` feature so the
+# new path doesn't depend on `iroh`.
+pkarr       = { version = "=8.0.0", default-features = false, features = ["relays"] }
 
 # --- CLI ---------------------------------------------------------------------
 clap    = { version = "4.5", features = ["derive"] }
@@ -86,25 +179,64 @@ proptest  = "1.4"
 # ---------------------------------------------------------------------------
 # Internal workspace member shorthands
 # ---------------------------------------------------------------------------
-adnet-types         = { path = "crates/adnet-types" }
-adnet-error         = { path = "crates/adnet-error" }
-adnet-observability = { path = "crates/adnet-observability" }
-adnet-blobstore     = { path = "crates/adnet-blobstore" }
-adnet-gossip        = { path = "crates/adnet-gossip" }
-adnet-dht           = { path = "crates/adnet-dht" }
-adnet-namespace     = { path = "crates/adnet-namespace" }
-adnet-mesh          = { path = "crates/adnet-mesh" }
-adnet-resilience    = { path = "crates/adnet-resilience" }
-adnet-transport     = { path = "crates/adnet-transport" }
-adnet-ipc           = { path = "crates/adnet-ipc" }
-adnet-relay         = { path = "crates/adnet-relay" }
-adnet-workspace     = { path = "crates/adnet-workspace" }
-adnet-gateway       = { path = "crates/adnet-gateway" }
-adnet-node          = { path = "crates/adnet-node" }
-adnet-identity      = { path = "crates/adnet-identity" }
-adnet-token         = { path = "crates/adnet-token" }
-adnet-chatstore     = { path = "crates/adnet-chatstore" }
-adnet-ipc-adapter   = { path = "crates/adnet-ipc-adapter" }
+adnet-types             = { path = "crates/adnet-types" }
+adnet-error             = { path = "crates/adnet-error" }
+adnet-observability     = { path = "crates/adnet-observability" }
+adnet-blobstore         = { path = "crates/adnet-blobstore" }
+adnet-gossip            = { path = "crates/adnet-gossip" }
+adnet-dht               = { path = "crates/adnet-dht" }
+adnet-namespace         = { path = "crates/adnet-namespace" }
+adnet-mesh              = { path = "crates/adnet-mesh" }
+adnet-resilience        = { path = "crates/adnet-resilience" }
+adnet-transport         = { path = "crates/adnet-transport" }
+adnet-ipc               = { path = "crates/adnet-ipc" }
+adnet-relay             = { path = "crates/adnet-relay" }
+adnet-workspace         = { path = "crates/adnet-workspace" }
+adnet-gateway           = { path = "crates/adnet-gateway" }
+adnet-node              = { path = "crates/adnet-node" }
+adnet-identity          = { path = "crates/adnet-identity" }
+adnet-token             = { path = "crates/adnet-token" }
+adnet-chatstore         = { path = "crates/adnet-chatstore" }
+adnet-ipc-adapter       = { path = "crates/adnet-ipc-adapter" }
+adnet-roster            = { path = "crates/adnet-roster" }
+adnet-share             = { path = "crates/adnet-share" }
+adnet-socialfeed        = { path = "crates/adnet-socialfeed" }
+adnet-news              = { path = "crates/adnet-news" }
+adnet-userstore         = { path = "crates/adnet-userstore" }
+adnet-pairing           = { path = "crates/adnet-pairing" }
+adnet-invite            = { path = "crates/adnet-invite" }
+adnet-qr                = { path = "crates/adnet-qr" }
+adnet-agent             = { path = "crates/adnet-agent" }
+adnet-ssh               = { path = "crates/adnet-ssh" }
+adnet-webdav            = { path = "crates/adnet-webdav" }
+adnet-tun               = { path = "crates/adnet-tun" }
+adnet-exit-node         = { path = "crates/adnet-exit-node" }
+adnet-magicdns          = { path = "crates/adnet-magicdns" }
+adnet-dns-server        = { path = "crates/adnet-dns-server" }
+adnet-mail              = { path = "crates/adnet-mail" }
+adnet-smarthome         = { path = "crates/adnet-smarthome" }
+adnet-chain             = { path = "crates/adnet-chain" }
+adnet-model-catalog     = { path = "crates/adnet-model-catalog" }
+adnet-media             = { path = "crates/adnet-media" }
+adnet-ffi               = { path = "crates/adnet-ffi" }
+adnet-reputation        = { path = "crates/adnet-reputation" }
+adnet-mesh-coordinator  = { path = "crates/adnet-mesh-coordinator" }
+adnet-mesh-firewall     = { path = "crates/adnet-mesh-firewall" }
+adnet-rpc               = { path = "crates/adnet-rpc" }
+adnet-webhook            = { path = "crates/adnet-webhook" }
+adnet-backup             = { path = "crates/adnet-backup" }
+adnet-webrtc             = { path = "crates/adnet-webrtc" }
+adnet-webtransport       = { path = "crates/adnet-webtransport" }
+adnet-bench             = { path = "crates/adnet-bench" }
+adnet-simulator         = { path = "crates/adnet-simulator" }
+adnet-fuzz             = { path = "crates/adnet-fuzz" }
+adnet-integration-tests = { path = "crates/adnet-integration-tests" }
+adnet-tui              = { path = "crates/adnet-tui" }
+adnet-security         = { path = "crates/adnet-security" }
+adnet-database         = { path = "crates/adnet-database" }
+adnet-nat-traversal    = { path = "crates/adnet-nat-traversal" }
+adnet-verify           = { path = "crates/adnet-verify" }
+adnet-chaos           = { path = "crates/adnet-chaos" }
 
 # ---------------------------------------------------------------------------
 # Profile / lints applied workspace-wide

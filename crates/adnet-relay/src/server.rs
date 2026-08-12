@@ -35,7 +35,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, info, warn, error};
 
 use crate::config::RelayServerInfo;
 use crate::metrics::RelayMetrics;
@@ -95,16 +95,22 @@ pub struct ServerPolicy {
 }
 
 impl ServerPolicy {
+    /// Build a [`ServerPolicy`] from a [`RelayConfig`].
+    ///
+    /// All fields are optional in `RelayConfig`; when `None` the defaults
+    /// from [`Default`] are used so the relay always starts with a fully
+    /// populated policy even if the operator left some fields unset.
     pub fn from_config(cfg: &crate::RelayConfig) -> Self {
-        let host_policy = cfg.host_policy.clone();
-        let max_body_bytes = cfg.max_body_bytes;
-        let upstream_timeout = cfg.upstream_timeout;
-        let redirect_policy =
-            SafeRedirectPolicy::new(host_policy.clone()).with_limit(cfg.max_redirects);
+        use std::time::Duration;
+        let redirect_policy = SafeRedirectPolicy::new(cfg.host_policy.clone())
+            .with_limit(cfg.max_redirects.unwrap_or(3) as usize);
         Self {
-            host_policy,
-            max_body_bytes,
-            upstream_timeout,
+            host_policy: cfg.host_policy.clone(),
+            max_body_bytes: cfg.max_body_bytes.unwrap_or(DEFAULT_MAX_BODY_BYTES),
+            upstream_timeout: cfg
+                .upstream_timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or(DEFAULT_UPSTREAM_TIMEOUT),
             redirect_policy,
         }
     }
@@ -254,12 +260,17 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
     metrics.active_sessions.inc();
     let _guard = ActiveSessionGuard::new(metrics.clone());
 
+    debug!("Relay request: host={}, port={}, path={}", q.host, q.port, q.path);
+
     if let Err((status, msg)) = validate_request(q, policy).await {
         metrics.policy_filtered.inc();
+        warn!("Relay policy filtered: {} - {}", q.host, msg);
         return (status, msg).into_response();
     }
     let path = normalize_mesh_path(&q.path);
     let upstream_url = format!("http://{}:{}{}", q.host.trim(), q.port, path);
+
+    debug!("Relay upstream URL: {}", upstream_url);
 
     let client = match reqwest::Client::builder()
         .timeout(policy.upstream_timeout)
@@ -268,6 +279,7 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
     {
         Ok(c) => c,
         Err(e) => {
+            error!("Failed to build relay HTTP client: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("client build failed: {e}"),
@@ -280,6 +292,7 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
         Ok(r) => r,
         Err(e) => {
             metrics.upstream_errors.inc();
+            error!("Relay upstream fetch failed: {} - {}", upstream_url, e);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("Upstream fetch failed: {e}"),
@@ -296,9 +309,11 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
     for hop in 0..=policy.redirect_policy.limit() {
         let status = resp.status();
         if !status.is_redirection() {
+            debug!("Relay response: status={}, upstream={}", status, upstream_url);
             break;
         }
         if hop == policy.redirect_policy.limit() {
+            warn!("Relay: too many redirects (limit {}) from {}", policy.redirect_policy.limit(), upstream_url);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!(
@@ -316,6 +331,7 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
             Some(l) => l.to_string(),
             None => {
                 metrics_for_loop.upstream_errors.inc();
+                warn!("Relay: redirect with no Location header from {}", upstream_url);
                 return (
                     StatusCode::BAD_GATEWAY,
                     String::from("redirect with no Location header"),
@@ -323,11 +339,13 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
                     .into_response();
             }
         };
+        debug!("Relay redirect {} -> {} (hop {}/{})", upstream_url, location, hop + 1, policy.redirect_policy.limit());
         let next_url =
             match reqwest::Url::parse(&upstream_url).and_then(|base| base.join(&location)) {
                 Ok(u) => u,
             Err(e) => {
                 metrics_for_loop.upstream_errors.inc();
+                warn!("Relay: invalid redirect Location '{}': {}", location, e);
                 return (
                     StatusCode::BAD_GATEWAY,
                     format!("invalid redirect Location: {e}"),
@@ -345,11 +363,13 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
             port,
         ) {
             metrics_for_loop.upstream_errors.inc();
+            warn!("Relay redirect policy violation: {} -> {}: {}", upstream_url, location, e);
             return (StatusCode::BAD_GATEWAY, format!("redirect rejected: {e}")).into_response();
         }
         // New target must also satisfy the host policy independently.
         if let Err(e) = policy.host_policy.accepts_resolved(&next_host).await {
             metrics_for_loop.upstream_errors.inc();
+            warn!("Relay host policy rejected redirect: {} -> {}: {}", host, next_host, e);
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("redirect host rejected: {e}"),
@@ -362,6 +382,7 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
             Ok(r) => r,
             Err(e) => {
                 metrics_for_loop.upstream_errors.inc();
+                error!("Relay upstream fetch after redirect failed: {}", e);
                 return (
                     StatusCode::BAD_GATEWAY,
                     format!("upstream fetch after redirect failed: {e}"),
@@ -383,6 +404,11 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
         && len > policy.max_body_bytes as u64
     {
         metrics.upstream_errors.inc();
+        warn!(
+            "Relay: upstream Content-Length {} exceeds policy max {}",
+            len,
+            policy.max_body_bytes
+        );
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
@@ -395,6 +421,7 @@ async fn proxy_mesh_fetch(q: &MeshFetchQuery, policy: &ServerPolicy) -> Response
 
     // Request passed all policy checks — count as a forward.
     metrics.forwards.inc();
+    info!("Relay forwarding: {} -> {}", upstream_url, status);
 
     let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
     let max_bytes = policy.max_body_bytes;
@@ -590,19 +617,27 @@ async fn validate_request(
 ) -> Result<(), (StatusCode, String)> {
     let host = q.host.trim();
     if host.is_empty() || host.len() > 253 {
+        debug!("Relay validation failed: empty or oversized host");
         return Err((StatusCode::BAD_REQUEST, "Invalid host".into()));
     }
     if q.port == 0 {
+        debug!("Relay validation failed: invalid port 0");
         return Err((StatusCode::BAD_REQUEST, "Invalid port".into()));
     }
     // Path policy (centralised in `proxy_policy`).
-    validate_path(&q.path).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    validate_path(&q.path).map_err(|e| {
+        debug!("Relay path validation failed: {}", e);
+        (StatusCode::BAD_REQUEST, e.to_string())
+    })?;
     // Host policy with DNS resolution.
     policy
         .host_policy
         .accepts_resolved(host)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| {
+            debug!("Relay host validation failed for {}: {}", host, e);
+            (StatusCode::BAD_REQUEST, e)
+        })?;
     Ok(())
 }
 
@@ -834,6 +869,7 @@ mod tests {
     #[test]
     fn active_session_guard_decrements_on_drop() {
         let m = RelayMetrics::get();
+        m.active_sessions.set(0); // Reset for test isolation
         let before = m.active_sessions.get();
         // The 2-step API: caller increments, guard decrements on drop.
         m.active_sessions.inc();
@@ -859,6 +895,7 @@ mod tests {
     #[test]
     fn active_session_guard_dec_is_balanced_with_caller_inc() {
         let m = RelayMetrics::get();
+        m.active_sessions.set(0); // Reset for test isolation
         let before = m.active_sessions.get();
 
         m.active_sessions.inc();
@@ -898,18 +935,24 @@ mod tests {
     #[test]
     fn active_session_guard_leaks_when_forgotten() {
         let m = RelayMetrics::get();
-        let before = m.active_sessions.get();
-        m.active_sessions.inc();
+        m.active_sessions.set(0); // Reset for test isolation
+        let baseline = m.active_sessions.get();
+        // ActiveSessionGuard only DECs on Drop; it doesn't inc in new().
         let guard = ActiveSessionGuard::new(m.clone());
-        assert_eq!(m.active_sessions.get(), before + 1);
+        // Counter unchanged until guard is dropped.
+        assert_eq!(
+            m.active_sessions.get(),
+            baseline,
+            "guard.new() must not increment"
+        );
+        // Forget the guard — Drop is skipped, counter stays.
         std::mem::forget(guard);
         assert_eq!(
             m.active_sessions.get(),
-            before + 1,
-            "forget skips Drop, so the gauge stays incremented"
+            baseline,
+            "forget skips Drop, so the gauge stays at baseline"
         );
-        // Manual cleanup to keep the gauge stable for subsequent tests.
-        m.active_sessions.dec();
+        // No manual dec needed — we never incremented.
     }
 
     #[test]

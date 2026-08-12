@@ -1,5 +1,7 @@
 //! Gossip announcement payloads — what peers broadcast into a room topic.
 
+use std::time::{Duration, Instant};
+
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +12,12 @@ use crate::node::NodeId;
 use crate::room::RoomId;
 use crate::ticket::BlobTicket;
 use crate::wallet_address::WalletAddress;
+
+/// Default TTL for gossip announcements (1 hour).
+pub const DEFAULT_GOSSIP_TTL_SECS: u64 = 3600;
+
+/// Maximum TTL allowed for gossip announcements (24 hours).
+pub const MAX_GOSSIP_TTL_SECS: u64 = 86400;
 
 /// Maximum size of a single asset that may be announced. 1 TiB matches
 /// the blobstore chunk-group ceiling and prevents a malicious peer from
@@ -72,6 +80,15 @@ pub struct Announcement {
     pub source_url: Option<String>,
     pub ticket: Option<BlobTicket>,
     pub timestamp: DateTime<Utc>,
+    /// Unique message identifier for deduplication.
+    /// Generated from content_hash + node_id + timestamp when not provided.
+    /// Format: BLAKE3 hash of (content_hash || node_id || timestamp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// Time-to-live in seconds. Controls how long this announcement should be
+    /// cached/relayed. Defaults to [`DEFAULT_GOSSIP_TTL_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
     /// Optional wallet address that vouches for this announcement.
     ///
     /// When `Some`, gossip peers can verify the announcement was signed
@@ -88,6 +105,34 @@ pub struct Announcement {
     pub signer: Option<WalletAddress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<Vec<u8>>,
+}
+
+/// Manual `Default` impl for [`Announcement`] — the auto-derive
+/// would require every contained type (`RoomId`, `ContentHash`,
+/// `NodeId`, `CdnContentKind`, `DateTime<Utc>`) to also implement
+/// `Default`, and we don't want to promise that for the primitives.
+/// Callers who need a placeholder should fill in every mandatory
+/// field with the spread operator `..Announcement::default()`.
+impl Default for Announcement {
+    fn default() -> Self {
+        Self {
+            room_id: RoomId::from("default"),
+            content_hash: ContentHash::from_bytes(b"\0\0\0\0\0\0\0\0"),
+            node_id: NodeId::random(),
+            title: String::new(),
+            kind: CdnContentKind::GenericFile,
+            size_bytes: 0,
+            mime_type: None,
+            source_url: None,
+            ticket: None,
+            timestamp: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
+                .unwrap_or_else(chrono::Utc::now),
+            message_id: None,
+            ttl_secs: None,
+            signer: None,
+            signature: None,
+        }
+    }
 }
 
 impl Announcement {
@@ -152,6 +197,10 @@ impl Announcement {
                 "signer/signature must be both present or both absent".into(),
             ));
         }
+        // Validate TTL if present (before checking expiration).
+        self.validate_ttl()?;
+        // Check timestamp skew FIRST (before TTL expiration).
+        // TTL expiration should not mask invalid timestamps.
         let now = Utc::now();
         let limit = ChronoDuration::hours(MAX_TIMESTAMP_SKEW_HOURS);
         let earliest = now - limit;
@@ -161,6 +210,10 @@ impl Announcement {
                 "timestamp: {} outside the ±{}h window around {}",
                 self.timestamp, MAX_TIMESTAMP_SKEW_HOURS, now
             )));
+        }
+        // Finally check for expired announcements.
+        if self.is_expired() {
+            return Err(AdnetError::Validation("announcement has expired".into()));
         }
         Ok(())
     }
@@ -212,6 +265,8 @@ impl Announcement {
                 .map(String::from),
             ticket: None,
             timestamp: Utc::now(),
+            message_id: None,
+            ttl_secs: None,
             signer: None,
             signature: None,
         })
@@ -265,6 +320,73 @@ impl Announcement {
         self.signature = None;
         self
     }
+
+    /// Get the effective TTL for this announcement.
+    /// Returns the configured TTL or the default if not set.
+    pub fn effective_ttl(&self) -> Duration {
+        Duration::from_secs(self.ttl_secs.unwrap_or(DEFAULT_GOSSIP_TTL_SECS))
+    }
+
+    /// Check if this announcement has expired based on its TTL.
+    /// The expiration time is computed as: timestamp + ttl_secs.
+    pub fn is_expired(&self) -> bool {
+        let ttl = self.effective_ttl();
+        let expiry = self.timestamp + chrono::Duration::from_std(ttl).unwrap_or_default();
+        Utc::now() > expiry
+    }
+
+    /// Get the expiration instant for this announcement.
+    /// Returns the time when this announcement will expire.
+    pub fn effective_expires_at(&self) -> Option<Instant> {
+        let ttl = self.effective_ttl();
+        let expiry = self.timestamp + chrono::Duration::from_std(ttl).unwrap_or_default();
+        // Convert chrono DateTime to std::time::Instant
+        let now = Utc::now();
+        let duration_since_now = expiry.signed_duration_since(now);
+        let duration_std = duration_since_now.to_std().ok()?;
+        Some(std::time::Instant::now() + duration_std)
+    }
+
+    /// Generate or retrieve the message ID for deduplication.
+    /// If message_id is already set, returns it. Otherwise generates one
+    /// from content_hash + node_id + timestamp using BLAKE3.
+    pub fn get_or_generate_message_id(&mut self) -> String {
+        if let Some(ref id) = self.message_id {
+            return id.clone();
+        }
+        let id = self.generate_message_id();
+        self.message_id = Some(id.clone());
+        id
+    }
+
+    /// Generate a deterministic message ID from this announcement's fields.
+    /// Uses BLAKE3 hash of the canonical signing preimage.
+    pub fn generate_message_id(&self) -> String {
+        use std::io::Write;
+        let mut hasher = blake3::Hasher::new();
+        hasher.write_all(&self.content_hash.as_bytes()).unwrap();
+        hasher.write_all(&self.node_id.as_bytes()).unwrap();
+        hasher.write_all(self.timestamp.to_rfc3339().as_bytes()).unwrap();
+        hasher.finalize().to_hex().to_string()
+    }
+
+    /// Validate the TTL field if present.
+    pub fn validate_ttl(&self) -> Result<()> {
+        if let Some(ttl) = self.ttl_secs {
+            if ttl == 0 {
+                return Err(AdnetError::Validation(
+                    "ttl_secs: must be greater than 0".into(),
+                ));
+            }
+            if ttl > MAX_GOSSIP_TTL_SECS {
+                return Err(AdnetError::Validation(format!(
+                    "ttl_secs: {} exceeds MAX_GOSSIP_TTL_SECS ({})",
+                    ttl, MAX_GOSSIP_TTL_SECS
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Wrapper used by the gossip overlay — the raw payload plus sender metadata.
@@ -272,6 +394,15 @@ impl Announcement {
 pub struct AnnouncementPayload {
     pub from_node: NodeId,
     pub payload: serde_json::Value,
+}
+
+impl Default for AnnouncementPayload {
+    fn default() -> Self {
+        Self {
+            from_node: NodeId::random(),
+            payload: serde_json::Value::Null,
+        }
+    }
 }
 
 impl From<&Announcement> for AnnouncementPayload {
@@ -318,6 +449,8 @@ mod tests {
             source_url: None,
             ticket: None,
             timestamp: Utc::now(),
+            message_id: None,
+            ttl_secs: None,
             signer: None,
             signature: None,
         };
@@ -353,6 +486,8 @@ mod tests {
             source_url: None,
             ticket: None,
             timestamp: Utc::now(),
+            message_id: None,
+            ttl_secs: None,
             signer: None,
             signature: None,
         }
@@ -554,6 +689,9 @@ mod tests {
     #[test]
     fn validate_rejects_far_past_timestamp() {
         let mut a = good_announcement();
+        // Set a TTL within the max limit so TTL validation passes.
+        // The timestamp is still 25 hours in the past (MAX_TIMESTAMP_SKEW_HOURS=24), so timestamp check should fail.
+        a.ttl_secs = Some(3600); // 1 hour TTL - within MAX_GOSSIP_TTL_SECS=86400
         a.timestamp = Utc::now() - ChronoDuration::hours(MAX_TIMESTAMP_SKEW_HOURS + 1);
         let err = a.validate().unwrap_err();
         assert!(err.to_string().contains("timestamp:"), "got {err}");
@@ -564,5 +702,207 @@ mod tests {
         let mut a = good_announcement();
         a.timestamp = Utc::now() + ChronoDuration::hours(MAX_TIMESTAMP_SKEW_HOURS);
         assert!(a.validate().is_ok());
+    }
+
+    // ─── message_id tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn message_id_generation_is_deterministic() {
+        let a = good_announcement();
+        let id1 = a.generate_message_id();
+        let id2 = a.generate_message_id();
+        assert_eq!(id1, id2, "same announcement should produce same message_id");
+    }
+
+    #[test]
+    fn message_id_differs_for_different_content() {
+        let mut a1 = good_announcement();
+        let mut a2 = good_announcement();
+        a1.content_hash = ContentHash::from_bytes(b"content1");
+        a2.content_hash = ContentHash::from_bytes(b"content2");
+        assert_ne!(a1.generate_message_id(), a2.generate_message_id());
+    }
+
+    #[test]
+    fn message_id_differs_for_different_nodes() {
+        let mut a1 = good_announcement();
+        let mut a2 = good_announcement();
+        a1.node_id = NodeId::random();
+        a2.node_id = NodeId::random();
+        assert_ne!(a1.generate_message_id(), a2.generate_message_id());
+    }
+
+    #[test]
+    fn message_id_differs_for_different_timestamps() {
+        let mut a1 = good_announcement();
+        let mut a2 = good_announcement();
+        a1.timestamp = Utc::now();
+        a2.timestamp = Utc::now() + ChronoDuration::seconds(1);
+        assert_ne!(a1.generate_message_id(), a2.generate_message_id());
+    }
+
+    #[test]
+    fn get_or_generate_returns_existing_id() {
+        let mut a = good_announcement();
+        let existing_id = "existing_id_123".to_string();
+        a.message_id = Some(existing_id.clone());
+        let id = a.get_or_generate_message_id();
+        assert_eq!(id, existing_id);
+    }
+
+    #[test]
+    fn get_or_generate_creates_new_id_when_missing() {
+        let mut a = good_announcement();
+        assert!(a.message_id.is_none());
+        let id = a.get_or_generate_message_id();
+        assert!(a.message_id.is_some());
+        assert_eq!(id.as_str(), a.message_id.as_ref().unwrap().as_str());
+    }
+
+    // ─── TTL tests ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn effective_ttl_returns_default_when_none() {
+        let a = good_announcement();
+        assert!(a.ttl_secs.is_none());
+        assert_eq!(a.effective_ttl(), Duration::from_secs(DEFAULT_GOSSIP_TTL_SECS));
+    }
+
+    #[test]
+    fn effective_ttl_returns_configured_value() {
+        let mut a = good_announcement();
+        a.ttl_secs = Some(7200);
+        assert_eq!(a.effective_ttl(), Duration::from_secs(7200));
+    }
+
+    #[test]
+    fn validate_rejects_zero_ttl() {
+        let mut a = good_announcement();
+        a.ttl_secs = Some(0);
+        let err = a.validate_ttl().unwrap_err();
+        assert!(err.to_string().contains("ttl_secs"));
+    }
+
+    #[test]
+    fn validate_rejects_oversize_ttl() {
+        let mut a = good_announcement();
+        a.ttl_secs = Some(MAX_GOSSIP_TTL_SECS + 1);
+        let err = a.validate_ttl().unwrap_err();
+        assert!(err.to_string().contains("ttl_secs"));
+    }
+
+    #[test]
+    fn validate_accepts_max_ttl() {
+        let mut a = good_announcement();
+        a.ttl_secs = Some(MAX_GOSSIP_TTL_SECS);
+        assert!(a.validate_ttl().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_default_ttl() {
+        let mut a = good_announcement();
+        a.ttl_secs = Some(DEFAULT_GOSSIP_TTL_SECS);
+        assert!(a.validate_ttl().is_ok());
+    }
+
+    // ─── expiration tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn announcement_is_not_expired_at_creation() {
+        let mut a = good_announcement();
+        a.timestamp = Utc::now();
+        a.ttl_secs = Some(3600);
+        assert!(!a.is_expired());
+    }
+
+    #[test]
+    fn announcement_is_expired_after_ttl() {
+        let mut a = good_announcement();
+        a.timestamp = Utc::now() - ChronoDuration::hours(2);
+        a.ttl_secs = Some(3600); // 1 hour TTL
+        assert!(a.is_expired(), "announcement should be expired after 2h with 1h TTL");
+    }
+
+    #[test]
+    fn announcement_is_not_expired_before_ttl() {
+        let mut a = good_announcement();
+        a.timestamp = Utc::now() - ChronoDuration::minutes(30);
+        a.ttl_secs = Some(3600); // 1 hour TTL
+        assert!(!a.is_expired(), "announcement should not be expired before TTL");
+    }
+
+    #[test]
+    fn validate_rejects_expired_announcement() {
+        let mut a = good_announcement();
+        a.timestamp = Utc::now() - ChronoDuration::hours(2);
+        a.ttl_secs = Some(3600);
+        let err = a.validate().unwrap_err();
+        assert!(err.to_string().contains("expired"));
+    }
+
+    #[test]
+    fn announcement_with_zero_ttl_expires_immediately() {
+        let mut a = good_announcement();
+        a.timestamp = Utc::now();
+        a.ttl_secs = Some(0);
+        // Note: 0 TTL is rejected in validate_ttl, but is_expired would return true
+        // because expiry = timestamp + 0 duration = timestamp
+    }
+
+    // ─── serde round-trip with new fields ───────────────────────────────────────
+
+    #[test]
+    fn announcement_with_message_id_roundtrips() {
+        let mut a = good_announcement();
+        a.message_id = Some("test_message_id".to_string());
+        let json = serde_json::to_string(&a).unwrap();
+        let back: Announcement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.message_id, Some("test_message_id".to_string()));
+    }
+
+    #[test]
+    fn announcement_with_ttl_roundtrips() {
+        let mut a = good_announcement();
+        a.ttl_secs = Some(7200);
+        let json = serde_json::to_string(&a).unwrap();
+        let back: Announcement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ttl_secs, Some(7200));
+    }
+
+    #[test]
+    fn announcement_full_roundtrip_with_all_fields() {
+        let mut a = good_announcement();
+        a.message_id = Some("full_test_id".to_string());
+        a.ttl_secs = Some(1800);
+        a.attach_signature(
+            WalletAddress::from_bytes([0xAAu8; 20]),
+            vec![1u8; 65],
+        );
+        let json = serde_json::to_string(&a).unwrap();
+        let back: Announcement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.message_id, Some("full_test_id".to_string()));
+        assert_eq!(back.ttl_secs, Some(1800));
+        assert!(back.is_signed());
+    }
+
+    #[test]
+    fn missing_optional_fields_default_to_none() {
+        // Verify backwards compatibility: old announcements without message_id/ttl
+        // deserialize correctly
+        let json = serde_json::json!({
+            "roomId": "lobby",
+            "contentHash": "5daf0f9324cf6cd9fbcb09e8a3eaaaa3e7c84aeef1bba7e8b4fec7b4d28d2c33",
+            "nodeId": "0000000000000000000000000000000000000000000000000000000000000000",
+            "title": "T",
+            "kind": "article",
+            "sizeBytes": 1,
+            "mimeType": null,
+            "sourceUrl": null,
+            "ticket": null,
+            "timestamp": "2024-01-01T00:00:00Z",
+        });
+        let a: Announcement = serde_json::from_value(json).unwrap();
+        assert!(a.message_id.is_none());
+        assert!(a.ttl_secs.is_none());
     }
 }

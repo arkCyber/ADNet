@@ -10,17 +10,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use adnet_types::{MeshMember, MeshMembership, NodeId, VirtualIp, VirtualIpv4, VirtualIpv6};
+use adnet_types::{MeshMember, MeshMembership, NodeId, VirtualIp, VirtualIpv4};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use crate::config::ResolverConfig;
 use crate::error::{MagicError, MagicResult};
 use crate::query::{MagicName, MagicQuery};
-
-/// Resolver configuration. Currently a placeholder for
-/// future knobs (cache TTL, max network count).
-#[derive(Debug, Clone, Default)]
-pub struct ResolverConfig {}
 
 /// A snapshot of the resolver state, suitable for the
 /// `ray status` output.
@@ -37,7 +33,7 @@ pub struct ResolverSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkSnapshot {
     pub network: String,
-    pub entries: Vec<(String, VirtualIpv4, VirtualIpv6, NodeId)>,
+    pub entries: Vec<(String, VirtualIpv4, std::net::Ipv6Addr, NodeId)>,
 }
 
 /// Thread-safe magic DNS resolver.
@@ -227,7 +223,7 @@ impl Resolver {
                         (
                             host.clone(),
                             member.virtual_ip.ipv4,
-                            member.virtual_ip.ipv6,
+                            member.virtual_ip.ipv6.as_std(),
                             member.node_id.clone(),
                         )
                     })

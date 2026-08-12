@@ -12,6 +12,7 @@ use adnet_smarthome::{
     automation::{Automation, AutomationAction, Trigger},
     device::{Device, DeviceType},
     hub::{HubConfig, HubEvent, SmartHomeHub},
+    scene::{Scene, SceneAction},
 };
 
 use bytes::Bytes;
@@ -547,3 +548,88 @@ async fn api_properties_endpoints_via_mock_miot() {
 use adnet_smarthome::miot::MiotClient as _UnusedMiotClientImportGuard;
 #[allow(unused)]
 fn _type_assertions(_: Action) {}
+
+/// Regression for the prior `CreateSceneRequest::actions` field
+/// `skip_deserializing`: every scene created via REST used to
+/// have an empty action list regardless of the body. This test
+/// sends a real scene body with three actions and asserts every
+/// action is persisted.
+#[tokio::test]
+async fn api_scene_create_persists_actions_from_body() {
+    let dir = temp_data_dir("api-scene-actions");
+    let hub = Arc::new(SmartHomeHub::new(hub_config(&dir)));
+    let (addr, _handle) = spawn_api(hub.clone(), None).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://{addr}");
+
+    let body = serde_json::json!({
+        "id": "evening",
+        "name": "Evening",
+        "room": "Living room",
+        "icon": "moon",
+        "actions": [
+            { "set_property": {
+                "device_id": "lamp-1",
+                "siid": 2,
+                "piid": 1,
+                "value": true,
+            }},
+            { "delay": { "millis": 250 } },
+            { "invoke_action": {
+                "device_id": "speaker-1",
+                "siid": 5,
+                "aiid": 3,
+                "input": [10, 20],
+            }}
+        ],
+    });
+
+    let resp = client
+        .post(format!("{base}/api/scenes"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // Read back via the in-hub method (the GET endpoint is not
+    // explicit, but `get_scene` is).
+    let stored = hub
+        .get_scene("evening")
+        .await
+        .expect("scene must exist");
+    assert_eq!(stored.actions.len(), 3);
+    assert_eq!(stored.room.as_deref(), Some("Living room"));
+    assert_eq!(stored.icon.as_deref(), Some("moon"));
+
+    // Round-trip through JSON to confirm the wire-compatible
+    // encoding captures the action list without surprising the
+    // deserializer (the very bug we just fixed).
+    let json = serde_json::to_string(&stored).unwrap();
+    let back: Scene = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.actions.len(), 3);
+    match &back.actions[0] {
+        SceneAction::SetProperty { device_id, siid, piid, value } => {
+            assert_eq!(device_id, "lamp-1");
+            assert_eq!(*siid, 2);
+            assert_eq!(*piid, 1);
+            assert_eq!(value, &serde_json::json!(true));
+        }
+        other => panic!("expected SetProperty, got {other:?}"),
+    }
+    match &back.actions[1] {
+        SceneAction::Delay { millis } => assert_eq!(*millis, 250),
+        other => panic!("expected Delay, got {other:?}"),
+    }
+    match &back.actions[2] {
+        SceneAction::InvokeAction { device_id, siid, aiid, input } => {
+            assert_eq!(device_id, "speaker-1");
+            assert_eq!(*siid, 5);
+            assert_eq!(*aiid, 3);
+            assert_eq!(input.len(), 2);
+        }
+        other => panic!("expected InvokeAction, got {other:?}"),
+    }
+
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+}

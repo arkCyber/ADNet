@@ -2,6 +2,7 @@
 //!
 //! This module provides IPFS DHT operations including:
 //! - Finding providers for content
+//! - Finding closest nodes (Kademlia FIND_NODE)
 //! - Announcing provider records
 //! - DHT statistics
 
@@ -11,6 +12,7 @@ use std::time::Duration;
 
 use adnet_blobstore::BlobStore;
 use adnet_types::ContentHash;
+use adnet_dht::bucket::RoutingTable;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -91,17 +93,29 @@ pub struct DhtService {
     /// Blob store for checking content availability.
     #[allow(dead_code)]
     blob_store: Option<Arc<BlobStore>>,
+    /// Kademlia routing table for find_nodes queries.
+    routing_table: Option<Arc<RwLock<RoutingTable>>>,
+    /// Bootstrap nodes for initial peer discovery.
+    bootstrap_nodes: Vec<String>,
 }
 
 impl DhtService {
     /// Create a new DHT service.
-    pub fn new(local_id: String, _bootstrap_nodes: Vec<String>) -> Self {
+    pub fn new(local_id: String, bootstrap_nodes: Vec<String>) -> Self {
         Self {
             local_id,
             providers: Arc::new(RwLock::new(HashMap::new())),
             provider_ttl: Duration::from_secs(86400), // 24 hours
             blob_store: None,
+            routing_table: None,
+            bootstrap_nodes,
         }
+    }
+
+    /// Create with routing table for Kademlia queries.
+    pub fn with_routing_table(mut self, routing_table: Arc<RwLock<RoutingTable>>) -> Self {
+        self.routing_table = Some(routing_table);
+        self
     }
 
     /// Create with blob store for content availability checks.
@@ -116,6 +130,83 @@ impl DhtService {
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.provider_ttl = ttl;
         self
+    }
+
+    /// Get the number of peers in the routing table.
+    pub async fn num_peers(&self) -> usize {
+        if let Some(ref rt) = self.routing_table {
+            let rt = rt.read().await;
+            rt.num_contacts()
+        } else {
+            0
+        }
+    }
+
+    /// Add a peer to the routing table.
+    pub async fn add_peer(&self, peer_id: &str, addr: &str) -> Result<(), DhtError> {
+        if let Some(ref rt) = self.routing_table {
+            let node_id: adnet_types::NodeId = peer_id.parse()
+                .map_err(|_| DhtError::Internal(format!("Invalid peer ID: {}", peer_id)))?;
+            let socket_addr: std::net::SocketAddr = addr.parse()
+                .map_err(|_| DhtError::Internal(format!("Invalid address: {}", addr)))?;
+            
+            let contact = adnet_dht::Contact::new(node_id, socket_addr);
+            let mut rt = rt.write().await;
+            rt.insert(contact)
+                .map_err(|e| DhtError::Internal(format!("Failed to add peer: {:?}", e)))?;
+            Ok(())
+        } else {
+            Err(DhtError::Internal("Routing table not initialized".to_string()))
+        }
+    }
+
+    /// Find closest nodes to a key using Kademlia routing.
+    pub async fn find_nodes(&self, key: &str) -> Result<FindNodesResult, DhtError> {
+        // Parse the key as a node ID target
+        let target: adnet_types::NodeId = key.parse()
+            .unwrap_or_else(|_: <adnet_types::NodeId as std::str::FromStr>::Err| {
+                // If not a valid node ID, derive one from the key bytes
+                adnet_dht::node_id_from_key_str(key)
+            });
+
+        if let Some(ref rt) = self.routing_table {
+            let rt = rt.read().await;
+            // Get K closest peers from the routing table
+            let contacts = rt.closest(&target, 20);
+            
+            let nodes: Vec<NodeInfo> = contacts.into_iter().map(|c| {
+                NodeInfo {
+                    id: c.id.to_string(),
+                    addrs: c.addrs.iter().map(|a| a.to_string()).collect(),
+                }
+            }).collect();
+
+            Ok(FindNodesResult { nodes })
+        } else {
+            // No routing table - return bootstrap nodes as candidates
+            let nodes: Vec<NodeInfo> = self.bootstrap_nodes.iter()
+                .filter_map(|addr| {
+                    // Try to parse as node_id@addr format or just addr
+                    if let Some((peer_id, peer_addr)) = addr.split_once('@') {
+                        Some(NodeInfo {
+                            id: peer_id.to_string(),
+                            addrs: vec![peer_addr.to_string()],
+                        })
+                    } else {
+                        // Just use the address as a bootstrap node
+                        None
+                    }
+                })
+                .collect();
+
+            if nodes.is_empty() {
+                // Return empty result with info
+                tracing::debug!("find_nodes called but no routing table or bootstrap nodes available");
+                Ok(FindNodesResult { nodes: Vec::new() })
+            } else {
+                Ok(FindNodesResult { nodes })
+            }
+        }
     }
 
     /// Find providers for a content CID.
@@ -143,15 +234,6 @@ impl DhtService {
 
         Ok(ProvideResult {
             cid: cid.to_string(),
-        })
-    }
-
-    /// Find closest nodes to a key.
-    #[allow(dead_code)]
-    pub async fn find_nodes(&self, _key: &str) -> Result<FindNodesResult, DhtError> {
-        // TODO: Implement Kademlia find_nodes
-        Ok(FindNodesResult {
-            nodes: Vec::new(),
         })
     }
 

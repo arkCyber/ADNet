@@ -1,27 +1,4 @@
 //! `adnet-types` — foundational types shared across the ADNet workspace.
-//!
-//! Every higher crate (`blobstore`, `gossip`, `mesh`, `transport`, `node`)
-//! depends on this one. Anything placed here must be **stable** and free of
-//! runtime / IO semantics.
-//!
-//! Modules:
-//! - [`node`]      : `NodeId`, `NodeAddr` (host + port + relay url)
-//! - [`content`]   : `ContentHash` (BLAKE3), content kinds, range specs
-//! - [`ticket`]    : peer / blob tickets with optional range
-//! - [`topic`]     : gossip topic naming (iroh-gossip compatible)
-//! - [`announce`]  : room/lobby announcement payloads
-//! - [`room`]      : room identifiers and asset records
-//! - [`peer_source`] : per-hash peer availability records
-//! - [`error`]     : cross-crate error helpers
-//! - [`invariants`]: typed enums (`Visibility`, `MessageType`, …) + length /
-//!   character / temporal validators used by the chat and social-feed
-//!   records.
-//! - [`integrity`] : SHA-256 tamper-detection helpers, length-prefixed
-//!   digests, strict [`VerifyOutcome`] verifier.
-//! - [`group_chat`] : typed group & direct chat records (built on
-//!   [`invariants`] + [`integrity`]).
-//! - [`social_feed`] : typed social-feed records (built on
-//!   [`invariants`] + [`integrity`]).
 
 #![forbid(unsafe_code)]
 #![deny(unused_must_use)]
@@ -30,16 +7,19 @@ pub mod announce;
 pub mod bulletin;
 pub mod cid;
 pub mod content;
+pub mod dag_codec;
 pub mod error;
 pub mod graphsync;
 pub mod group_chat;
 pub mod integrity;
 pub mod invariants;
 pub mod mesh;
-pub mod multihash;
+pub mod multihash_local;
+pub use multihash_local as multihash;
 pub mod node;
 pub mod node_profile;
 pub mod peer_source;
+pub mod pb;
 pub mod range;
 pub mod room;
 pub mod social_feed;
@@ -50,7 +30,11 @@ pub mod virtual_ip;
 pub mod wallet_address;
 
 pub use announce::{Announcement, AnnouncementPayload, MAX_ANNOUNCED_SIZE};
+pub use bulletin::{
+    BulletinAttachment, BulletinCategory, BulletinId, BulletinItem, BulletinKind, BulletinSeverity,
+};
 pub use content::{CdnContentKind, ContentHash};
+pub use dag_codec::{DagCodec, DagCodecRegistry, DagError, DagLinkRef, extract_links, dag_size, is_directory, link_count};
 pub use error::{AdnetError, Result};
 pub use group_chat::{
     DirectChat, DirectMessage, GroupChat, GroupInvitation, GroupMember, GroupMessage,
@@ -67,7 +51,15 @@ pub use invariants::{
     ReactionTarget, ReactionType, Sequence, Visibility, validate_content, validate_id,
     validate_name, validate_ordered, validate_tag, validate_url,
 };
+pub use mesh::{
+    InviteCode, InviteCodeRef, MeshMember, MeshMembership, MeshNetworkId, MeshPolicy,
+    MeshRosterSigner, MeshRosterVerifier, MeshTopology, verify_roster_signature,
+};
 pub use node::{Endpoint, NodeAddr, NodeId, RelayUrl};
+pub use node_profile::{
+    MAX_PROFILE_DESC_LEN, MAX_PROFILE_TAGS, NodeCapability, NodeProfile, NodeResources, NodeRole,
+    NODE_CAPABILITY_NONE,
+};
 pub use peer_source::{
     MAX_CLOCK_SKEW_HOURS, MAX_PEER_SOURCES_PER_HASH, MAX_RTT_MS, MAX_TRACKED_HASHES, PeerMap,
     PeerSource,
@@ -79,6 +71,7 @@ pub use social_feed::{
     VIS_PRIVATE, VIS_PUBLIC, attachment_from_hash as post_attachment_from_hash,
     attachment_from_hash_str as post_attachment_from_hash_str,
 };
-pub use ticket::{BlobTicket, PeerTicket, SignedPeerTicket, validate_blob_ticket};
+pub use ticket::{BlobTicket, NodeAddrTicket, PeerTicket, SignedPeerTicket, validate_blob_ticket};
 pub use topic::{Topic, topic_name};
+pub use virtual_ip::{VirtualIp, VirtualIpv4};
 pub use wallet_address::{WALLET_ADDRESS_LEN, WalletAddress};

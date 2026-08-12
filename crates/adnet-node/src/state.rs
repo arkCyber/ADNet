@@ -226,6 +226,8 @@ mod tests {
             source_url: None,
             ticket,
             timestamp: Utc::now(),
+            message_id: None,
+            ttl_secs: None,
             signer: None,
             signature: None,
         }

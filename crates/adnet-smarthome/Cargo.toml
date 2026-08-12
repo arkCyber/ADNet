@@ -45,5 +45,9 @@ matter-controller = "0.4"
 # TLV codec re-exported for Tag type used in describe_node().
 matter-codec = "0.2"
 
+# MQTT protocol support
+rumqttc = "0.24"
+hostname = "0.4"
+
 [dev-dependencies]
 tokio-test = "0.4"

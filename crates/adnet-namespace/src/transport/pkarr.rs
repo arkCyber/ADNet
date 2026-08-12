@@ -75,6 +75,10 @@ pub struct PkarrTransport {
     /// new in-process subscribers without a network round-trip. Keyed
     /// by IPNS name.
     cache: RwLock<std::collections::BTreeMap<String, IpnRecord>>,
+    /// Whether a real pkarr client has been wired up.
+    has_client: tokio::sync::RwLock<bool>,
+    /// Last successful network operation timestamp.
+    last_network_time: tokio::sync::RwLock<Option<std::time::Instant>>,
 }
 
 impl std::fmt::Debug for PkarrTransport {
@@ -97,6 +101,8 @@ impl PkarrTransport {
         Self {
             cfg,
             cache: RwLock::new(std::collections::BTreeMap::new()),
+            has_client: tokio::sync::RwLock::const_new(false),
+            last_network_time: tokio::sync::RwLock::const_new(None),
         }
     }
 
@@ -105,6 +111,18 @@ impl PkarrTransport {
             relays,
             request_timeout: std::time::Duration::from_secs(10),
         })
+    }
+
+    /// Mark that a real pkarr client has been wired up.
+    pub async fn set_client_wired(&self) {
+        *self.has_client.write().await = true;
+    }
+
+    /// Update last successful network operation time.
+    fn record_network_success(&self) {
+        if let Ok(mut guard) = self.last_network_time.try_write() {
+            *guard = Some(std::time::Instant::now());
+        }
     }
 
     /// Build the pkarr zone-relative key for an IPNS name.
@@ -178,6 +196,7 @@ impl PkarrTransport {
         if !record.verify_self()? {
             return Err(IpnsError::InvalidSignature);
         }
+        self.record_network_success();
         self.cache.write().await.insert(name.to_string(), record.clone());
         Ok(record)
     }
@@ -199,6 +218,7 @@ impl PkarrTransport {
                 .await
             {
                 Ok(()) => {
+                    self.record_network_success();
                     self.cache
                         .write()
                         .await
@@ -261,9 +281,38 @@ impl IpnTransport for PkarrTransport {
     }
 
     async fn health(&self) -> Result<TransportHealth, IpnsError> {
-        // No real client wired here → report unknown rather than
-        // report false-green.
-        Ok(TransportHealth::Unknown)
+        // Check if a real client is wired
+        let has_client = *self.has_client.read().await;
+        
+        if !has_client {
+            // No real client wired → cache-only mode
+            let cache = self.cache.read().await;
+            if cache.is_empty() {
+                return Ok(TransportHealth::Down);
+            } else {
+                return Ok(TransportHealth::Degraded);
+            }
+        }
+
+        // Check last network activity
+        let last_network = *self.last_network_time.read().await;
+        match last_network {
+            Some(instant) => {
+                let elapsed = instant.elapsed();
+                // If we had activity in the last 5 minutes, consider healthy
+                if elapsed < std::time::Duration::from_secs(300) {
+                    Ok(TransportHealth::Healthy)
+                } else if elapsed < std::time::Duration::from_secs(3600) {
+                    Ok(TransportHealth::Degraded)
+                } else {
+                    Ok(TransportHealth::Down)
+                }
+            }
+            None => {
+                // Client wired but no successful network operations yet
+                Ok(TransportHealth::Degraded)
+            }
+        }
     }
 }
 

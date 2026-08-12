@@ -34,6 +34,18 @@ pub struct GatewayConfig {
     /// JSON-RPC interface on this Unix socket for in-process clients.
     /// `None` disables the IPC server.
     pub ipc_socket: Option<PathBuf>,
+    /// Enable authentication.
+    pub auth_enabled: bool,
+    /// Admin API keys (bypass authentication).
+    pub admin_api_keys: Vec<String>,
+    /// Rate limit: requests per window.
+    pub rate_limit: u64,
+    /// Rate limit window in seconds.
+    pub rate_limit_window: u64,
+    /// Read-only mode (reject all write operations).
+    pub read_only: bool,
+    /// WebSocket server bind address (None to disable).
+    pub ws_bind_addr: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -52,6 +64,12 @@ impl Default for GatewayConfig {
             enable_ipns: true,
             root_redirect: None,
             ipc_socket: None,
+            auth_enabled: false,
+            admin_api_keys: Vec::new(),
+            rate_limit: 1000,
+            rate_limit_window: 60,
+            read_only: false,
+            ws_bind_addr: None,
         }
     }
 }

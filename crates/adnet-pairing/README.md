@@ -1,204 +1,99 @@
-# ADNet Pairing Crate
+# adnet-pairing
 
-Secure device-pairing protocol for ADNet with support for QR codes, email invitations, and human-readable invitation codes.
+> ADNet 设备配对协议核心:签名邀请、能力位、可信设备存储 / Secure device-pairing protocol for ADNet — signed invitations, capability bits, and a trusted-device store.
 
-## Features
+## 概览(Overview)
 
-- **Signed Invitations**: Wallet-signed pairing invitations using EIP-191
-- **QR Code Support**: Generate and parse `adnet-pairing://` URLs
-- **Invitation Codes**: Human-readable codes for manual entry
-- **Capability Scoping**: Grant specific permissions (chat, files.read, etc.)
-- **Trusted Device Management**: Store and manage paired devices
+`adnet-pairing` 是 ADNet 网络中负责**设备配对 (Pairing)** 的核心 crate。它处于 ADNet 身份层 (`adnet-identity`、`adnet-types`) 与传输层 (`adnet-transport`) 之间,提供:
 
-## Quick Start
+- **离线邀请 (Invitation)** — 由钱包以 EIP-191 签名,可在 QR / 邮件 / 短码中传递;
+- **建立证明 (Pairing Ceremony)** — 邀请接受方必须用其 Ed25519 私钥对挑战签名,证明其确实控制该 `NodeId`;
+- **能力位 (Capability Set)** — 16-bit tag 组成的细粒度权限集,可被邀请方授予,可被存储与检查;
+- **可信设备存储 (Trusted Device Store)** — 落盘的 `devices.jsonl` 记录所有配对成功的设备,丢失设备可凭 `credential_id` 撤销。
+
+这个 crate 是**纯数据**的:不依赖 iroh,不依赖 tokio,所有 IO 都由调用方决定如何落地。它的输出喂给 `adnet-qr`、`adnet-invite` 和 `adnet-ssh` 等用户可见流程。
+
+## 特性(Features)
+
+| 名称 | 描述 |
+|------|------|
+| `SignedInvitation` | 钱包签名 + 32 字节 salt + 能力 + 过期;支持 `create / verify / to_json / from_json` |
+| `InvitationCode` | 24 字符短码 `ADNET:XXXX-YYYY-ZZZZ-NNNN`,用于手动输入 |
+| `PairingInvitation`(`wire`) | `adnet-pairing://<base64url>` URL 形式,可 QR 扫描 |
+| `CapabilitySet` | 16-bit tag 位集,提供 `contains / intersects / bitmask / canonical` |
+| `PairingRequest` / `PairingResponse` | 双向挑战与权限下发,Ed25519 签名 |
+| `TrustedDeviceStore` | 落盘 JSONL,支持 `insert / get / revoke / check_capability` |
+| `CredentialId` | 由 issuer / invitee / salt 派生的稳定 ID,作为存储键 |
+
+## 安装(Installation)
+
+`adnet-pairing` 已经是 ADNet workspace 的 path 依赖,使用方式:
 
 ```rust
-use adnet_pairing::{SignedInvitation, InvitationCode, CapabilitySet};
+// 是否启用额外的 reputation hook(需要底层仓库存活)
+use adnet_pairing::{
+    SignedInvitation, InvitationCode, PairingInvitation,
+    CapabilitySet, Capability, TrustedDeviceStore,
+};
+```
+
+CLI 子命令:`adnet-cli` 暴露 `adnet pair ...` 系列子命令,内部就是 `adnet-pairing` 的 API。
+
+## 使用(Usage)
+
+```rust
+use adnet_pairing::{SignedInvitation, CapabilitySet, PairingInvitation};
 use adnet_identity::wallet::Wallet;
 use adnet_types::node::NodeId;
 
-// Create a wallet and node identity
+// 1. Issuer 端:生成一份带 15 分钟 TTL 的签名邀请
 let wallet = Wallet::generate();
-let node_id = NodeId::from_bytes(&[0xAAu8; 32]).unwrap();
-
-// Create a signed invitation
-let invitation = SignedInvitation::create(
-    &node_id,
-    &wallet,
-    CapabilitySet::from_names(["chat"]),
-    15 * 60, // 15 min TTL
-    Some("My Laptop".into()),
+let issuer_node_id = NodeId::from_bytes(&[0xAAu8; 32]).unwrap();
+let caps = CapabilitySet::from_names(["chat", "files.read"]);
+let inv = SignedInvitation::create(
+    &issuer_node_id, &wallet, caps, 15 * 60, Some("Alice's iPhone".into()),
 )?;
-```
 
-## Invitation Formats
+// 2. 转成 QR URL(可直接渲染为二维码)
+let url = PairingInvitation::to_url(&inv)?;
+println!("Scan: {url}");
 
-### 1. QR Code URL
-
-```rust
-use adnet_pairing::wire::PairingInvitation;
-
-// Generate QR-compatible URL
-let url = PairingInvitation::to_url(&invitation)?;
-// adnet-pairing://eyJwYXlsb2FkIjp7InZlcnNpb24iOjEs...
-
-// Parse scanned URL
+// 3. 接收方解析 + 验签
 let parsed = PairingInvitation::parse_url(&url)?;
 let decoded = parsed.decode()?.unwrap();
-decoded.verify(now)?;
+decoded.verify(chrono::Utc::now().timestamp())?;
 ```
-
-### 2. Invitation Code (Human-Readable)
 
 ```rust
-use adnet_pairing::InvitationCode;
-
-// Generate code from invitation
-let code = InvitationCode::from_invitation(&invitation)?;
-println!("Enter this code: {}", code);
-// ADNET:ABCD-EFGH-JKLM-NPQR
-
-// Parse code
-let parsed = "ADNET:ABCD-EFGH-JKLM-NPQR".parse::<InvitationCode>()?;
-
-// Generate random code (for shared database lookup)
-let random_code = InvitationCode::generate_random();
+// 4. 受限的短码(用于口头传递)
+let code = InvitationCode::from_invitation(&inv)?;
+println!("Enter this code: {code}");
+let parsed: InvitationCode = "ADNET:AB23-CD45-EF67-GH89".parse()?;
 ```
-
-**Code Format:**
-- Prefix: `ADNET:`
-- 16 characters in 4 groups of 4: `ABCD-EFGH-JKLM-NPQR`
-- Character set: `A-Z, 2-9` (excludes O, I, 0, 1 to avoid confusion)
-- Case-insensitive
-
-### 3. JSON
 
 ```rust
-// Serialize invitation
-let json = invitation.to_json()?;
-
-// Deserialize invitation
-let parsed = SignedInvitation::from_json(&json)?;
+// 5. 派发部分能力
+let mut granted = CapabilitySet::empty();
+granted.insert(Capability::CHAT);
+granted.insert(Capability::FILES_READ);
+let grant = CapabilitySet::from_names(["chat", "files.read"]);
+assert!(grant.contains(Capability::CHAT));
+assert!(!grant.contains(Capability::FILES_WRITE));
 ```
-
-## Pairing Ceremony
-
-### Issuer (Server) Side
 
 ```rust
-use adnet_pairing::{
-    SignedInvitation, PairingRequest, PairingRequestBuilder,
-    PairingResponseBuilder, CapabilitySet,
-};
-
-// 1. Create invitation
-let invitation = SignedInvitation::create(&issuer_node, &wallet, caps, ttl, note)?;
-
-// 2. Share invitation (QR, email, etc.)
-
-// 3. Receive pairing request
-let request: PairingRequest = /* receive from peer */;
-
-// 4. Verify request
-verify_pairing_request(&request, now)?;
-
-// 5. Build and send response
-let response = PairingResponseBuilder {
-    request: &request,
-    issuer_node_id: &issuer_node,
-    issuer_pubkey: &issuer_pubkey,
-    granted_capabilities: request.requested_capabilities.clone(),
-    ttl_seconds: 0,
-    issuer_wallet: &wallet,
-}.build()?;
+// 6. 落盘保存(可选)
+use adnet_pairing::{TrustedDeviceStore, TrustedDeviceStoreConfig};
+let store = TrustedDeviceStore::open(TrustedDeviceStoreConfig::default())?;
+let active = store.is_active(&credential_id, chrono::Utc::now().timestamp());
 ```
 
-### Invitee (Client) Side
+## 应用案例(Use Cases / Examples)
 
-```rust
-use adnet_pairing::{
-    SignedInvitation, PairingRequest, PairingResponse,
-    derive_credential_id,
-};
+1. **手机扫描家庭服务器 QR。** 用户在 ADNet 桌面端点 `生成邀请`,得到一个 `adnet-pairing://` URL,渲染成 QR 贴在客厅桌面上。手机扫码后,服务端验签 + 接受一个 Ed25519 签名,落地一条 `TrustedDeviceRecord`,从此刻起手机和家庭服务器之间便能以 `chat + files.read` 的能力互相通信。
+2. **远程同事不支持 QR,口头传码。** 离线场景下,服务端给出一段 `ADNET:XXXX-YYYY-ZZZZ-NNNN` 24 字符短码,电话另一端手动输入。`InvitationCode` 自身只携带 64 位截断 hash,完整邀请由数据库补全,这就是 `generate_random` + `from_invitation(data)` 的用法。
+3. **权限隔离子集设备。** 孩子的平板只能 `chat + sync`,门锁中枢只能 `files.write`,审计台既能 `chat` 还能 `files.read`。`CapabilitySet::from_names(&["chat", "sync"])` 在每次握手前被 `check_capability` 校验,孩子平板永远碰不到门锁。丢失设备时通过 `revoke(&credential_id)` 立即吊销。
 
-// 1. Receive and verify invitation
-let invitation = /* receive from issuer */;
-invitation.verify(now)?;
+## 许可
 
-// 2. Derive credential ID
-let credential_id = derive_credential_id(
-    &invitation.payload.issuer_node_id,
-    &your_node_id,
-    &invitation.payload.salt,
-);
-
-// 3. Build and send request
-let request = PairingRequestBuilder {
-    credential_id,
-    node_id: &your_node_id,
-    transport_pubkey: &your_pubkey,
-    requested_capabilities: invitation.payload.capabilities.clone(),
-    ttl_seconds: 60,
-}.build(&your_signer)?;
-
-// 4. Receive and verify response
-let response: PairingResponse = /* receive from issuer */;
-verify_pairing_response(&response, now)?;
-```
-
-## Capability System
-
-```rust
-use adnet_pairing::{Capability, CapabilitySet};
-
-// Define capabilities
-let caps = CapabilitySet::from_names(["chat", "files.read"]);
-
-// Check capabilities
-if caps.contains(Capability::Chat) {
-    // Allow chat
-}
-
-// All available capabilities
-let all = CapabilitySet::all();
-```
-
-## Trusted Device Store
-
-```rust
-use adnet_pairing::{TrustedDeviceStore, TrustedDeviceRecord, TrustedDeviceStatus};
-use std::sync::Arc;
-
-// Create store
-let store = Arc::new(TrustedDeviceStore::new(config)?);
-
-// Insert paired device
-store.insert(record).await?;
-
-// Check if device is trusted
-if store.get(&credential_id)?.map(|r| r.is_active()).unwrap_or(false) {
-    // Device is trusted
-}
-
-// Revoke device
-store.revoke(&credential_id).await?;
-```
-
-## Security Model
-
-| Threat | Protection |
-|--------|------------|
-| MITM on QR | Wallet signature proves issuer identity |
-| Replay attacks | Invitation expiry + nonce in request |
-| Privilege escalation | Capability bitfield scopes grants |
-| Lost device | Revocation via TrustedDeviceStore |
-
-## Protocol Version
-
-Current version: **1**
-
-## See Also
-
-- [adnet-invite](../adnet-invite) - Email-based invitation system
-- [adnet-qr](../adnet-qr) - QR code generation and scanning
-- [adnet-identity](../adnet-identity) - Wallet and signing primitives
+MIT OR Apache-2.0

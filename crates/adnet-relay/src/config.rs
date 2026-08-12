@@ -7,6 +7,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::HostPolicy;
+
 fn default_serve_enabled() -> bool {
     true
 }
@@ -43,6 +45,18 @@ pub struct RelayConfig {
     /// field and dropping a 32-byte hex file at the path.
     #[serde(default)]
     pub billing_secret_path: Option<std::path::PathBuf>,
+    /// Host policy for the relay server.
+    #[serde(default)]
+    pub host_policy: HostPolicy,
+    /// Maximum body size in bytes.
+    #[serde(default)]
+    pub max_body_bytes: Option<usize>,
+    /// Upstream timeout in seconds.
+    #[serde(default)]
+    pub upstream_timeout_secs: Option<u64>,
+    /// Maximum redirects.
+    #[serde(default)]
+    pub max_redirects: Option<u32>,
 }
 
 impl Default for RelayConfig {
@@ -54,6 +68,10 @@ impl Default for RelayConfig {
             serve_port: default_serve_port(),
             serve_bind: default_serve_bind(),
             billing_secret_path: None,
+            host_policy: crate::HostPolicy::default(),
+            max_body_bytes: None,
+            upstream_timeout_secs: None,
+            max_redirects: None,
         }
     }
 }

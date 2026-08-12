@@ -11,11 +11,10 @@
 use std::path::Path;
 
 use adnet_gossip::{InProcessGossip, Topic};
-use adnet_news::{
-    BulletinCategory, BulletinEvent, BulletinItem, BulletinKind, BulletinSeverity, NewsService,
-    ValidationPolicy,
+use adnet_news::{BulletinEvent, NewsService, ValidationPolicy};
+use adnet_types::{
+    BulletinCategory, BulletinId, BulletinItem, BulletinKind, BulletinSeverity, NodeId, RoomId,
 };
-use adnet_types::{NodeId, RoomId};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use tokio::sync::broadcast;
@@ -120,50 +119,41 @@ fn kind_severity_floor(kind: BulletinKind) -> u8 {
 /// Entry point — dispatch the parsed CLI request.
 pub async fn run(sub: &NewsCmd, data_dir: &Path) -> Result<()> {
     match sub {
-        NewsCmd::Publish {
-            room,
-            kind,
-            severity,
-            category,
-            title,
-            summary,
-            body,
-            json,
+        NewsCmd::Post {
+            content,
+            tags,
         } => {
             let svc = open_service(data_dir).await?;
+            let tags_vec: Vec<String> = tags
+                .as_ref()
+                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+                .unwrap_or_default();
             publish(
                 &svc,
-                room,
-                kind,
-                severity,
-                category,
-                title,
-                summary,
-                body,
-                *json,
+                "general",
+                "news_article",
+                "info",
+                "general",
+                "News Update",
+                "",
+                content,
+                false,
             )
             .await
         }
-        NewsCmd::Timeline {
-            room,
-            before_seq,
-            limit,
-            json,
-        } => {
+        NewsCmd::List { limit } => {
             let svc = open_service(data_dir).await?;
-            timeline(&svc, room, *before_seq, *limit, *json)
+            let lim = limit.unwrap_or(20) as usize;
+            timeline(&svc, "general", None, lim, false)
         }
-        NewsCmd::Get { room, id, json } => {
+        NewsCmd::Subscribe { channel } => {
             let svc = open_service(data_dir).await?;
-            get(&svc, room, id, *json)
+            subscribe(&svc, channel).await
         }
-        NewsCmd::Read { room, id } => {
+        NewsCmd::Receive { channel, timeout } => {
             let svc = open_service(data_dir).await?;
-            mark_read(&svc, room, id)
-        }
-        NewsCmd::Subscribe { room } => {
-            let svc = open_service(data_dir).await?;
-            subscribe(&svc, room).await
+            tokio::time::sleep(tokio::time::Duration::from_secs(*timeout)).await;
+            subscribe(&svc, channel).await
         }
     }
 }
@@ -361,15 +351,14 @@ async fn subscribe(svc: &NewsService, room: &str) -> Result<()> {
     // Drain the initial replay events so live events only show
     // up here.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    while let Ok(_) = rx.try_recv() {}
+    while rx.try_recv().is_ok() {}
     println!(
         "{{\"event\":\"subscribed\",\"room\":\"{}\",\"node\":\"{}\"}}",
         room,
         svc.local_node()
     );
-    let mut stream = tokio_stream::wrappers::BroadcastStream::new(rx);
-    while let Some(ev) = stream.next().await {
-        match ev {
+    loop {
+        match rx.recv().await {
             Ok(BulletinEvent::Insert(item)) => {
                 println!(
                     "{}",

@@ -7,14 +7,18 @@
 //! - GraphSync request/response handling
 //! - Integration between components
 
-use adnet_types::cid::{Cid, Codec};
-use adnet_types::content::ContentHash;
-use adnet_types::graphsync::{BlockMessage, GraphSyncMessage, ResponseMessage, selector};
-use adnet_types::multihash::{Multihash, blake3_hash, sha256};
-use adnet_types::unixfs::{
-    UnixFsError, UnixFsFile, UnixFsFileBuilder, UnixFsMetadata, UnixFsMode, UnixFsNode,
-    UnixfsTime, default_unixfs_metadata, unixfs_file_to_node, unixfs_node_to_file,
+use adnet_types::cid::{Cid, Codec, Version};
+use adnet_types::graphsync::{
+    BlockMessage, GraphSyncEngine, GraphSyncMessage, GraphSyncRequestBuilder,
+    ResponseMessage, ResponseStatus, selector,
 };
+use adnet_types::multihash::{HashCode, Multihash, blake3_hash, sha256};
+use adnet_types::unixfs::{
+    UnixFsFileBuilder, UnixFsMetadata, UnixFsMode, UnixFsNode,
+    UnixFsTime, UnixFsDirBuilder, UnixFsLink,
+};
+use adnet_types::unixfs::serialization::{to_cbor as unixfs_to_cbor, from_cbor as unixfs_from_cbor, to_json as unixfs_to_json, from_json as unixfs_from_json};
+use adnet_types::unixfs::path::parse_path;
 
 #[test]
 fn test_multihash_blake3_roundtrip() {
@@ -98,8 +102,6 @@ fn test_cid_conversion_v0_to_v1() {
 
 #[test]
 fn test_cid_codec_raw_default() {
-    // `from_content_blake3` defaults the codec to `Raw` — `DagPb`
-    // requires an explicit codec construction below.
     let data = b"testing raw codec default";
     let cid = Cid::from_content_blake3(data);
     assert_eq!(cid.codec(), Some(Codec::Raw));
@@ -107,10 +109,8 @@ fn test_cid_codec_raw_default() {
 
 #[test]
 fn test_cid_codec_dag_pb() {
-    // Build the CID with `Codec::DagPb` explicitly, which is the
-    // default for legacy IPFS file content.
     let data = b"testing dag-pb codec";
-    let hash = crate::multihash::blake3_hash(data);
+    let hash = blake3_hash(data);
     let cid = Cid::new_v1(Codec::DagPb, hash);
     assert_eq!(cid.codec(), Some(Codec::DagPb));
 }
@@ -118,11 +118,8 @@ fn test_cid_codec_dag_pb() {
 #[test]
 fn test_cid_codec_raw() {
     let data = b"testing raw codec";
-    let cid = {
-        use crate::multihash::blake3_hash;
-        let mh = blake3_hash(data);
-        Cid::new_v1_raw(mh)
-    };
+    let mh = blake3_hash(data);
+    let cid = Cid::new_v1_raw(mh);
     assert_eq!(cid.codec(), Some(Codec::Raw));
 }
 
@@ -156,7 +153,7 @@ fn test_unixfs_file_large() {
             ..
         } => {
             assert_eq!(filesize, Some(600 * 1024 as u64));
-            assert_eq!(chunks.len(), 3); // 600KB / 256KB = 3 chunks (rounded up)
+            assert_eq!(chunks.len(), 3);
             assert_eq!(blocksizes.len(), 3);
         }
         _ => panic!("expected File node"),
@@ -196,16 +193,16 @@ fn test_unixfs_directory() {
 #[test]
 fn test_unixfs_serde_cbor() {
     let node = UnixFsFileBuilder::new().build(b"serialize me");
-    let bytes = to_cbor(&node).expect("failed to serialize to CBOR");
-    let decoded: UnixFsNode = from_cbor(&bytes).expect("failed to deserialize from CBOR");
+    let bytes = unixfs_to_cbor(&node).expect("failed to serialize to CBOR");
+    let decoded: UnixFsNode = unixfs_from_cbor(&bytes).expect("failed to deserialize from CBOR");
     assert!(matches!(decoded, UnixFsNode::File { .. }));
 }
 
 #[test]
 fn test_unixfs_serde_json() {
     let node = UnixFsDirBuilder::new().build();
-    let bytes = to_json(&node).expect("failed to serialize to JSON");
-    let decoded: UnixFsNode = from_json(&bytes).expect("failed to deserialize from JSON");
+    let bytes = unixfs_to_json(&node).expect("failed to serialize to JSON");
+    let decoded: UnixFsNode = unixfs_from_json(&bytes).expect("failed to deserialize from JSON");
     assert!(matches!(decoded, UnixFsNode::Directory { .. }));
 }
 
@@ -233,9 +230,7 @@ fn test_graphsync_engine_handle_response() {
         id,
         status: ResponseStatus::Completed,
     };
-    engine
-        .handle_response(response)
-        .expect("failed to handle response");
+    engine.handle_response(response).expect("failed to handle response");
 
     let stats = engine.get_stats();
     assert_eq!(stats.completed, 1);
@@ -309,7 +304,7 @@ fn test_hash_code_operations() {
     assert_eq!(HashCode::Md5.digest_len(), 16);
 
     assert_eq!(HashCode::from_u64(0x12), Some(HashCode::Sha256));
-        assert_eq!(HashCode::from_u64(0x1e), Some(HashCode::Blake3));
+    assert_eq!(HashCode::from_u64(0x1e), Some(HashCode::Blake3));
     assert_eq!(HashCode::from_u64(99), None);
 
     assert_eq!(HashCode::Sha256.name(), "sha2-256");
@@ -457,8 +452,6 @@ fn test_multihash_encoded_len() {
 
 #[test]
 fn test_unixfs_path_parsing() {
-    use unixfs::path::parse_path;
-
     assert_eq!(parse_path("/a/b/c").unwrap(), vec!["a", "b", "c"]);
     assert_eq!(parse_path("a/b").unwrap(), vec!["a", "b"]);
     assert_eq!(parse_path("/").unwrap(), Vec::<&str>::new());

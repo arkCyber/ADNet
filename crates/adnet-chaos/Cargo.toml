@@ -1,0 +1,55 @@
+[package]
+name        = "adnet-chaos"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Chaos Engineering for ADNet - Fault injection framework for resilience testing."
+readme      = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types     = { workspace = true }
+adnet-node      = { workspace = true }
+adnet-dht       = { workspace = true }
+adnet-gossip    = { workspace = true }
+adnet-transport = { workspace = true }
+tokio           = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+tracing         = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand           = { workspace = true }
+anyhow         = { workspace = true }
+thiserror      = { workspace = true }
+futures        = { workspace = true }
+async-trait    = { workspace = true }
+uuid           = { version = "1.10", features = ["v4"] }
+chrono         = { workspace = true }
+clap           = { workspace = true, features = ["derive"] }
+
+# Optional dependency for simulator integration
+adnet-simulator = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[features]
+default = []
+
+# Enable network fault injection
+network = []
+
+# Enable node fault injection  
+node = []
+
+# Enable data fault injection
+data = []
+
+# Enable all faults
+full = ["network", "node", "data"]
+
+# Integration with adnet-simulator
+simulator = []

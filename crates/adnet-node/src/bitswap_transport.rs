@@ -230,10 +230,8 @@ type PendingMap =
 /// - Peer connection management
 /// - Flow control
 ///
-/// `Clone` is unimplemented: `run()` consumes `self`. Callers that
-/// need to inspect the adapter after starting the run loop should
-/// spawn the runner and then access the shared state through the
-/// per-handle `Arc`s (`handlers`, `pending`, `transport`).
+/// Note: Clone is not derived because `run()` consumes self.
+/// Use Arc<BitswapNetworkAdapter> for shared ownership.
 pub struct BitswapNetworkAdapter {
     /// Local node ID.
     local_node_id: NodeId,
@@ -250,6 +248,9 @@ pub struct BitswapNetworkAdapter {
     outgoing_tx: mpsc::Sender<BitswapOutgoing>,
     /// Outgoing receiver — owned by the bridge loop.
     outgoing_rx: Option<mpsc::Receiver<BitswapOutgoing>>,
+    /// Prometheus metrics. Lazily registered on first access so
+    /// tests that don't pull `/metrics` don't pay the cost.
+    metrics: BitswapMetrics,
 }
 
 /// Trait for message handlers.
@@ -268,6 +269,16 @@ impl BitswapNetworkAdapter {
         local_node_id: NodeId,
         transport: Arc<dyn BitswapTransportBridge>,
     ) -> (Self, mpsc::Sender<BitswapEvent>) {
+        Self::new_with_metrics(local_node_id, transport, BitswapMetrics::get())
+    }
+
+    /// Construct with a pre-built metrics handle. Useful for tests
+    /// that want to swap in a no-op / independent registry.
+    pub fn new_with_metrics(
+        local_node_id: NodeId,
+        transport: Arc<dyn BitswapTransportBridge>,
+        metrics: BitswapMetrics,
+    ) -> (Self, mpsc::Sender<BitswapEvent>) {
         let (tx_events, rx_events) = mpsc::channel(1024);
         let (out_tx, out_rx) = mpsc::channel(1024);
 
@@ -279,6 +290,7 @@ impl BitswapNetworkAdapter {
             rx: Some(rx_events),
             outgoing_tx: out_tx,
             outgoing_rx: Some(out_rx),
+            metrics,
         };
 
         (adapter, tx_events)
@@ -288,6 +300,11 @@ impl BitswapNetworkAdapter {
     /// should drain this and actually push the bytes onto the wire.
     pub fn take_outgoing(&mut self) -> Option<mpsc::Receiver<BitswapOutgoing>> {
         self.outgoing_rx.take()
+    }
+
+    /// Borrow the metrics handle. Cheap: counters are `Arc`'d.
+    pub fn metrics(&self) -> &BitswapMetrics {
+        &self.metrics
     }
 
     /// Build a clone of the adapter that shares [`handlers`](Self::handlers),
@@ -305,6 +322,7 @@ impl BitswapNetworkAdapter {
             rx: Some(rx_events),
             outgoing_tx: out_tx,
             outgoing_rx: Some(out_rx),
+            metrics: self.metrics.clone(),
         };
         (adapter, tx_events)
     }
@@ -356,12 +374,16 @@ impl BitswapNetworkAdapter {
         priority: i32,
         timeout: Duration,
     ) -> Result<BitswapBlockOutcome, BitswapTransportError> {
+        self.metrics.send_want_block.inc();
+
         // Register the waiter *before* sending so we don't race a fast peer.
         let (tx, rx) = oneshot::channel();
         {
             let mut map = self.pending.write().await;
             map.entry(hash.clone()).or_default().push(tx);
         }
+        // Update the pending gauge (one waiter per call).
+        self.refresh_pending_gauge().await;
 
         // Fire off the want-block.
         if let Err(e) = self
@@ -378,17 +400,36 @@ impl BitswapNetworkAdapter {
             // so a `pop` is the right cleanup. `drop_pending_waiter` would
             // leave it dangling because the sender isn't closed yet.
             self.drop_last_pending_waiter(&hash).await;
+            self.refresh_pending_gauge().await;
             return Err(e);
         }
 
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(outcome)) => Ok(outcome),
-            Ok(Err(_canceled)) => Ok(BitswapBlockOutcome::Cancelled),
+            Ok(Ok(outcome)) => {
+                self.refresh_pending_gauge().await;
+                Ok(outcome)
+            }
+            Ok(Err(_canceled)) => {
+                self.refresh_pending_gauge().await;
+                Ok(BitswapBlockOutcome::Cancelled)
+            }
             Err(_elapsed) => {
                 self.drop_pending_waiter(&hash).await;
+                self.metrics.send_want_block_timeouts.inc();
+                record_error(&self.metrics, BitswapErrorReason::WaitTimeout);
+                self.refresh_pending_gauge().await;
                 Ok(BitswapBlockOutcome::Timeout)
             }
         }
+    }
+
+    /// Refresh the `pending_blocks` gauge from the current map size.
+    /// Called from every public API that mutates the pending map so
+    /// the gauge stays in lock-step with reality.
+    async fn refresh_pending_gauge(&self) {
+        self.metrics
+            .pending_blocks
+            .set(self.pending.read().await.len() as i64);
     }
 
     /// Send a Cancel message.
@@ -407,8 +448,13 @@ impl BitswapNetworkAdapter {
             }
         }
         drop(map);
+        self.refresh_pending_gauge().await;
 
-        self.send(peer, msg).await
+        let result = self.send(peer, msg).await;
+        if result.is_ok() {
+            record_error(&self.metrics, BitswapErrorReason::CancelLocal);
+        }
+        result
     }
 
     /// Send a message to a peer.
@@ -417,10 +463,13 @@ impl BitswapNetworkAdapter {
         peer: &NodeId,
         msg: BitswapMessage,
     ) -> Result<(), BitswapTransportError> {
-        let data = serde_json::to_vec(&msg)
-            .map_err(|e| BitswapTransportError::Serialization(e.to_string()))?;
+        let data = serde_json::to_vec(&msg).map_err(|e| {
+            record_error(&self.metrics, BitswapErrorReason::Serialization);
+            BitswapTransportError::Serialization(e.to_string())
+        })?;
 
         if data.len() > MAX_MESSAGE_SIZE {
+            record_error(&self.metrics, BitswapErrorReason::Oversize);
             return Err(BitswapTransportError::MessageTooLarge {
                 size: data.len(),
                 max: MAX_MESSAGE_SIZE,
@@ -433,10 +482,16 @@ impl BitswapNetworkAdapter {
         self.outgoing_tx
             .send(BitswapOutgoing::Bytes {
                 peer: peer.clone(),
-                data,
+                data: data.clone(),
             })
             .await
             .map_err(|_| BitswapTransportError::ChannelClosed)?;
+
+        // Record the outgoing event for Prometheus. Counts both
+        // frames and bytes so wire-level visibility is one
+        // counter increment away.
+        self.metrics.messages_sent.inc_labels(&msg_type_label(&msg));
+        self.metrics.bytes_sent.inc_by(data.len() as u64);
 
         Ok(())
     }
@@ -517,6 +572,8 @@ impl BitswapNetworkAdapter {
             }
             _ => {}
         }
+        // Update the pending gauge after resolution.
+        self.refresh_pending_gauge().await;
 
         // Step 2: invoke any per-hash handlers that the application registered.
         if let Some(hash) = message_hash(msg) {
@@ -621,18 +678,43 @@ pub struct BitswapQuicBridge {
     /// Async mutex that serializes `dial()` calls so two concurrent
     /// callers don't each open a fresh QUIC connection to the same peer.
     dial_lock: tokio::sync::Mutex<()>,
+    /// Prometheus metrics. Lazily registered on first access.
+    metrics: BitswapMetrics,
 }
 
 impl BitswapQuicBridge {
     /// Create a new QUIC bridge around the given transport.
     pub fn new(local_node_id: NodeId, transport: SharedTransport) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new(Self::with_metrics(local_node_id, transport, BitswapMetrics::get()))
+    }
+
+    /// Construct with a pre-built metrics handle. Useful for tests
+    /// that want to swap in a custom registry.
+    pub fn with_metrics(
+        local_node_id: NodeId,
+        transport: SharedTransport,
+        metrics: BitswapMetrics,
+    ) -> Self {
+        Self {
             local_node_id,
             transport,
             peers: PLRwLock::new(HashMap::new()),
             dial_timeout: DEFAULT_DIAL_TIMEOUT,
             dial_lock: tokio::sync::Mutex::new(()),
-        })
+            metrics,
+        }
+    }
+
+    /// Borrow the metrics handle.
+    pub fn metrics(&self) -> &BitswapMetrics {
+        &self.metrics
+    }
+
+    /// Update the active-peers gauge from the current map size.
+    fn refresh_active_peers(&self) {
+        self.metrics
+            .active_peers
+            .set_f64(self.peers.read().len() as f64);
     }
 
     /// Override the dial timeout.
@@ -775,6 +857,7 @@ impl BitswapQuicBridge {
         let peer_for_read = peer.clone();
         let event_tx_for_read = event_tx.clone();
         let conn_for_read = conn.clone();
+        let bridge_for_read = bridge.clone();
         let handshake_done_tx = Arc::new(tokio::sync::Mutex::new(Some(handshake_done_tx)));
         let read_task = tokio::spawn(async move {
             // ALPN handshake: first frame must be BitswapHello.
@@ -796,6 +879,18 @@ impl BitswapQuicBridge {
                 Ok(hello) => {
                     if let Err(e) = hello.verify_alpn() {
                         warn!(%peer_for_read, "bitswap ALPN mismatch: {}", e);
+                        record_error(&bridge_for_read.metrics, BitswapErrorReason::Alpn);
+                        // Best-effort: send a goodbye / cancel out so
+                        // the peer learns we rejected the connection.
+                        // We don't fault on send failure — the handshake
+                        // already failed.
+                        let goodbye = BitswapMessage::Cancel {
+                            block: ContentHash::from_bytes(b"alpn-rejection"),
+                        };
+                        if let Ok(bytes) = serde_json::to_vec(&goodbye) {
+                            let mut guard = conn_for_read.lock().await;
+                            let _ = guard.send(Frame::new(bytes)).await;
+                        }
                         return;
                     }
                     debug!(%peer_for_read, "bitswap ALPN handshake OK");
@@ -813,6 +908,7 @@ impl BitswapQuicBridge {
                 }
                 Err(e) => {
                     warn!(%peer_for_read, "bitswap ALPN decode failed: {}", e);
+                    record_error(&bridge_for_read.metrics, BitswapErrorReason::Alpn);
                     return;
                 }
             }
@@ -837,9 +933,12 @@ impl BitswapQuicBridge {
                     Ok(m) => m,
                     Err(e) => {
                         warn!(%peer_for_read, "bitswap deserialize error: {}", e);
+                        record_error(&bridge_for_read.metrics, BitswapErrorReason::Serialization);
                         continue;
                     }
                 };
+                bridge_for_read.metrics.messages_received.inc();
+                bridge_for_read.metrics.bytes_received.inc_by(frame.len() as u64);
                 if event_tx_for_read
                     .send(BitswapEvent::MessageFrom {
                         peer: peer_for_read.clone(),
@@ -875,6 +974,7 @@ impl BitswapQuicBridge {
 
         // Connection done — deregister and signal the adapter.
         bridge.peers.write().remove(&peer);
+        bridge.refresh_active_peers();
         let _ = event_tx
             .send(BitswapEvent::PeerDisconnected(peer.clone()))
             .await;
@@ -908,6 +1008,7 @@ impl BitswapTransportBridge for BitswapQuicBridge {
         // dial so concurrent callers don't both dial — the second one
         // will reuse the first connection.
         let _guard = self.dial_lock.lock().await;
+        self.metrics.dial_attempts.inc();
         if let Some(existing) = self.peers.read().get(peer).map(|c| c.tx.clone()) {
             let (_tx, rx) = mpsc::channel::<Vec<u8>>(1);
             return Ok(BitswapStream {
@@ -917,13 +1018,24 @@ impl BitswapTransportBridge for BitswapQuicBridge {
             });
         }
 
-        let conn = tokio::time::timeout(
+        let conn = match tokio::time::timeout(
             self.dial_timeout,
             self.transport.dial(peer.clone()),
         )
         .await
-        .map_err(|_| BitswapTransportError::Timeout(format!("dial {}", peer)))?
-        .map_err(|e| BitswapTransportError::Connection(e.to_string()))?;
+        {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                self.metrics.dial_failures.inc();
+                record_error(&self.metrics, BitswapErrorReason::Dial);
+                return Err(BitswapTransportError::Connection(e.to_string()));
+            }
+            Err(_) => {
+                self.metrics.dial_failures.inc();
+                record_error(&self.metrics, BitswapErrorReason::Dial);
+                return Err(BitswapTransportError::Timeout(format!("dial {}", peer)));
+            }
+        };
 
         // ALPN handshake: send our hello first, then everything else.
         // We don't wait for the peer's hello here — the server side
@@ -936,6 +1048,7 @@ impl BitswapTransportBridge for BitswapQuicBridge {
             let hello = BitswapHello::new(self.local_node_id.clone());
             let hello_bytes = hello.encode()?;
             if let Err(e) = conn_guard.send(Frame::new(hello_bytes)).await {
+                record_error(&self.metrics, BitswapErrorReason::Alpn);
                 drop(conn_guard);
                 drop(_guard);
                 return Err(BitswapTransportError::Connection(format!(
@@ -1022,16 +1135,69 @@ impl BitswapTransportBridge for BitswapQuicBridge {
 
     async fn register_inbound_sender(&self, peer: NodeId, tx: mpsc::Sender<Vec<u8>>) {
         self.peers.write().insert(peer, PeerChannel { tx });
+        self.refresh_active_peers();
     }
 
     async fn unregister_peer(&self, peer: &NodeId) {
         self.peers.write().remove(peer);
+        record_error(&self.metrics, BitswapErrorReason::PeerDisconnected);
+        self.refresh_active_peers();
     }
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  Mock bitswap transport (in-memory)
+//  Helpers
 // ════════════════════════════════════════════════════════════════════
+
+/// Map a Bitswap message to its low-cardinality label string for
+/// the `messages_sent_total{type=...}` series. The label set is
+/// bounded by the enum variants.
+fn message_type_label(msg: &BitswapMessage) -> &'static str {
+    match msg {
+        BitswapMessage::WantHave { .. } => "want_have",
+        BitswapMessage::WantBlock { .. } => "want_block",
+        BitswapMessage::Have { .. } => "have",
+        BitswapMessage::DontHave { .. } => "dont_have",
+        BitswapMessage::Block { .. } => "block",
+        BitswapMessage::Cancel { .. } => "cancel",
+        BitswapMessage::BatchWant { .. } => "batch_want",
+        BitswapMessage::BatchResponse { .. } => "batch_response",
+    }
+}
+
+/// Build a single-pair label set for the `errors_total{reason=...}`
+/// series. We treat `LabelSet::new` errors as best-effort
+/// (validation failures are vanishingly rare for hard-coded reason
+/// strings); if the set is invalid we fall back to the empty set
+/// so the counter still increments.
+fn reason_label(reason: &str) -> adnet_observability::labels::LabelSet {
+    match adnet_observability::labels::LabelSet::new(std::iter::once((
+        "reason".to_string(),
+        reason.to_string(),
+    ))) {
+        Ok(ls) => ls,
+        Err(_) => adnet_observability::labels::LabelSet::EMPTY,
+    }
+}
+
+/// Build a single-pair label set for the `messages_sent_total{type=...}`
+/// series.
+fn msg_type_label(msg: &BitswapMessage) -> adnet_observability::labels::LabelSet {
+    match adnet_observability::labels::LabelSet::new(std::iter::once((
+        "type".to_string(),
+        message_type_label(msg).to_string(),
+    ))) {
+        Ok(ls) => ls,
+        Err(_) => adnet_observability::labels::LabelSet::EMPTY,
+    }
+}
+
+/// Increment the `errors_total` counter with the given reason.
+fn record_error(metrics: &BitswapMetrics, reason: BitswapErrorReason) {
+    metrics
+        .errors
+        .inc_labels(&reason_label(reason.label()));
+}
 
 /// Mock Bitswap transport for testing (in-process channel pairs).
 ///
@@ -1188,6 +1354,162 @@ impl BitswapTransportStats {
 
     pub fn record_error(&mut self) {
         self.errors += 1;
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  Prometheus metrics
+// ════════════════════════════════════════════════════════════════════
+//
+// BitSwap-over-QUIC exposes a small, low-cardinality metric surface
+// so operators can wire the live bridge into the same Prometheus
+// pull model as the rest of the `adnet-*` crates. The counters track
+// wire-level events (frames out/in, bytes out/in, errors, dials);
+// gauges track active peers + pending waits. Errors are broken down
+// by `reason` so a single global counter lets operators alert on the
+// most common failure mode without per-hash labels.
+
+use adnet_observability::metrics::{Counter, Gauge};
+use adnet_observability::registry::{GLOBAL as OBS_REGISTRY, Registry};
+use once_cell::sync::Lazy;
+
+/// Process-wide singleton metrics handle. Registered once on first
+/// access via the `Lazy` below; subsequent calls return the same
+/// `Arc`-shared counters. The `adnet-observability` registry panics
+/// on duplicate registrations, so we must avoid the naive
+/// `register-on-every-new()` pattern (see `registry.rs:265`).
+static GLOBAL_METRICS: Lazy<BitswapMetrics> = Lazy::new(|| BitswapMetrics::register(&OBS_REGISTRY));
+
+/// Prometheus-backed Bitswap metrics. All counters / gauges are
+/// registered eagerly on first access via [`BitswapMetrics::get`].
+/// Cloning the handle is cheap — the underlying counters are `Arc`
+/// so every call site observes the same series.
+#[derive(Debug, Clone)]
+pub struct BitswapMetrics {
+    /// `adnet_bitswap_messages_sent_total` — total Bitswap frames
+    /// sent on the wire (Want-Have / Want-Block / Block / Have /
+    /// DontHave / Cancel).
+    pub messages_sent: Arc<Counter>,
+    /// `adnet_bitswap_messages_received_total` — total frames
+    /// received from any peer.
+    pub messages_received: Arc<Counter>,
+    /// `adnet_bitswap_bytes_sent_total` — total payload bytes sent.
+    pub bytes_sent: Arc<Counter>,
+    /// `adnet_bitswap_bytes_received_total` — total payload bytes
+    /// received.
+    pub bytes_received: Arc<Counter>,
+    /// `adnet_bitswap_errors_total{reason=...}` — total errors
+    /// broken down by reason. Reasons: `dial`, `alpn`,
+    /// `serialization`, `oversize`, `connection`, `cancel_local`,
+    /// `wait_timeout`, `peer_disconnected`.
+    pub errors: Arc<Counter>,
+    /// `adnet_bitswap_dial_attempts_total` — total `dial()` calls
+    /// (counted before lock acquisition).
+    pub dial_attempts: Arc<Counter>,
+    /// `adnet_bitswap_dial_failures_total` — total dial failures
+    /// (timeout, connection refused, etc.).
+    pub dial_failures: Arc<Counter>,
+    /// `adnet_bitswap_send_want_block_total` — total
+    /// `send_want_block_and_wait` invocations.
+    pub send_want_block: Arc<Counter>,
+    /// `adnet_bitswap_send_want_block_timeouts_total` — total
+    /// `send_want_block_and_wait` calls that hit the timeout.
+    pub send_want_block_timeouts: Arc<Counter>,
+    /// `adnet_bitswap_active_peers` — number of peers currently
+    /// registered in the bridge (gauge).
+    pub active_peers: Arc<Gauge>,
+    /// `adnet_bitswap_pending_blocks` — number of in-flight
+    /// WantBlock requests waiting for a Block frame (gauge).
+    pub pending_blocks: Arc<Gauge>,
+}
+
+impl BitswapMetrics {
+    /// Register every metric. Idempotent — repeated calls return
+    /// counters that share the same series in the registry.
+    pub fn register(registry: &Registry) -> Self {
+        Self {
+            messages_sent: registry.register_counter(
+                "adnet_bitswap_messages_sent_total",
+                "Total Bitswap frames sent on the wire.",
+            ),
+            messages_received: registry.register_counter(
+                "adnet_bitswap_messages_received_total",
+                "Total Bitswap frames received from any peer.",
+            ),
+            bytes_sent: registry.register_counter(
+                "adnet_bitswap_bytes_sent_total",
+                "Total payload bytes sent on the wire.",
+            ),
+            bytes_received: registry.register_counter(
+                "adnet_bitswap_bytes_received_total",
+                "Total payload bytes received from any peer.",
+            ),
+            errors: registry.register_counter(
+                "adnet_bitswap_errors_total",
+                "Total Bitswap transport errors, broken down by reason.",
+            ),
+            dial_attempts: registry.register_counter(
+                "adnet_bitswap_dial_attempts_total",
+                "Total Bitswap dial attempts.",
+            ),
+            dial_failures: registry.register_counter(
+                "adnet_bitswap_dial_failures_total",
+                "Total Bitswap dial failures (timeout, connection refused, etc.).",
+            ),
+            send_want_block: registry.register_counter(
+                "adnet_bitswap_send_want_block_total",
+                "Total send_want_block_and_wait invocations.",
+            ),
+            send_want_block_timeouts: registry.register_counter(
+                "adnet_bitswap_send_want_block_timeouts_total",
+                "Total send_want_block_and_wait calls that hit the timeout.",
+            ),
+            active_peers: registry.register_gauge(
+                "adnet_bitswap_active_peers",
+                "Number of peers currently registered in the bridge.",
+            ),
+            pending_blocks: registry.register_gauge(
+                "adnet_bitswap_pending_blocks",
+                "Number of in-flight WantBlock requests waiting for a response.",
+            ),
+        }
+    }
+
+    /// Convenience: borrow the process-wide singleton metrics handle.
+    /// The underlying counters are registered exactly once and shared
+    /// across every adapter / bridge in the process.
+    pub fn get() -> Self {
+        GLOBAL_METRICS.clone()
+    }
+}
+
+/// Standardised error reasons for the `errors_total` counter. Each
+/// call site maps to one of these so the Prometheus label set stays
+/// bounded.
+#[derive(Debug, Clone, Copy)]
+pub enum BitswapErrorReason {
+    Dial,
+    Alpn,
+    Serialization,
+    Oversize,
+    Connection,
+    CancelLocal,
+    WaitTimeout,
+    PeerDisconnected,
+}
+
+impl BitswapErrorReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            BitswapErrorReason::Dial => "dial",
+            BitswapErrorReason::Alpn => "alpn",
+            BitswapErrorReason::Serialization => "serialization",
+            BitswapErrorReason::Oversize => "oversize",
+            BitswapErrorReason::Connection => "connection",
+            BitswapErrorReason::CancelLocal => "cancel_local",
+            BitswapErrorReason::WaitTimeout => "wait_timeout",
+            BitswapErrorReason::PeerDisconnected => "peer_disconnected",
+        }
     }
 }
 

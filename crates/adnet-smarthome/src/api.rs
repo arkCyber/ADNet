@@ -222,6 +222,31 @@ struct InvokeActionRequest {
     input: Vec<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+struct MatterCommissionRequest {
+    payload: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SceneActivateRequest {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct CreateSceneRequest {
+    id: String,
+    name: String,
+    #[serde(default)]
+    room: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    actions: Vec<crate::scene::SceneAction>,
+}
+
 async fn dispatch(
     hub: Arc<SmartHomeHub>,
     cfg: Arc<ApiConfig>,
@@ -313,6 +338,78 @@ async fn dispatch(
             Ok(()) => json_body(StatusCode::OK, &serde_json::json!({"status": "removed"})),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         },
+
+        // ── Matter endpoints ────────────────────────────────────────────────
+        (&Method::GET, ["api", "matter", "nodes"]) => {
+            // Return list of Matter node IDs
+            let nodes: Vec<u64> = hub.list_matter_nodes().await.unwrap_or_default();
+            json_body(StatusCode::OK, &nodes)
+        }
+        (&Method::POST, ["api", "matter", "commission"]) => {
+            match read_json_body::<MatterCommissionRequest>(req).await {
+                Ok(body) => match hub.matter_commission(&body.payload, body.label).await {
+                    Ok(node) => json_body(StatusCode::CREATED, &node),
+                    Err(e) => error_response(StatusCode::BAD_GATEWAY, e.to_string()),
+                },
+                Err(resp) => resp,
+            }
+        }
+
+        // ── Scene endpoints ───────────────────────────────────────────────
+        (&Method::GET, ["api", "scenes"]) => {
+            let scenes = hub.list_scenes().await;
+            json_body(StatusCode::OK, &scenes)
+        }
+        (&Method::POST, ["api", "scenes"]) => {
+            match read_json_body::<CreateSceneRequest>(req).await {
+                Ok(body) => {
+                    let scene = crate::scene::Scene::new(&body.id, &body.name);
+                    let mut scene = match (body.room, body.icon) {
+                        (Some(room), Some(icon)) => scene.with_room(&room).with_icon(&icon),
+                        (Some(room), None) => scene.with_room(&room),
+                        (None, Some(icon)) => scene.with_icon(&icon),
+                        (None, None) => scene,
+                    };
+                    // The persisted scene must carry every supplied
+                    // action; the prior `skip_deserializing` on the
+                    // `actions` field silently dropped them, leaving
+                    // the REST endpoint a no-op for the action list.
+                    for action in body.actions {
+                        scene = scene.add_action(action);
+                    }
+                    match hub.add_scene(scene).await {
+                        Ok(()) => json_body(StatusCode::CREATED, &serde_json::json!({"status": "created"})),
+                        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+                    }
+                }
+                Err(resp) => resp,
+            }
+        }
+        (&Method::GET, ["api", "scenes", id]) => {
+            match hub.get_scene(id).await {
+                Some(scene) => json_body(StatusCode::OK, &scene),
+                None => error_response(StatusCode::NOT_FOUND, "scene not found"),
+            }
+        }
+        (&Method::DELETE, ["api", "scenes", id]) => match hub.remove_scene(id).await {
+            Ok(()) => json_body(StatusCode::OK, &serde_json::json!({"status": "removed"})),
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        },
+        (&Method::POST, ["api", "scenes", "activate"]) => {
+            match read_json_body::<SceneActivateRequest>(req).await {
+                Ok(body) => match hub.activate_scene(&body.id).await {
+                    Ok(()) => json_body(StatusCode::OK, &serde_json::json!({"status": "activated"})),
+                    Err(e) => error_response(StatusCode::BAD_GATEWAY, e.to_string()),
+                },
+                Err(resp) => resp,
+            }
+        }
+
+        // ── HomeKit endpoints ───────────────────────────────────────────────
+        (&Method::GET, ["api", "homekit", "accessories"]) => {
+            let accessories = hub.list_homekit_accessories().await;
+            json_body(StatusCode::OK, &accessories)
+        }
 
         _ => error_response(StatusCode::NOT_FOUND, "not found"),
     };

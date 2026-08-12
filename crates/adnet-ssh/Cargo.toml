@@ -19,6 +19,7 @@ adnet-observability = { workspace = true }
 tokio       = { workspace = true }
 futures     = { workspace = true }
 async-trait = { workspace = true }
+parking_lot = { workspace = true }
 
 # Error / tracing ─────────────────────────────────────────────────
 thiserror   = { workspace = true }
@@ -42,6 +43,10 @@ iroh-base   = { version = "=1.0.3", optional = true, default-features = false, f
 # `whoami` exposes the current shell user for the
 # `adnet-ssh alice@<endpoint>` invitation string.
 whoami      = { version = "1.5", optional = true, default-features = false }
+# Used by `keys.rs` to decode authorized_keys blobs.
+base64      = { version = "0.22", optional = true, default-features = false }
+# Regex-based tokenizer for authorized_keys parsing.
+regex      = { version = "1", optional = true, default-features = false, features = ["unicode-perl"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -62,5 +67,7 @@ iroh = [
     "dep:iroh",
     "dep:iroh-base",
     "dep:whoami",
+    "dep:base64",
+    "dep:regex",
     "adnet-transport/iroh",
 ]

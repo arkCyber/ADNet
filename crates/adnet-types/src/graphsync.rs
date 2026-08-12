@@ -552,11 +552,11 @@ impl GraphSyncEngine {
     /// Handle an incoming block.
     ///
     /// Verifies that the block bytes match the CID via
-    /// [`crate::Cid::verify_bytes`] before counting the block toward
+    /// [`crate::Cid::verify_content`] before counting the block toward
     /// the request's stats. Mismatched blocks return
     /// [`GraphSyncError::BlockHashMismatch`] and are NOT recorded.
     pub fn handle_block(&mut self, block: BlockMessage) -> Result<(), GraphSyncError> {
-        if !block.cid.verify_bytes(&block.block) {
+        if !block.cid.verify_content(&block.block) {
             return Err(GraphSyncError::BlockHashMismatch {
                 cid: block.cid.clone(),
             });

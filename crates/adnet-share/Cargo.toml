@@ -24,7 +24,7 @@ futures     = { workspace = true }
 thiserror  = { workspace = true }
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-postcard   = { workspace = true }
+postcard   = { workspace = true, features = ["use-std"] }
 tracing    = { workspace = true }
 chrono     = { workspace = true }
 hex        = { workspace = true }

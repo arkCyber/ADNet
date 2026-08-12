@@ -16,7 +16,8 @@ use adnet_blobstore::graphsync::{
 use adnet_types::graphsync::selector;
 use adnet_types::graphsync::ResponseStatus;
 use adnet_node::graphsync::{graphsync_wire_len_hint, GraphSyncHello};
-use adnet_types::{Cid, NodeId};
+use adnet_types::cid::Cid;
+use adnet_types::NodeId;
 use tokio::sync::mpsc;
 
 fn dummy_node(byte: u8) -> NodeId {
@@ -141,7 +142,7 @@ async fn client_server_round_trip_through_mock() {
     // Local client.
     let client = GraphSyncClient::new(t_local.clone());
 
-    let mut handle: GraphSyncRequestHandle = client
+    let handle: GraphSyncRequestHandle = client
         .request(&peer, root_cid.clone(), selector::match_all(), 1)
         .await
         .expect("request should succeed");
@@ -230,7 +231,14 @@ async fn handle_shutdown_idempotent() {
 /// insert/remove, rx → handle wiring) is correct under contention.
 /// A regression in any of those areas typically manifests as either
 /// dropped responses or cross-talk between unrelated requests.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+///
+/// We use `tokio::test` default flavor (current_thread). The
+/// multi-thread flavor exhibits a `JoinHandle::await` starvation
+/// pattern with this test setup (the main test task gets starved
+/// while the four spawned per-request tasks churn through their
+/// `next_block` loops) — current_thread doesn't have that issue
+/// because the executor drives every task in deterministic order.
+#[tokio::test]
 async fn concurrent_requests_to_same_peer_stay_isolated() {
     use std::collections::HashSet;
 
@@ -285,9 +293,7 @@ async fn concurrent_requests_to_same_peer_stay_isolated() {
                 // must end up on `local_rx`. We dispatch the
                 // request directly; the server already routes
                 // outbound frames through the transport.
-                if let Err(e) = server.on_frame(&local, frame).await {
-                    eprintln!("server on_frame: {e}");
-                }
+                server.on_frame(&local, frame).await.expect("server on_frame");
                 let _ = req_id;
             }
         })
@@ -341,30 +347,27 @@ async fn concurrent_requests_to_same_peer_stay_isolated() {
         }));
     }
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        async {
-            let mut seen_payloads = HashSet::new();
-            for j in joins {
-                let (cid, data) = j.await.expect("task panicked").expect("block");
-                let expected = cid_to_payload(&cid, &payloads);
-                assert_eq!(data, expected, "payload mismatch for {cid:?}");
-                seen_payloads.insert(data.clone());
-            }
-            assert_eq!(seen_payloads.len(), n);
-            // Tear the pumps down by sending a single poison-pill.
-            // With the tx halves dropped, the receiver streams
-            // close naturally.
-            drop(t_local);
-            drop(t_peer);
-            let _ = server_pump.await;
-            let _ = client_pump.await;
-        },
-    )
-    .await;
-    if result.is_err() {
-        panic!("concurrent requests timed out (>15s)");
+    // Drain the join handles one at a time. Sequential awaiting
+    // lets the `current_thread` runtime schedule the test task
+    // between the per-request workers cleanly. `join_all` /
+    // `tokio::join!` historically starved in this configuration.
+    let mut seen_payloads = HashSet::new();
+    for j in joins {
+        let (cid, data) = j.await.expect("task panicked").expect("block");
+        let expected = cid_to_payload(&cid, &payloads);
+        assert_eq!(data, expected, "payload mismatch for {cid:?}");
+        seen_payloads.insert(data.clone());
     }
+    assert_eq!(seen_payloads.len(), n);
+    // Tear the pumps down. The mock transport holds sender halves
+    // inside its `peers` map; we must `unregister_peer` to drop them
+    // so `local_rx`/`peer_rx` close and the pumps unwind.
+    t_local.unregister_peer(&peer).await;
+    t_peer.unregister_peer(&local).await;
+    drop(t_local);
+    drop(t_peer);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server_pump).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), client_pump).await;
 }
 
 /// Helper that maps a CID back to its associated payload bytes

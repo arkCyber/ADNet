@@ -16,6 +16,8 @@ pub struct BitswapLedger {
     pub peer: String,
     pub sent: u64,
     pub received: u64,
+    pub sent_bytes: u64,
+    pub received_bytes: u64,
     pub blocks_sent: u64,
     pub blocks_received: u64,
 }
@@ -137,6 +139,11 @@ impl BitswapApi {
     /// Get all ledgers.
     pub async fn ledgers(&self) -> Vec<BitswapLedger> {
         self.ledgers.read().await.clone()
+    }
+
+    /// Get connected peers (stub implementation).
+    pub async fn peers(&self) -> Vec<SwarmPeer> {
+        Vec::new()
     }
 
     /// Get statistics.

@@ -45,8 +45,9 @@ use adnet_blobstore::graphsync::{
     GraphSyncTransportError, GraphSyncWire, GRAPHSYNC_ALPN,
 };
 use adnet_transport::{Frame, OutgoingConnection, SharedTransport};
+use adnet_types::cid::Cid;
 use adnet_types::graphsync::BlockStore;
-use adnet_types::{Cid, NodeId};
+use adnet_types::NodeId;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -758,7 +759,7 @@ mod tests {
     use super::*;
     use adnet_types::graphsync::ResponseStatus;
     use adnet_types::multihash::{HashCode, Multihash};
-    use adnet_types::Codec;
+    use adnet_types::cid::Codec;
 
     fn node_id(byte: u8) -> NodeId {
         let arr = [byte; 32];

@@ -80,7 +80,20 @@ impl IpnTransport for GossipIpnTransport {
         let s: IpnRecordStream = Box::pin(async_stream::stream! {
             loop {
                 match rx.recv().await {
-                    Ok(record) => yield Ok(record),
+                    Ok(record) => {
+                        // Basic signature validation: check that a signature exists
+                        // Full Ed25519 verification requires the publisher's public key
+                        // which the higher-level resolver handles with the real Verifier
+                        if record.signature.len() != 64 {
+                            tracing::trace!(
+                                name = %record.name,
+                                sig_len = record.signature.len(),
+                                "GossipIpnTransport: dropping record with invalid signature length"
+                            );
+                            continue;
+                        }
+                        yield Ok(record);
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

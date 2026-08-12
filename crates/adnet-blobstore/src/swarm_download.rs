@@ -36,6 +36,7 @@
 //! - SWARM-6: Session management optimizes peer affinity
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,9 @@ use adnet_observability::metrics::{Counter, Gauge};
 use adnet_observability::registry::Registry;
 use adnet_types::ContentHash;
 use parking_lot::RwLock;
+use rand::{Rng, SeedableRng};
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -1097,6 +1101,12 @@ impl SwarmDownloader {
         pieces.get(&index).map(|p| p.is_failed()).unwrap_or(false)
     }
 
+    /// Check if a specific piece has been verified.
+    pub fn is_piece_verified(&self, index: u32) -> bool {
+        let pieces = self.pieces.read();
+        pieces.get(&index).map(|p| p.is_verified()).unwrap_or(false)
+    }
+
     /// Check if a peer is healthy.
     pub fn is_peer_healthy(&self, addr: &str) -> bool {
         let peers = self.peers.read();
@@ -1265,14 +1275,14 @@ impl<F: ChunkFetcher + 'static> SwarmDownloadService<F> {
     ///
     /// This method implements:
     /// 1. **Want-Have Discovery**: Discover peer availability before downloading
-    /// 2. **True Parallelism**: Multiple chunks downloading simultaneously
+    /// 2. **True Parallelism**: Multiple chunks downloading simultaneously using tokio::spawn
     /// 3. **Session Tracking**: Track downloads per session
     /// 4. **Endgame Mode**: Aggressive downloads when mostly complete
     ///
     /// ## DO-178C: SWARM-5, SWARM-6
     ///
-    /// Note: For simplicity, this currently delegates to sequential download.
-    /// A full parallel implementation requires fixing the async task coordination.
+    /// The parallel implementation uses tokio::spawn to run multiple chunk downloads
+    /// concurrently, with proper task coordination using Arc and RwLock.
     pub async fn download_parallel(
         &self,
         content_hash: &ContentHash,
@@ -1281,10 +1291,202 @@ impl<F: ChunkFetcher + 'static> SwarmDownloadService<F> {
         peers: Vec<(String, HashSet<u32>)>,
         bao_tree: Option<Arc<BaoTree>>,
     ) -> SwarmResult<Vec<u8>> {
-        // For now, use sequential download as a fallback
-        // TODO: Implement true parallel download with proper task coordination
-        self.download(content_hash, size, chunk_count, peers, bao_tree)
-            .await
+        self.metrics.downloads_started.inc();
+        self.metrics.active_downloads.inc();
+
+        let start_time = Instant::now();
+        let overall_timeout = Duration::from_secs(120);
+
+        // Create shared downloader state
+        let downloader = Arc::new(SwarmDownloader::with_metrics(
+            content_hash.clone(),
+            size,
+            chunk_count,
+            self.metrics.clone(),
+        ));
+
+        // Register all peers
+        for (peer_addr, have_pieces) in &peers {
+            downloader.register_peer(peer_addr.clone(), have_pieces.clone());
+        }
+
+        // Semaphore to limit concurrent downloads
+        let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
+        
+        // Channel for completed chunks
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<(u32, Vec<u8>), (u32, String)>>(chunk_count as usize);
+
+        // Spawn parallel download tasks
+        let mut handles = Vec::new();
+        let mut piece_indices: Vec<u32> = (0..chunk_count).collect();
+
+        // Shuffle pieces for better load balancing
+        let seed = content_hash.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        let mut rng = SmallRng::seed_from_u64(seed);
+        piece_indices.shuffle(&mut rng);
+
+        // Track actual number of spawned tasks (may be less than chunk_count)
+        let mut spawned_count = 0usize;
+
+        for piece_idx in piece_indices {
+            // Check if we already have the piece from another task
+            if downloader.is_piece_verified(piece_idx) {
+                continue;
+            }
+
+            // Get a permit from the semaphore
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => continue, // Semaphore closed
+            };
+
+            // Check if we have a peer for this piece
+            let peer = match downloader.get_peer_for_piece(piece_idx) {
+                Some(p) => p,
+                None => {
+                    drop(permit);
+                    downloader.mark_failed(piece_idx, "No peer available".into());
+                    continue;
+                }
+            };
+
+            // Clone Arc for the task
+            let downloader = downloader.clone();
+            let tx = tx.clone();
+            let fetcher = self.fetcher.clone();
+            let peer = peer.clone();
+            let content_hash = content_hash.clone();
+            let timeout = self.timeout;
+            let overall_timeout = overall_timeout;
+
+            let handle = tokio::spawn(async move {
+                // Check overall timeout
+                if start_time.elapsed() > overall_timeout {
+                    let _ = tx.send(Err((piece_idx, "Overall timeout".into()))).await;
+                    drop(permit);
+                    return;
+                }
+
+                // Mark as downloading
+                downloader.mark_downloading(piece_idx, &peer);
+
+                // Fetch the chunk with timeout
+                let result = tokio::time::timeout(
+                    timeout,
+                    fetcher.fetch_chunk(&peer, &content_hash, piece_idx, timeout),
+                ).await;
+
+                match result {
+                    Ok(Ok(data)) => {
+                        downloader.mark_verified(piece_idx, data.clone());
+                        let _ = tx.send(Ok((piece_idx, data))).await;
+                    }
+                    Ok(Err(e)) => {
+                        downloader.mark_failed_by(piece_idx, e.to_string(), &peer);
+                        let _ = tx.send(Err((piece_idx, e.to_string()))).await;
+                    }
+                    Err(_) => {
+                        downloader.mark_failed_by(piece_idx, "Timeout".into(), &peer);
+                        let _ = tx.send(Err((piece_idx, "Timeout".into()))).await;
+                    }
+                }
+
+                drop(permit);
+            });
+
+            handles.push(handle);
+            spawned_count += 1;
+        }
+
+        // Drop the original sender
+        drop(tx);
+
+        // Wait for all tasks to complete or timeout
+        // Use the actual spawned count instead of chunk_count to avoid deadlock
+        let mut remaining = spawned_count;
+        let timeout_check = tokio::time::Instant::now();
+        
+        while remaining > 0 {
+            tokio::select! {
+                biased;
+                
+                result = rx.recv() => {
+                    match result {
+                        Some(Ok((_, _))) => {
+                            remaining -= 1;
+                            // Check if download is complete
+                            if downloader.is_complete() {
+                                break;
+                            }
+                        }
+                        Some(Err(_)) => {
+                            remaining -= 1;
+                        }
+                        None => break, // Channel closed
+                    }
+                }
+                
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Periodic check for completion or timeout
+                    if downloader.is_complete() {
+                        break;
+                    }
+                    if timeout_check.elapsed() > overall_timeout {
+                        tracing::warn!(
+                            piece_idx = downloader.verified_count(),
+                            total = chunk_count,
+                            "Parallel download timeout, collecting results"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Abort any remaining handles
+        for handle in handles {
+            let _ = handle.abort();
+        }
+
+        // Get all verified data
+        let verified = downloader.get_verified_data();
+        
+        if verified.len() != chunk_count as usize {
+            self.metrics.download_errors.inc();
+            self.metrics.active_downloads.dec();
+            
+            tracing::warn!(
+                received = verified.len(),
+                required = chunk_count,
+                "Parallel download incomplete"
+            );
+            
+            return Err(SwarmError::InsufficientChunks {
+                received: verified.len(),
+                required: chunk_count as usize,
+            });
+        }
+
+        // Reassemble the complete blob
+        let mut result = Vec::with_capacity(size as usize);
+        for (_, data) in verified {
+            result.extend_from_slice(&data);
+        }
+
+        self.metrics.downloads_completed.inc();
+        self.metrics.active_downloads.dec();
+        self.metrics
+            .download_duration_secs
+            .observe(start_time.elapsed().as_secs_f64());
+
+        tracing::debug!(
+            pieces = chunk_count,
+            peers = peers.len(),
+            duration_ms = start_time.elapsed().as_millis(),
+            "Parallel swarm download completed"
+        );
+
+        Ok(result)
     }
 }
 

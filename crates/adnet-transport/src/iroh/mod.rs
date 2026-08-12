@@ -660,7 +660,7 @@ impl Transport for IrohTransport {
         let stream = futures::stream::unfold((endpoint,), move |(ep,)| {
             let ep = ep.clone();
             async move {
-                use n0_watcher::Watcher as _;
+                use iroh::Watcher;
                 let mut watcher = ep.watch_addr();
                 let next = match watcher.updated().await {
                     Ok(v) => v,

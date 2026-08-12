@@ -114,6 +114,12 @@ pub enum CdnContentKind {
     GenericFile,
 }
 
+impl Default for CdnContentKind {
+    fn default() -> Self {
+        Self::GenericFile
+    }
+}
+
 impl CdnContentKind {
     pub fn from_str_loose(s: &str) -> Option<Self> {
         Some(match s.to_ascii_lowercase().as_str() {

@@ -14,6 +14,7 @@
 pub mod blob_proto;
 pub mod endpoint;
 pub mod frame;
+pub mod metrics;
 pub mod quic;
 pub mod traits;
 
@@ -24,7 +25,8 @@ pub use blob_proto::{
 pub use endpoint::EndpointAddr;
 pub use frame::{Frame, FrameCodec};
 pub use quic::{QuicTransport, QuicTransportBuilder, TransportIdentity, derive_node_id_from_cert};
-pub use traits::{OutgoingConnection, SharedTransport, Transport, TransportError, TransportResult};
+pub use traits::{ConnectionType, OutgoingConnection, SharedTransport, StreamPriority, Transport, TransportError, TransportResult};
 
 pub mod iroh;
+#[cfg(feature = "iroh")]
 pub use iroh::IrohTransport;

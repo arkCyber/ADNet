@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ADNet Dashboard</title>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent: #38bdf8;
+            --accent-hover: #0ea5e9;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --border: #475569;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .status-badge.ok {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+            border: 1px solid var(--success);
+        }
+
+        .status-badge.error {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+            border: 1px solid var(--danger);
+        }
+
+        .status-badge::before {
+            content: '';
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .card-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--bg-tertiary);
+        }
+
+        .metric:last-child {
+            border-bottom: none;
+        }
+
+        .metric-name {
+            color: var(--text-secondary);
+        }
+
+        .metric-value {
+            font-weight: 600;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-fill.low { background: var(--success); }
+        .progress-fill.medium { background: var(--warning); }
+        .progress-fill.high { background: var(--danger); }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .alert.warn {
+            background: rgba(245, 158, 11, 0.15);
+            border: 1px solid var(--warning);
+            color: var(--warning);
+        }
+
+        .alert.error {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+        }
+
+        .alert.info {
+            background: rgba(56, 189, 248, 0.15);
+            border: 1px solid var(--accent);
+            color: var(--accent);
+        }
+
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--bg-tertiary);
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.5px;
+        }
+
+        td {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.85rem;
+        }
+
+        tr:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .timestamp {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .refresh-btn {
+            background: var(--accent);
+            color: var(--bg-primary);
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: var(--accent-hover);
+        }
+
+        .search-input {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            width: 250px;
+            font-size: 0.9rem;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .error-msg {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            header {
+                flex-direction: column;
+                gap: 15px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>ADNet Dashboard</h1>
+            <div style="display: flex; align-items: center; gap: 15px;">
+                <span id="status-badge" class="status-badge ok">
+                    <span id="status-text">Loading...</span>
+                </span>
+                <button class="refresh-btn" onclick="fetchData()">Refresh</button>
+            </div>
+        </header>
+
+        <div id="error-container" style="display: none;" class="error-msg"></div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Health Checks</span>
+                </div>
+                <div id="health-container">
+                    <div class="loading">Loading health status...</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Quick Stats</span>
+                </div>
+                <div id="stats-container">
+                    <div class="loading">Loading stats...</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Storage</span>
+                </div>
+                <div id="storage-container">
+                    <div class="loading">Loading storage info...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom: 30px;">
+            <div class="card-header">
+                <span class="card-title">Alerts</span>
+            </div>
+            <div id="alerts-container">
+                <div class="loading">Loading alerts...</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Metrics</span>
+                <input type="text" class="search-input" placeholder="Search metrics..." oninput="filterMetrics(this.value)">
+            </div>
+            <div class="table-container">
+                <table id="metrics-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Type</th>
+                            <th>Value</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody id="metrics-body">
+                        <tr><td colspan="4" class="loading">Loading metrics...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="timestamp">
+            Last updated: <span id="last-updated">-</span>
+        </div>
+    </div>
+
+    <script>
+        let allMetrics = [];
+
+        async function fetchData() {
+            try {
+                const response = await fetch('/dashboard/data');
+                if (!response.ok) throw new Error('Failed to fetch dashboard data');
+                const data = await response.json();
+
+                updateHealth(data.health);
+                updateStats(data);
+                updateMetrics(data.metrics);
+                updateTimestamp(data.timestamp);
+
+                document.getElementById('error-container').style.display = 'none';
+            } catch (error) {
+                document.getElementById('error-container').style.display = 'block';
+                document.getElementById('error-container').textContent = 'Error loading data: ' + error.message;
+            }
+        }
+
+        function updateHealth(health) {
+            const statusBadge = document.getElementById('status-badge');
+            const statusText = document.getElementById('status-text');
+            const container = document.getElementById('health-container');
+
+            if (health.status === 'ok') {
+                statusBadge.className = 'status-badge ok';
+                statusText.textContent = 'Healthy';
+            } else {
+                statusBadge.className = 'status-badge error';
+                statusText.textContent = 'Unhealthy';
+            }
+
+            if (health.checks && health.checks.length > 0) {
+                container.innerHTML = health.checks.map(check => `
+                    <div class="metric">
+                        <span class="metric-name">${escapeHtml(check.name || 'Unknown')}</span>
+                        <span class="metric-value" style="color: ${check.status === 'ok' ? 'var(--success)' : 'var(--danger)'}">
+                            ${check.status}
+                        </span>
+                    </div>
+                `).join('');
+            } else {
+                container.innerHTML = '<div class="metric"><span>No health checks registered</span></div>';
+            }
+        }
+
+        function updateStats(data) {
+            const container = document.getElementById('stats-container');
+            const metricMap = {};
+            data.metrics.forEach(m => metricMap[m.name] = m.value);
+
+            container.innerHTML = `
+                <div class="metric">
+                    <span class="metric-name">Total Metrics</span>
+                    <span class="metric-value">${data.metrics.length}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-name">Blob Count</span>
+                    <span class="metric-value">${metricMap['adnet_blob_blobs_total'] || 'N/A'}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-name">Store Size</span>
+                    <span class="metric-value">${formatBytes(metricMap['adnet_blob_store_size_bytes'] || 0)}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-name">Sweeps</span>
+                    <span class="metric-value">${metricMap['adnet_replicator_sweeps_total'] || 0}</span>
+                </div>
+            `;
+        }
+
+        function updateMetrics(metrics) {
+            allMetrics = metrics;
+            renderMetrics(metrics);
+        }
+
+        function renderMetrics(metrics) {
+            const tbody = document.getElementById('metrics-body');
+            if (!metrics || metrics.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4">No metrics available</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = metrics.map(m => `
+                <tr>
+                    <td>${escapeHtml(m.name)}</td>
+                    <td><span style="color: var(--accent)">${m.kind}</span></td>
+                    <td>${escapeHtml(m.value)}</td>
+                    <td style="color: var(--text-secondary)">${escapeHtml(m.help || '-')}</td>
+                </tr>
+            `).join('');
+        }
+
+        function filterMetrics(query) {
+            const filtered = allMetrics.filter(m =>
+                m.name.toLowerCase().includes(query.toLowerCase()) ||
+                m.help.toLowerCase().includes(query.toLowerCase())
+            );
+            renderMetrics(filtered);
+        }
+
+        function updateTimestamp(ts) {
+            const date = new Date(ts);
+            document.getElementById('last-updated').textContent = date.toLocaleString();
+        }
+
+        function formatBytes(bytes) {
+            if (!bytes || bytes === 'N/A') return 'N/A';
+            const b = parseInt(bytes);
+            if (isNaN(b)) return bytes;
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let i = 0;
+            while (b >= 1024 && i < units.length - 1) {
+                bytes = b / 1024;
+                i++;
+            }
+            return `${bytes.toFixed(2)} ${units[i]}`;
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Initial fetch
+        fetchData();
+
+        // Auto-refresh every 10 seconds
+        setInterval(fetchData, 10000);
+    </script>
+</body>
+</html>

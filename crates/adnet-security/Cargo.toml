@@ -1,0 +1,56 @@
+[package]
+name = "adnet-security"
+description = "Security primitives: ACL, session encryption, intrusion detection for ADNet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+# Crypto
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+argon2 = { workspace = true }
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+
+# Time
+chrono = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+once_cell = { workspace = true }
+async-trait = { workspace = true }
+getrandom = "0.2"
+
+# Security crates
+x509-parser = "0.16"
+pem = "3"
+generic-array = "0.14"
+typenum = "1.17"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []

@@ -15,6 +15,7 @@ adnet-types = { workspace = true }
 adnet-observability = { workspace = true }
 adnet-namespace = { workspace = true, features = ["dht"] }
 adnet-ipc = { workspace = true }
+adnet-dht = { workspace = true }
 
 # Crypto
 ed25519-dalek = { workspace = true }
@@ -28,10 +29,16 @@ tokio = { workspace = true, features = ["full"] }
 futures = { workspace = true }
 
 # HTTP server
+axum = "0.7"
 hyper = { version = "1.4", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 http = "1.1"
+
+# WebSocket
+tokio-tungstenite = "0.24"
+tungstenite = "0.24"
+futures-util = "0.3"
 
 # Serialization
 serde = { workspace = true }
@@ -54,6 +61,9 @@ base64 = "0.22"
 tempfile = { workspace = true }
 tokio-test = "0.4"
 serde_json = { workspace = true }
+adnet-dht = { workspace = true }
 
 [features]
 default = []
+# Enable the `/metrics` + `/health` HTTP server via adnet-observability.
+metrics-http = ["adnet-observability/http-server"]

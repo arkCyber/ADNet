@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use adnet_blobstore::{MockClock, Nas};
+use adnet_blobstore::{MockClock, Nas, NamespaceRead};
 use adnet_pairing::{capability::Capability, CapabilitySet};
 use adnet_types::ContentHash;
 use adnet_webdav::acl::{ResolvedCapability, StaticCapabilityResolver};
@@ -125,4 +125,100 @@ fn pairing_cap_revoked_token_blocks_all_verbs() {
     assert!(s.handle_put(&path, h, 1, Some(&header), Some("ua".into())).is_err());
     let header = fresh_token(&s, 2);
     assert!(s.handle_get(&path, Some(&header)).is_err());
+}
+
+#[test]
+fn pairing_cap_copy_works() {
+    // Test that COPY works with files.write capability
+    let (s, _dir) = build_state(CapabilitySet::from_names(["files.read", "files.write"]));
+    let from_path = adnet_blobstore::PathSegments::decode_http("/source.txt").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/dest.txt").unwrap();
+
+    // First, put the source file
+    let header = fresh_token(&s, 1);
+    s.handle_put_body(&from_path, b"hello world", None, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Now copy it
+    let header = fresh_token(&s, 2);
+    s.handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Verify both files exist
+    let header = fresh_token(&s, 3);
+    let src_data = s.handle_get(&from_path, Some(&header)).unwrap();
+    assert_eq!(src_data, b"hello world");
+
+    let header = fresh_token(&s, 4);
+    let dst_data = s.handle_get(&to_path, Some(&header)).unwrap();
+    assert_eq!(dst_data, b"hello world");
+}
+
+#[test]
+fn pairing_cap_copy_requires_write_capability() {
+    // Test that COPY is rejected with read-only capability
+    let (s, _dir) = build_state(CapabilitySet::from_names(["files.read"]));
+    let from_path = adnet_blobstore::PathSegments::decode_http("/source.txt").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/dest.txt").unwrap();
+
+    // Copy should fail with read-only token
+    let header = fresh_token(&s, 1);
+    let res = s.handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()));
+    assert!(res.is_err(), "read-only token must not COPY");
+}
+
+#[test]
+fn pairing_cap_copy_directory_works() {
+    // Test that copying a directory works (shallow copy)
+    let (s, _dir) = build_state(CapabilitySet::from_names(["files.read", "files.write"]));
+
+    // Create a directory
+    let dir_path = adnet_blobstore::PathSegments::decode_http("/mydir").unwrap();
+    let header = fresh_token(&s, 1);
+    s.handle_mkcol(&dir_path, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Create a file inside
+    let file_path = adnet_blobstore::PathSegments::decode_http("/mydir/file.txt").unwrap();
+    let header = fresh_token(&s, 2);
+    s.handle_put_body(&file_path, b"content", None, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Copy the directory
+    let from_path = adnet_blobstore::PathSegments::decode_http("/mydir").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/mydir_copy").unwrap();
+    let header = fresh_token(&s, 3);
+    s.handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Verify the copy exists
+    let entry = s.nas.lookup(&to_path);
+    assert!(entry.is_some(), "copied directory should exist");
+}
+
+#[test]
+fn pairing_cap_copy_audit_logged() {
+    // Test that COPY is logged to audit
+    let (s, dir) = build_state(CapabilitySet::from_names(["files.read", "files.write"]));
+    let from_path = adnet_blobstore::PathSegments::decode_http("/audit_src.txt").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/audit_dst.txt").unwrap();
+
+    // Put source file
+    let header = fresh_token(&s, 1);
+    s.handle_put_body(&from_path, b"data", None, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Copy it
+    let header = fresh_token(&s, 2);
+    s.handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Check audit log
+    let audit_path = dir.path().join("nas").join("audit.jsonl");
+    let body = std::fs::read_to_string(&audit_path).unwrap();
+    // Check for "copy" operation
+    assert!(body.contains("\"op\":\"copy\""), "copy must be in audit log: {}", body);
+    // The path format is "from -> to" without leading slash
+    assert!(body.contains("audit_src.txt"), "source path must be in audit: {}", body);
+    assert!(body.contains("audit_dst.txt"), "destination path must be in audit: {}", body);
 }

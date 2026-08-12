@@ -39,6 +39,8 @@ async-trait = { workspace = true }
 # Utilities
 hex = { workspace = true }
 rand = { workspace = true }
+rocksdb = { version = "0.22", optional = true }
+blake3 = { workspace = true }
 
 # Sync mutex for low-contention internal hand-off (e.g. the optional
 # `DhtProtocolHandler` slot on `DhtNode`).
@@ -57,3 +59,4 @@ tracing-subscriber = { workspace = true }
 
 [features]
 default = []
+rocksdb = ["dep:rocksdb"]

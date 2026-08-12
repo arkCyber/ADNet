@@ -1,0 +1,72 @@
+[package]
+name        = "adnet-webrtc"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "WebRTC DataChannel transport for ADNet. Symmetric: native ↔ native and native ↔ browser."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types    = { workspace = true }
+adnet-identity = { workspace = true }
+
+tokio          = { workspace = true }
+futures        = { workspace = true }
+async-trait    = { workspace = true }
+thiserror      = { workspace = true }
+anyhow         = { workspace = true }
+tracing        = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+bytes          = { workspace = true }
+hex            = { workspace = true }
+blake3         = { workspace = true }
+rand           = { workspace = true }
+parking_lot    = { workspace = true }
+once_cell      = { workspace = true }
+time           = { version = "0.3", features = ["std"] }
+
+# WebRTC stack. `data` enables the DataChannel layer; `rtp` is enabled so the
+# peer connection can be used for future media use cases but the default
+# ADNet usage is data-only. We deliberately leave the `media` feature OFF so we
+# don't pull in video/audio codecs that we don't need.
+webrtc = { workspace = true, optional = true }
+
+# Noise protocol — used to authenticate the WebRTC DataChannel end-to-end on
+# top of the DTLS layer that WebRTC already provides. The same primitives are
+# used by adnet-dht.
+snow   = { workspace = true, optional = true }
+
+# Signaling channel. The default build does not pull this in; we only enable
+# `pkarr` when the `signaling` feature is on (or under `webrtc` feature which
+# implies signaling). For tests we use an in-process mpsc, so the default
+# `webrtc` build also pulls it in.
+pkarr  = { workspace = true, optional = true }
+
+# Base64 for the SDP wire format. Used only by the `webrtc` feature.
+base64 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio             = { workspace = true }
+tempfile          = { workspace = true }
+proptest          = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+# Default: zero-cost. Just type definitions and helpers that don't pull in any
+# networking deps. Useful for downstream code that wants to expose WebRTC
+# configuration without paying the cold-build cost until the feature is
+# actually exercised.
+default = []
+
+# Full WebRTC runtime — pull in the webrtc-rs stack, the Noise handshake, and
+# pkarr-based signaling.
+webrtc = ["dep:webrtc", "dep:snow", "dep:pkarr", "dep:base64"]
+
+# Just the signaling helpers + Noise handshake, without the webrtc-rs runtime.
+# Lets downstream code that already has its own webrtc-rs version (e.g. an
+# embedder on a pinned version) reuse our handshake code.
+signaling = ["dep:pkarr", "dep:snow"]

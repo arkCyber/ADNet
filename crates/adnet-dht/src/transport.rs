@@ -18,6 +18,13 @@ use crate::protocol::{
 };
 use crate::query::QueryError;
 
+/// Callback that receives raw DHT response bytes the bridge reads.
+/// Invoked synchronously when a response frame arrives. The
+/// typical implementation decodes the bytes back into a
+/// [`DhtWireMessage`](crate::protocol::DhtWireMessage) and forwards
+/// it to [`DhtNetworkSender::handle_response`](crate::network::DhtNetworkSender::handle_response).
+pub type DynResponseSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+
 /// ALPN identifier for DHT protocol.
 /// Matches the pattern used by adnet-transport.
 pub const DHT_ALPN: &[u8] = b"adnet/dht/1";

@@ -52,7 +52,7 @@ mod transport_tests;
 pub use ipns::{
     IpnRecord, IpnPublisher, IpnResolver, IpnsError,
     SecretKey, Verifier, Ed25519SecretKey, Ed25519Verifier,
-    public_key_to_ipns_name,
+    public_key_to_ipns_name, TrustLevel,
 };
 pub use pubsub::{
     IpnGossipPayload, PubsubIpnsResolver, PubsubSubscription,

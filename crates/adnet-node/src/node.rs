@@ -23,6 +23,9 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
+
+#[cfg(feature = "dht")]
+use adnet_namespace::IpnPublisher;
 #[allow(unused_imports)]
 use {OutgoingConnection as _, Transport as _, derive_node_id_from_cert as _};
 
@@ -145,6 +148,34 @@ pub struct NodeBuilder {
     /// [`NodeBuilder::with_iroh_runtime`].
     #[cfg(feature = "iroh")]
     iroh_runtime: Option<crate::iroh_runtime::IrohRuntime>,
+    /// Bitswap config. When `Some` and a transport is wired, the
+    /// builder will instantiate a `BitswapHandle` and a
+    /// `BitswapQuicBridge` so the engine can actually emit / receive
+    /// Bitswap frames on the wire. When `None` (the default), the
+    /// bitswap feature is dormant even if compiled in.
+    #[cfg(feature = "bitswap")]
+    bitswap_config: Option<crate::bitswap::BitswapConfig>,
+    /// GraphSync config. When `Some` and a transport is wired, the
+    /// builder will instantiate a `GraphSyncService` over the local
+    /// blob store and route outbound/inbound frames through the
+    /// wired transport via `GraphSyncQuicBridge`. When `None`
+    /// (the default), GraphSync is dormant even when the
+    /// `graphsync` feature is enabled.
+    #[cfg(feature = "graphsync")]
+    graphsync_config: Option<crate::graphsync::GraphSyncConfig>,
+    /// Auto-init DHT config. When `Some` and the `dht` feature is
+    /// on, the builder will automatically call [`Node::init_dht`]
+    /// once the transport is wired so the DHT layer is ready by
+    /// the time `Node` is returned. When `None` (the default),
+    /// callers must call [`Node::init_dht`] themselves.
+    #[cfg(feature = "dht")]
+    auto_init_dht: Option<crate::dht::DhtConfig>,
+    /// Auto-init IPNS config. When `Some` and the `dht` feature is
+    /// on, the builder will automatically call [`Node::init_ipns`]
+    /// after DHT is wired. Requires [`Self::with_auto_init_dht`]
+    /// to also be set — IPNS hangs off the DHT transport.
+    #[cfg(feature = "dht")]
+    auto_init_ipns: Option<crate::dht::IpnConfig>,
 }
 
 impl NodeBuilder {
@@ -156,11 +187,98 @@ impl NodeBuilder {
             enable_workspace: true,
             #[cfg(feature = "iroh")]
             iroh_runtime: None,
+            #[cfg(feature = "bitswap")]
+            bitswap_config: None,
+            #[cfg(feature = "graphsync")]
+            graphsync_config: None,
+            #[cfg(feature = "dht")]
+            auto_init_dht: None,
+            #[cfg(feature = "dht")]
+            auto_init_ipns: None,
         }
     }
 
     pub fn with_transport(mut self, t: SharedTransport) -> Self {
         self.transport = Some(t);
+        self
+    }
+
+    /// Enable the GraphSync DAG-sync layer on this node.
+    ///
+    /// When set, [`NodeBuilder::build_with_bus`] will:
+    /// 1. Wrap the local [`BlobStore`](adnet_blobstore::BlobStore)
+    ///    with a [`NodeBlockStore`](crate::graphsync::NodeBlockStore)
+    ///    so it satisfies the
+    ///    [`adnet_types::graphsync::BlockStore`] trait.
+    /// 2. Build a [`GraphSyncService`](crate::graphsync::GraphSyncService)
+    ///    and start its dispatcher task.
+    /// 3. Stash the resulting
+    ///    [`GraphSyncHandle`](crate::graphsync::GraphSyncHandle) on
+    ///    the [`Node`] so callers can `request` DAGs or query stats.
+    ///
+    /// Passing `None` (the default) leaves GraphSync dormant even
+    /// when the feature is enabled — useful for callers that want
+    /// plain Bitswap without DAG streaming.
+    #[cfg(feature = "graphsync")]
+    pub fn with_graphsync(mut self, cfg: crate::graphsync::GraphSyncConfig) -> Self {
+        self.graphsync_config = Some(cfg);
+        self
+    }
+
+    /// Enable the Bitswap content-exchange layer on this node.
+    ///
+    /// When set, [`NodeBuilder::build_with_bus`] will:
+    /// 1. Build a [`BitswapHandle`](crate::bitswap::BitswapHandle)
+    ///    over the local blob store.
+    /// 2. Instantiate a [`BitswapQuicBridge`](crate::bitswap_transport::BitswapQuicBridge)
+    ///    over the wired transport via
+    ///    [`crate::bitswap_wiring::wire_bitswap_to_transport`].
+    /// 3. Attach the resulting live adapter to the handle so
+    ///    `want_block_from_peer` calls traverse the wire.
+    ///
+    /// Passing `None` (the default) leaves bitswap dormant even
+    /// when the `bitswap` feature is enabled — useful for callers
+    /// that want pure blob-fetch behaviour without the extra
+    /// outbound traffic.
+    #[cfg(feature = "bitswap")]
+    pub fn with_bitswap_config(mut self, cfg: crate::bitswap::BitswapConfig) -> Self {
+        self.bitswap_config = Some(cfg);
+        self
+    }
+
+    /// Auto-initialize the DHT layer once the transport is wired.
+    ///
+    /// When set, [`NodeBuilder::build_with_bus`] calls
+    /// [`Node::init_dht`] automatically so the DHT is ready by the
+    /// time `Node` is returned. This is the missing seam that
+    /// P0-D closes: previously the operator had to call
+    /// `init_dht` after `build`, which meant DHT-using subsystems
+    /// (Bitswap provider records, IPNS) silently held a
+    /// "DHT not initialized" handle until the second call.
+    ///
+    /// When `None` (the default), callers retain the explicit
+    /// `init_dht` flow — useful for tests that want to drive
+    /// `init_dht` with a custom config after `build`.
+    #[cfg(feature = "dht")]
+    pub fn with_auto_init_dht(mut self, cfg: crate::dht::DhtConfig) -> Self {
+        self.auto_init_dht = Some(cfg);
+        self
+    }
+
+    /// Auto-initialize the IPNS layer once the DHT is wired.
+    ///
+    /// Requires [`Self::with_auto_init_dht`] to also be set; IPNS
+    /// hangs off the DHT transport. When both are set, the
+    /// builder calls `init_dht` then `init_ipns` in order.
+    ///
+    /// The IPNS handle is read-only inside this code path (no
+    /// `secret_key` is wired) because the operator's keypair lives
+    /// outside the node config. Callers that need to publish IPNS
+    /// records should call [`Node::init_ipns`] explicitly with a
+    /// `secret_key` after `build`.
+    #[cfg(feature = "dht")]
+    pub fn with_auto_init_ipns(mut self, cfg: crate::dht::IpnConfig) -> Self {
+        self.auto_init_ipns = Some(cfg);
         self
     }
 
@@ -835,7 +953,38 @@ impl NodeBuilder {
             }
         }
 
-        Ok(Node {
+        // P0-A: build the live Bitswap pipeline when the builder
+        // asked for it. We do this **before** `Ok(Node { ... })` so
+        // the structured fields can be initialized directly. When
+        // any precondition is missing both locals stay `None` and
+        // the engine is dormant (the historical fallback).
+        #[cfg(feature = "bitswap")]
+        let (bitswap_handle_for_node, bitswap_wiring_for_node): (
+            Option<crate::bitswap::BitswapHandle>,
+            Option<crate::bitswap_wiring::BitswapWiring>,
+        ) = if let (Some(bitswap_cfg), Some(transport_ref)) =
+            (self.bitswap_config.clone(), transport.clone())
+        {
+            let id = cfg.node_id.clone();
+            let handle = crate::bitswap::BitswapHandle::new(
+                id.clone(),
+                store.clone(),
+                bitswap_cfg,
+            )
+            .await;
+            let wiring =
+                crate::bitswap_wiring::wire_bitswap_to_transport(id, transport_ref);
+            handle.attach_transport(wiring.adapter.clone());
+            info!(
+                "Bitswap → QUIC wired for node {} (handle+bridge+adapter)",
+                cfg.node_id.short()
+            );
+            (Some(handle), Some(wiring))
+        } else {
+            (None, None)
+        };
+
+        let mut node = Node {
             cfg,
             store: store.clone(),
             bus,
@@ -864,7 +1013,45 @@ impl NodeBuilder {
                     .start_refresh_task(std::time::Duration::from_secs(60))
                     .ok()
             })),
-        })
+            #[cfg(feature = "bitswap")]
+            bitswap: bitswap_handle_for_node,
+            #[cfg(feature = "bitswap")]
+            bitswap_wiring: bitswap_wiring_for_node,
+            #[cfg(feature = "dht")]
+            dht: Arc::new(tokio::sync::RwLock::new(None)),
+            #[cfg(feature = "dht")]
+            ipn: Arc::new(tokio::sync::RwLock::new(None)),
+        };
+
+        // P0-D auto-init: if the caller asked for DHT and/or IPNS to
+        // come up by the time `Node` is returned, run the
+        // initialisation here (synchronously, before `Ok` so the
+        // caller can immediately use `dht_handle()` / `ipn_handle()`
+        // without a follow-up step).
+        #[cfg(feature = "dht")]
+        if let Some(dht_cfg) = self.auto_init_dht.clone() {
+            if let Err(e) = node.init_dht(dht_cfg).await {
+                warn!("auto_init_dht failed: {e:#}");
+            } else {
+                info!(
+                    "auto_init_dht ready for node {}",
+                    node.cfg.node_id.short()
+                );
+            }
+        }
+        #[cfg(feature = "dht")]
+        if let Some(ipn_cfg) = self.auto_init_ipns.clone() {
+            if let Err(e) = node.init_ipns(ipn_cfg, None).await {
+                warn!("auto_init_ipns failed: {e:#}");
+            } else {
+                info!(
+                    "auto_init_ipns ready (read-only) for node {}",
+                    node.cfg.node_id.short()
+                );
+            }
+        }
+
+        Ok(node)
     }
 }
 
@@ -1058,6 +1245,43 @@ pub struct Node {
     #[cfg(feature = "refresh-task")]
     blob_store_refresh_handle:
         Arc<tokio::sync::Mutex<Option<adnet_blobstore::BlobStoreHandle>>>,
+    /// DHT handle for content routing and provider discovery.
+    /// Initialized when the `dht` feature is enabled and a
+    /// transport is wired — either via the explicit
+    /// [`Node::init_dht`] call or automatically via
+    /// [`NodeBuilder::with_auto_init_dht`].
+    #[cfg(feature = "dht")]
+    dht: Arc<tokio::sync::RwLock<Option<Arc<crate::dht::DhtHandle>>>>,
+    /// IPNS (InterPlanetary Naming System) handle. Wire-traversal
+    /// happens via `DhtIpnTransport`; populated when the `dht`
+    /// feature is on and [`Node::init_ipns`] (or the auto-init
+    /// variant) has run.
+    #[cfg(feature = "dht")]
+    ipn: Arc<tokio::sync::RwLock<Option<Arc<crate::dht::IpnHandle>>>>,
+    /// Live Bitswap content-exchange layer. Initialized when the
+    /// `bitswap` feature is enabled **and** the builder passed a
+    /// `bitswap_config`. The companion [`BitswapWiring`](crate::bitswap_wiring::BitswapWiring)
+    /// bundle is stored alongside and aborted on shutdown.
+    #[cfg(feature = "bitswap")]
+    bitswap: Option<crate::bitswap::BitswapHandle>,
+    /// Bitswap QUIC wiring (bridge + adapter + join handles). Kept
+    /// alive for the node's whole lifetime so the spawned accept
+    /// loop, outgoing pump, and adapter run loop never abort early.
+    /// The `#[allow(dead_code)]` is intentional: the wiring handle
+    /// itself is dropped only via `Node::shutdown`, which is the
+    /// single point that aborts the three join handles.
+    #[cfg(feature = "bitswap")]
+    #[allow(dead_code)]
+    bitswap_wiring: Option<crate::bitswap_wiring::BitswapWiring>,
+    /// Live GraphSync DAG-sync service handle. Initialized when
+    /// the `graphsync` feature is enabled **and** the builder
+    /// passed a `graphsync_config`. Wrapped in a `Mutex<Option>`
+    /// so `Node::shutdown` can take it out without `&mut self`.
+    /// `parking_lot::Mutex` is intentional: the inner handle is
+    /// `Send + Sync` and we don't want an `await` point inside
+    /// the critical section.
+    #[cfg(feature = "graphsync")]
+    graphsync: Arc<parking_lot::Mutex<Option<crate::graphsync::GraphSyncHandle>>>,
 }
 
 impl Node {
@@ -1067,6 +1291,79 @@ impl Node {
 
     pub fn node_id(&self) -> &NodeId {
         &self.cfg.node_id
+    }
+
+    /// Initialize the DHT layer on an already-built Node.
+    ///
+    /// Wires the supplied transport (already stored in
+    /// [`NodeBuilder::with_transport`]) into a fresh [`DhtHandle`]
+    /// and stores it on the node. Idempotent: subsequent calls
+    /// replace the existing handle.
+    #[cfg(feature = "dht")]
+    pub async fn init_dht(&self, cfg: crate::dht::DhtConfig) -> anyhow::Result<()> {
+        let transport = self
+            .transport
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("init_dht requires a wired transport"))?;
+        let handle = crate::dht::DhtHandle::new(cfg).await;
+        let local_id = transport.local_node().clone();
+        let bridge: Arc<dyn adnet_dht::transport::TransportBridge> =
+            Arc::new(crate::dht_bridge::DynTransportBridge::new(
+                transport.clone(),
+                local_id,
+            ));
+        let _sender = handle.set_transport(bridge);
+        *self.dht.write().await = Some(Arc::new(handle));
+        Ok(())
+    }
+
+    /// Initialize the IPNS layer on an already-built Node.
+    ///
+    /// Requires `init_dht` to have run first (because IPNS
+    /// publishes / resolves through the DHT transport). When
+    /// `secret_key` is `Some`, the IpnHandle gets a writable
+    /// publisher; when `None`, the handle is read-only (resolves
+    /// only — useful for nodes that never sign records).
+    #[cfg(feature = "dht")]
+    pub async fn init_ipns(
+        &self,
+        cfg: crate::dht::IpnConfig,
+        secret_key: Option<Arc<dyn adnet_namespace::SecretKey>>,
+    ) -> anyhow::Result<()> {
+        let dht = self
+            .dht
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("init_ipns requires init_dht to have run first"))?;
+        let local_id = dht.local_id().clone();
+        let mut handle = crate::dht::IpnHandle::new(cfg, local_id);
+        if let Some(key) = secret_key {
+            let dht_node = dht.inner().clone();
+            let query_arc = dht_node.query().ok_or_else(|| {
+                anyhow::anyhow!("DHT node has no query handle wired; init_dht must be called with transport first")
+            })?;
+            let backend: Arc<dyn adnet_namespace::transport::dht::DhtBackend> =
+                Arc::new(adnet_namespace::transport::dht::DhtQueryBackend::new(query_arc));
+            let transport: Arc<dyn adnet_namespace::transport::IpnTransport> =
+                Arc::new(adnet_namespace::transport::dht::DhtIpnTransport::new(backend));
+            let publisher = IpnPublisher::with_transport(key, Some(transport));
+            handle = handle.with_publisher(Arc::new(publisher));
+        }
+        *self.ipn.write().await = Some(Arc::new(handle));
+        Ok(())
+    }
+
+    /// Read-only accessor to the DHT handle, if initialized.
+    #[cfg(feature = "dht")]
+    pub async fn dht_handle(&self) -> Option<Arc<crate::dht::DhtHandle>> {
+        self.dht.read().await.clone()
+    }
+
+    /// Read-only accessor to the IpnHandle, if initialized.
+    #[cfg(feature = "dht")]
+    pub async fn ipn_handle(&self) -> Option<Arc<crate::dht::IpnHandle>> {
+        self.ipn.read().await.clone()
     }
 
     pub fn display_name(&self) -> &str {
@@ -1092,6 +1389,18 @@ impl Node {
     /// that want the trait object directly.
     pub fn transport_dyn(&self) -> Option<Arc<dyn Transport>> {
         self.transport.clone()
+    }
+
+    /// Borrow the wired [`GraphSyncService`](crate::graphsync::GraphSyncService),
+    /// if the `graphsync` feature is enabled and the builder passed
+    /// a `graphsync_config`. Callers can drive `request`, query
+    /// `stats()`, etc. through the returned `Arc`.
+    #[cfg(feature = "graphsync")]
+    pub fn graphsync_service(&self) -> Option<Arc<crate::graphsync::GraphSyncService>> {
+        self.graphsync
+            .lock()
+            .as_ref()
+            .map(|h| h.service.clone())
     }
 
     pub fn bus(&self) -> &GossipBus {
@@ -1293,6 +1602,8 @@ impl Node {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            message_id: None,
+            ttl_secs: None,
         };
         self.announce(&room, &ann).await?;
         Ok((entry, hash))
@@ -1407,12 +1718,9 @@ impl Node {
             return Ok(NodeAddr::new(self.cfg.node_id.clone())
                 .with_direct(adnet_types::Endpoint::new(&h.host, h.port)));
         }
-        let handle = adnet_mesh::MeshServer::start(
-            self.store.clone(),
-            self.cfg.mesh_config.clone().unwrap_or_default(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("mesh start: {e}"))?;
+        let handle = adnet_mesh::MeshServer::start(self.store.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("mesh start: {e}"))?;
         let endpoint = adnet_types::Endpoint::new(&handle.host, handle.port);
         let addr = NodeAddr::new(self.cfg.node_id.clone()).with_direct(endpoint);
         *guard = Some(handle);
@@ -1512,6 +1820,8 @@ impl Node {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            message_id: None,
+            ttl_secs: None,
         };
         self.announce(room, &ann).await?;
         Ok(ann)
@@ -1679,6 +1989,15 @@ impl Node {
                 handle.shutdown().await;
             }
         }
+        // GraphSync: tear down the dispatcher task. `shutdown`
+        // signals the dispatcher to drain, which is idempotent —
+        // repeated calls are no-ops. We do this *before* the
+        // transport shutdown so the dispatcher can flush any
+        // in-flight responses.
+        #[cfg(feature = "graphsync")]
+        if let Some(handle) = self.graphsync.lock().take() {
+            handle.shutdown();
+        }
         info!("[{}] shutdown complete", self.cfg.node_id.short());
         Ok(())
     }
@@ -1714,6 +2033,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         node.announce(&room, &ann).await.unwrap();
         let feed = node.room_feed(&room).await.unwrap();
@@ -1783,6 +2103,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         alice.announce(&room, &ann).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -1881,6 +2202,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         alice.announce(&room, &ann).await.unwrap();
         // Allow the discovery task to drain.
@@ -1943,6 +2265,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         // alice is Lenient so it can publish (otherwise the local
         // announce() would also reject it).
@@ -1980,6 +2303,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         let err = node.announce(&room, &bad).await.unwrap_err();
         assert!(err.to_string().contains("title"), "got {err}");
@@ -2039,9 +2363,9 @@ mod tests {
             // hops) so a regression to `ServerPolicy::default()` is
             // caught immediately.
             host_policy: HostPolicy::AllowLoopbackOnly,
-            max_body_bytes: 1024,
-            upstream_timeout: std::time::Duration::from_secs(7),
-            max_redirects: 1,
+            max_body_bytes: Some(1024),
+            upstream_timeout_secs: Some(7),
+            max_redirects: Some(1),
             ..Default::default()
         };
         let node = Node::builder(NodeConfig::new(dir.path(), NodeId::random()))
@@ -2256,6 +2580,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         alice.announce(&room, &ann2).await.unwrap();
         // Allow the discovery fan-in task on bob to ingest it.
@@ -2631,6 +2956,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         let foreign = GossipBus::new(evil_node.clone(), shared_bus.clone());
         foreign.publish(&room, &evil).await.unwrap();
@@ -2717,6 +3043,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         assert!(bad_ann.validate().is_err());
         let room: RoomId = WORKSPACE_ROOM_ID.into();
@@ -2934,6 +3261,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         alice.announce(&room, &ann).await.unwrap();
 
@@ -3051,6 +3379,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         node.announce(&room, &ann).await.unwrap();
 
@@ -3097,6 +3426,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         node.announce(&room, &ann).await.unwrap();
 
@@ -3142,6 +3472,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         node.announce(&room, &ann).await.unwrap();
 
@@ -3199,6 +3530,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
         node.announce(&room1, &ann).await.unwrap();
 
@@ -3401,6 +3733,8 @@ mod tests {
                 source_url: None,
                 ticket: None,
                 timestamp: Utc::now(),
+                message_id: None,
+                ttl_secs: None,
                 signer: None,
                 signature: None,
             };
@@ -3550,6 +3884,7 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            ..Default::default()
         };
 
         // Lenient should accept it

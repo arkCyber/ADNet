@@ -201,6 +201,13 @@ async fn dispatch(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    let overwrite_header = req
+        .headers()
+        .get("overwrite")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_uppercase() == "T")
+        .unwrap_or(true); // Default is true
+
     let range_header = req
         .headers()
         .get("range")
@@ -298,7 +305,15 @@ async fn dispatch(
             let limit = query_param(&uri, "limit")
                 .and_then(|s| s.parse::<usize>().ok());
 
-            match state.handle_propfind(&path, auth.as_deref(), offset, limit) {
+            // Parse Depth header (RFC 4918)
+            let depth_header = req
+                .headers()
+                .get("depth")
+                .and_then(|v| v.to_str().ok());
+            // Default to infinity for directories
+            let depth = crate::props::parse_depth(depth_header, true);
+
+            match state.handle_propfind(&path, auth.as_deref(), offset, limit, depth) {
                 Ok((xml, meta)) => {
                     let body = xml.into_bytes();
                     let len = body.len();
@@ -365,13 +380,27 @@ async fn dispatch(
                 Ok(p) => p,
                 Err(e) => return Ok(error_response(400, &format!("bad Destination: {e}"))),
             };
-            match state.handle_move(&path, &dest, auth.as_deref(), user_agent) {
+            match state.handle_move(&path, &dest, overwrite_header, auth.as_deref(), user_agent) {
                 Ok(()) => status_only(201),
                 Err(e) => Ok(error_response(e.status(), &e.to_string())),
             }
         }
 
-        "copy" => Ok(error_response(501, "COPY not implemented in v0.1")),
+        "copy" => {
+            let dest_uri = match dest_header.as_deref() {
+                Some(s) => s,
+                None => return Ok(error_response(400, "missing Destination header")),
+            };
+            let dest_path = dest_uri.split('?').next().unwrap_or(dest_uri);
+            let dest = match PathSegments::decode_http(dest_path) {
+                Ok(p) => p,
+                Err(e) => return Ok(error_response(400, &format!("bad Destination: {e}"))),
+            };
+            match state.handle_copy(&path, &dest, overwrite_header, auth.as_deref(), user_agent) {
+                Ok(()) => status_only(201),
+                Err(e) => Ok(error_response(e.status(), &e.to_string())),
+            }
+        }
 
         _ => Ok(error_response(405, &format!("method {method} not allowed"))),
     }

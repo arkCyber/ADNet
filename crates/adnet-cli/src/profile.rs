@@ -49,6 +49,8 @@ pub struct ProfileSnapshot {
     pub tags: Vec<String>,
     /// Software version.
     pub version: String,
+    /// Public key (hex encoded).
+    pub public_key: String,
     /// Unix timestamp when profile was last updated.
     pub published_at: u64,
     /// Human-readable age string.
@@ -126,6 +128,7 @@ pub fn profile_snapshot(data_dir: &Path) -> Result<ProfileSnapshot> {
         description: profile.description.clone(),
         tags: profile.tags.clone(),
         version: profile.version.clone(),
+        public_key: node_id.as_hex().to_string(),
         published_at: profile.published_at,
         age,
         persisted,
@@ -193,6 +196,48 @@ pub fn print_profile_for_humans(snap: &ProfileSnapshot) {
 }
 
 // ---------------------------------------------------------------------------
+// Top-level dispatcher
+// ---------------------------------------------------------------------------
+
+/// Top-level dispatcher for `adnet profile <sub>`. Offline — does not
+/// require a running node.
+pub fn run_profile(sub: &crate::cli::ProfileCmd, data_dir: &Path) -> anyhow::Result<()> {
+    use crate::cli::ProfileCmd as CliProfileCmd;
+    match sub {
+        CliProfileCmd::Get { key } => {
+            let snap = profile_snapshot(data_dir)?;
+            if let Some(k) = key {
+                // Print specific profile field
+                match k.as_str() {
+                    "node_id" => println!("{}", snap.node_id),
+                    "node_id_short" => println!("{}", snap.node_id_short),
+                    "public_key" => println!("{}", snap.public_key),
+                    "role" => println!("{}", snap.role),
+                    "version" => println!("{}", snap.version),
+                    "published_at" => println!("{}", snap.published_at),
+                    "age" => println!("{}", snap.age),
+                    "description" => {
+                        if let Some(ref d) = snap.description { println!("{}", d); }
+                    }
+                    _ => println!("profile key '{k}' not found"),
+                }
+            } else {
+                print_profile_for_humans(&snap);
+            }
+        }
+        CliProfileCmd::Set { key, value } => {
+            println!("profile set: {} = {}", key, value);
+            println!("(persistence not yet implemented)");
+        }
+        CliProfileCmd::Delete { key } => {
+            println!("profile delete: {}", key);
+            println!("(persistence not yet implemented)");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -216,18 +261,30 @@ fn chrono_human_relative(unix_secs: u64) -> String {
 }
 
 fn load_node_id(data_dir: &Path) -> Result<adnet_types::NodeId> {
-    let path = data_dir.join("identity.key");
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("read identity file at {}", path.display()))?;
-    if bytes.len() == 32 {
-        adnet_types::NodeId::from_bytes(&bytes)
-            .context("32-byte identity blob is not a valid NodeId")
-    } else {
-        anyhow::bail!(
-            "identity file has unexpected length {} (expected 32 bytes)",
-            bytes.len()
-        )
+    // Try identity.key first (32 raw bytes)
+    let identity_path = data_dir.join("identity.key");
+    if identity_path.exists() {
+        let bytes = std::fs::read(&identity_path)
+            .with_context(|| format!("read identity file at {}", identity_path.display()))?;
+        if bytes.len() == 32 {
+            return adnet_types::NodeId::from_bytes(&bytes)
+                .context("32-byte identity blob is not a valid NodeId");
+        }
     }
+
+    // Fallback to node_id file (hex string)
+    let node_id_path = data_dir.join("node_id");
+    let content = std::fs::read_to_string(&node_id_path)
+        .with_context(|| format!("read node_id file at {}", node_id_path.display()))?;
+    let hex = content.trim();
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return adnet_types::NodeId::from_hex(hex)
+            .context("hex node_id is not a valid NodeId");
+    }
+
+    anyhow::bail!(
+        "no valid identity found: expected 32-byte identity.key or 64-char hex node_id"
+    )
 }
 
 fn cap_to_string(cap: NodeCapability) -> &'static str {

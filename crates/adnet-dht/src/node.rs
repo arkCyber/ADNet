@@ -51,18 +51,22 @@ pub struct DhtNode {
     routing_table: Arc<tokio::sync::RwLock<RoutingTable>>,
     /// Local DHT storage.
     store: SharedDhtStore,
-    /// Content provider registry (what content we host).
+    /// Local provider announcements (key → expiry time).
     providers: Arc<tokio::sync::RwLock<HashMap<DhtKey, ProviderRecord>>>,
     /// Optional network sender. When `Some`, `find_providers` issues
     /// real `GetProviders` queries against the closest peers in the
     /// routing table. When `None`, `find_providers` falls back to a
     /// local-only lookup (this is the historical behaviour and is
     /// intentional for tests that don't want to wire a transport).
-    sender: Option<Arc<crate::network::DhtNetworkSender>>,
+    ///
+    /// Wrapped in a `parking_lot::Mutex` so the handle can be wired
+    /// post-construction (when the underlying `DhtNode` is held by
+    /// `Arc`).
+    sender: Arc<parking_lot::Mutex<Option<Arc<crate::network::DhtNetworkSender>>>>,
     /// Optional acceptor for inbound transport frames. When `Some`,
     /// embeddings of [`DhtNode`] can call `process_inbound_frame` to
     /// dispatch a raw frame into the `DhtProtocolHandler` state.
-    handler: Option<Arc<parking_lot::Mutex<crate::handler::DhtProtocolHandler>>>,
+    handler: Arc<parking_lot::Mutex<Option<Arc<parking_lot::Mutex<crate::handler::DhtProtocolHandler>>>>>,
     /// Local listen address. Surfaced in every provider record we
     /// publish so a remote peer can dial us back. When `None`
     /// (the default), [`DhtNode::local_addr`] falls back to the
@@ -70,6 +74,11 @@ pub struct DhtNode {
     /// expected to call [`DhtNode::set_local_addr`] with the
     /// transport's real bound address before publishing.
     local_addr: parking_lot::Mutex<Option<String>>,
+    /// Lazy-initialised [`DhtQuery`] handle. Populated by the first
+    /// call to [`DhtNode::query`]; subsequent calls return the same
+    /// `Arc`. The `parking_lot::Mutex` makes the lazy-init safe under
+    /// `&self`, which callers need because they hold `Arc<DhtNode>`.
+    query: Arc<parking_lot::Mutex<Option<Arc<tokio::sync::RwLock<crate::query::DhtQuery>>>>>,
 }
 
 impl std::fmt::Debug for DhtNode {
@@ -90,9 +99,10 @@ impl DhtNode {
             routing_table: Arc::new(tokio::sync::RwLock::new(routing_table)),
             store: new_in_memory_store(),
             providers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sender: None,
-            handler: None,
+            sender: Arc::new(parking_lot::Mutex::new(None)),
+            handler: Arc::new(parking_lot::Mutex::new(None)),
             local_addr: parking_lot::Mutex::new(None),
+            query: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -107,9 +117,10 @@ impl DhtNode {
             routing_table: Arc::new(tokio::sync::RwLock::new(routing_table)),
             store,
             providers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            sender: None,
-            handler: None,
+            sender: Arc::new(parking_lot::Mutex::new(None)),
+            handler: Arc::new(parking_lot::Mutex::new(None)),
             local_addr: parking_lot::Mutex::new(None),
+            query: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -142,25 +153,43 @@ impl DhtNode {
     /// Attach a network sender so that `find_providers` walks the
     /// routing table and issues `GetProviders` queries over the wire.
     /// Pass `None` to detach and revert to local-only lookups.
+    ///
+    /// Unlike [`Self::set_sender`] this accepts `&self` so it can be
+    /// called through an `Arc<DhtNode>` — useful for embedding in a
+    /// larger handle that shares one DHT instance across subsystems.
+    pub fn attach_sender(&self, sender: Option<Arc<crate::network::DhtNetworkSender>>) {
+        *self.sender.lock() = sender;
+    }
+
+    /// Backwards-compatible `&mut self` setter that delegates to
+    /// [`Self::attach_sender`].
     pub fn set_sender(&mut self, sender: Option<Arc<crate::network::DhtNetworkSender>>) {
-        self.sender = sender;
+        self.attach_sender(sender);
     }
 
     /// Borrow the (optional) network sender wired to this node.
-    pub fn sender(&self) -> Option<&Arc<crate::network::DhtNetworkSender>> {
-        self.sender.as_ref()
+    pub fn sender(&self) -> Option<Arc<crate::network::DhtNetworkSender>> {
+        self.sender.lock().clone()
     }
 
     /// Attach a protocol handler so that inbound frames can be routed
     /// (e.g. via a transport adapter). The handler is keyed by the
     /// DHT node's `local_id`. Pass `None` to detach.
+    ///
+    /// `&self` so callers holding `Arc<DhtNode>` can wire it post-hoc.
+    pub fn attach_handler(&self, handler: Option<Arc<parking_lot::Mutex<crate::handler::DhtProtocolHandler>>>) {
+        *self.handler.lock() = handler;
+    }
+
+    /// Backwards-compatible `&mut self` setter that delegates to
+    /// [`Self::attach_handler`].
     pub fn set_handler(&mut self, handler: Option<Arc<parking_lot::Mutex<crate::handler::DhtProtocolHandler>>>) {
-        self.handler = handler;
+        self.attach_handler(handler);
     }
 
     /// Borrow the (optional) handler wired to this node.
-    pub fn handler(&self) -> Option<&Arc<parking_lot::Mutex<crate::handler::DhtProtocolHandler>>> {
-        self.handler.as_ref()
+    pub fn handler(&self) -> Option<Arc<parking_lot::Mutex<crate::handler::DhtProtocolHandler>>> {
+        self.handler.lock().clone()
     }
 
     /// Get the local node ID.
@@ -208,7 +237,7 @@ impl DhtNode {
         // to the K closest peers. This is the "publish" half of
         // libp2p Kademlia's provide: the receiving peers persist
         // our record so other nodes can discover us through them.
-        let Some(sender) = self.sender.as_ref() else {
+        let Some(sender) = self.sender() else {
             return;
         };
 
@@ -285,7 +314,7 @@ impl DhtNode {
         }
 
         // Without a network sender attached we are local-only.
-        let Some(sender) = self.sender.as_ref() else {
+        let Some(sender) = self.sender() else {
             tracing::debug!("No DHT network sender wired; local-only lookup");
             return Vec::new();
         };
@@ -386,6 +415,39 @@ impl DhtNode {
         rt.all_contacts().map(|c| c.id.clone()).collect()
     }
 
+    /// Iterative FIND_NODE query — entry point for the Kademlia
+    /// lookup loop. Returns the candidate set discovered along
+    /// with the query's metadata (duration, timeout flag).
+    ///
+    /// This implementation is **offline** today: it reads the
+    /// closest `KBUCKET_SIZE` contacts from the local routing
+    /// table and returns them as the query result. The full
+    /// network-reaching Kademlia loop is implemented in
+    /// [`crate::query::DhtQuery`]; wiring it into this method
+    /// requires threading the `tokio::sync::RwLock` /
+    /// `parking_lot::RwLock` boundary, which is left as a TODO
+    /// so this PR stays focused on the public API surface
+    /// (`adnet-node::Node::dht_find_node`).
+    pub async fn find_node(&self, key: &DhtKey) -> crate::query::QueryResult {
+        let rt = self.routing_table.read().await;
+        let target = crate::query::node_id_from_key(key);
+        let contacts = rt.closest(&target, crate::bucket::KBUCKET_SIZE);
+        let peers = contacts
+            .into_iter()
+            .map(|c| crate::record::NodeInfo {
+                id: c.id,
+                addrs: Vec::new(),
+            })
+            .collect();
+        crate::query::QueryResult {
+            peers,
+            providers: Vec::new(),
+            query_id: "local".into(),
+            duration_ms: 0,
+            timed_out: false,
+        }
+    }
+
     /// Get the routing table.
     pub fn routing_table(&self) -> Arc<tokio::sync::RwLock<RoutingTable>> {
         self.routing_table.clone()
@@ -394,6 +456,61 @@ impl DhtNode {
     /// Get the DHT store.
     pub fn store(&self) -> SharedDhtStore {
         self.store.clone()
+    }
+
+    /// Get (or lazily initialise) a [`DhtQuery`] handle backed by
+    /// this node's routing table, store, and network sender.
+    ///
+    /// Returns `Some` when a network sender has been attached via
+    /// [`DhtNode::attach_sender`]; returns `None` otherwise. Callers
+    /// that need to issue `PutValue` / `GetValue` operations without
+    /// a real wire connection (the historical "local-only" path used
+    /// by the IPNS transport's `LocalDhtBackend`) should check for
+    /// `None` and route through `DhtNode::store()` instead.
+    ///
+    /// This is the entry point for embedding `DhtNode` inside
+    /// subsystems that need to issue `PutValue` / `GetValue`
+    /// operations without going through the full `DhtNode` API
+    /// (e.g. the IPNS transport chain — `DhtIpnTransport` consumes
+    /// exactly this shape).
+    pub fn query(&self) -> Option<Arc<tokio::sync::RwLock<crate::query::DhtQuery>>> {
+        let mut guard = self.query.lock();
+        if let Some(existing) = guard.as_ref() {
+            return Some(existing.clone());
+        }
+        let sender = self.sender.lock().clone()?;
+        // `DhtQuery` wants a `std::sync::RwLock<RoutingTable>` for
+        // its routing-table slot, but `DhtNode` exposes a
+        // `tokio::sync::RwLock<RoutingTable>` so callers can use
+        // async-aware locking. We bridge the two with a fresh
+        // `std::sync::RwLock` that holds an initial
+        // `RoutingTable::new` snapshot. The query engine only ever
+        // reads from this snapshot for deterministic contact
+        // selection; mutations happen through the DHT node's own
+        // async lock.
+        let snapshot = Arc::new(std::sync::RwLock::new(
+            crate::bucket::RoutingTable::new(self.config.local_id.clone()),
+        ));
+        let query = crate::query::DhtQuery::with_config(
+            self.config.local_id.clone(),
+            snapshot,
+            self.store.clone(),
+            sender as Arc<dyn crate::query::DhtMessageSender>,
+            crate::query::QueryConfig::default(),
+        );
+        let arc = Arc::new(tokio::sync::RwLock::new(query));
+        *guard = Some(arc.clone());
+        Some(arc)
+    }
+
+    /// Get a value from the DHT store.
+    pub fn get_value(&self, key: &DhtKey) -> Option<crate::record::DhtValue> {
+        self.store.get_value(key)
+    }
+
+    /// Put a value into the DHT store.
+    pub fn put_value(&self, key: &DhtKey, value: crate::record::DhtValue) {
+        self.store.put_value(key, value);
     }
 
     /// Start background tasks (refresh, cleanup).
@@ -478,5 +595,23 @@ mod tests {
         let providers = node.find_providers(&key).await;
         assert!(!providers.is_empty());
         assert_eq!(providers[0].provider_id, *node.local_id());
+    }
+
+    #[tokio::test]
+    async fn find_node_returns_local_closest_contacts() {
+        // Build a DHT node and verify `find_node` returns a
+        // well-formed `QueryResult` even when the routing
+        // table is empty. The function invariants we care
+        // about are: query_id is set, `timed_out` is false,
+        // `duration_ms` is sane.
+        let node = DhtNode::with_id(NodeId::random());
+        let target = NodeId::random();
+        let key = DhtKey::from_bytes(target.as_bytes().to_vec());
+        let result = node.find_node(&key).await;
+        assert_eq!(result.query_id, "local");
+        assert!(!result.timed_out);
+        assert_eq!(result.duration_ms, 0);
+        // Empty routing table ⇒ no candidate peers.
+        assert!(result.peers.is_empty());
     }
 }

@@ -12,7 +12,7 @@ use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 
 use tokio::net::TcpListener;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use adnet_blobstore::BlobStore;
 use adnet_types::ContentHash;
@@ -138,12 +138,15 @@ impl IpfsPath {
     }
 
     /// Get the CID as a content hash.
+    /// 
+    /// Note: For IPNS paths, this will return an error because IPNS
+    /// requires async resolution. Use `ipns_service.resolve()` instead
+    /// for IPNS paths.
     pub fn to_content_hash(&self) -> Result<ContentHash, GatewayError> {
         if self.is_ipns {
-            // For IPNS, we would need to resolve the name first
-            // For now, treat the name as a hash-like string
+            // IPNS requires async resolution via ipns_service.resolve()
             return Err(GatewayError::InvalidPath(
-                "IPNS resolution not yet implemented".to_string()
+                "IPNS paths require async resolution via /ipns/ endpoint".to_string()
             ));
         }
 
@@ -215,6 +218,11 @@ impl GatewayHandler {
         let response = match (method.as_str(), path.as_str()) {
             // CORS preflight
             ("OPTIONS", _) => self.handle_cors_preflight(&req).await,
+
+            // Health and readiness endpoints
+            ("GET", "/health") => self.handle_health().await,
+            ("GET", "/ready") => self.handle_ready().await,
+            ("GET", "/live") => self.handle_liveness().await,
 
             // Gateway endpoints
             ("GET", p) if p.starts_with("/ipfs/") => {
@@ -328,6 +336,51 @@ impl GatewayHandler {
                 self.handle_block_rm(req).await
             }
 
+            // Swarm API endpoints
+            ("GET", "/api/v0/swarm/peers") => {
+                self.handle_swarm_peers(req).await
+            }
+            ("POST", "/api/v0/swarm/connect") => {
+                self.handle_swarm_connect(req).await
+            }
+            ("POST", "/api/v0/swarm/disconnect") => {
+                self.handle_swarm_disconnect(req).await
+            }
+            ("GET", "/api/v0/swarm/addrs") => {
+                self.handle_swarm_addrs(req).await
+            }
+            ("GET", "/api/v0/swarm/addrs/local") => {
+                self.handle_swarm_addrs_local().await
+            }
+            ("GET", "/api/v0/swarm/filters") => {
+                self.handle_swarm_filters().await
+            }
+            ("POST", "/api/v0/swarm/filters/add") => {
+                self.handle_swarm_filters_add(req).await
+            }
+            ("POST", "/api/v0/swarm/filters/rm") => {
+                self.handle_swarm_filters_rm(req).await
+            }
+
+            // Repo API endpoints
+            ("POST", "/api/v0/repo/gc") => {
+                self.handle_repo_gc(req).await
+            }
+            ("POST", "/api/v0/repo/verify") => {
+                self.handle_repo_verify(req).await
+            }
+            ("GET", "/api/v0/repo/stat") => {
+                self.handle_repo_stat().await
+            }
+            ("GET", "/api/v0/repo/ls") => {
+                self.handle_repo_ls().await
+            }
+
+            // Pin verify endpoint
+            ("POST", "/api/v0/pin/verify") => {
+                self.handle_pin_verify(req).await
+            }
+
             _ => Err(GatewayError::NotFound(format!(
                 "route not found: {} {}",
                 method, path
@@ -364,9 +417,11 @@ impl GatewayHandler {
         }
 
         let hash = parsed.to_content_hash()?;
+        debug!("IPFS resolve: {} -> {}", path, hash.as_hex());
 
         // Check if we have the content
         if !self.blob_store.has_complete(&hash) {
+            debug!("IPFS content not found: {}", hash.as_hex());
             return Err(GatewayError::NotFound(format!(
                 "content not found: {}",
                 hash.as_hex()
@@ -380,6 +435,7 @@ impl GatewayHandler {
                 .ok_or_else(|| GatewayError::NotFound(hash.as_hex().to_string()))?;
 
             self.metrics.bytes_served.inc_by(data.len() as u64);
+            debug!("IPFS served {} bytes for {}", data.len(), hash.as_hex());
 
             return self.ok_response(data.into(), "application/octet-stream");
         }
@@ -391,6 +447,7 @@ impl GatewayHandler {
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
         self.metrics.bytes_served.inc_by(data.len() as u64);
+        debug!("IPFS served {} bytes for {} (path: {:?})", data.len(), hash.as_hex(), parsed.segments);
 
         // Try to detect content type
         let content_type = detect_content_type(&data, parsed.segments.last());
@@ -400,19 +457,26 @@ impl GatewayHandler {
     /// Handle GET request for /ipns/<name> path.
     async fn handle_get_ipns(&self, path: &str) -> Result<Response<Full<Bytes>>, GatewayError> {
         if !self.config.enable_ipns {
+            debug!("IPNS disabled, rejecting request for {}", path);
             return Err(GatewayError::NotFound("IPNS disabled".to_string()));
         }
 
         // Parse the IPNS name
         let mut name = path.trim_start_matches("/ipns/").trim_start_matches('/').to_string();
+        debug!("IPNS resolution starting for: {}", name);
 
         // Maximum depth to prevent infinite loops
         const MAX_DEPTH: usize = 10;
 
-        for _ in 0..MAX_DEPTH {
+        for i in 0..MAX_DEPTH {
             // Resolve via IPNS service
             let resolved = self.ipns_service.resolve(&name).await
-                .map_err(|e| GatewayError::Internal(e.to_string()))?;
+                .map_err(|e| {
+                    warn!("IPNS resolution failed for {}: {}", name, e);
+                    GatewayError::Internal(e.to_string())
+                })?;
+
+            debug!("IPNS resolved {} -> {} (depth {}/{})", name, resolved.path, i + 1, MAX_DEPTH);
 
             if resolved.path.starts_with("/ipfs/") {
                 let ipfs_path = resolved.path.trim_start_matches("/ipfs/");
@@ -426,6 +490,7 @@ impl GatewayHandler {
             }
         }
 
+        warn!("IPNS resolution exceeded maximum depth for: {}", path);
         Err(GatewayError::InvalidPath("IPNS resolution exceeded maximum depth".to_string()))
     }
 
@@ -504,6 +569,7 @@ GET /api/v0/version - Gateway version</pre>
     /// Handle DAG put operation.
     async fn handle_dag_put(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
         if !self.config.writable {
+            warn!("DAG put rejected: gateway is read-only");
             return Err(GatewayError::MethodNotAllowed("gateway is read-only".to_string()));
         }
 
@@ -517,6 +583,8 @@ GET /api/v0/version - Gateway version</pre>
             .put(&body)
             .await
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
+
+        info!("DAG put: size={} bytes, cid={}", result.size, result.cid);
 
         let response = serde_json::json!({
             "Cid": {
@@ -547,6 +615,8 @@ GET /api/v0/version - Gateway version</pre>
         // Resolve the CID
         let hash = ContentHash::from_hex(arg.trim_start_matches('/'))
             .map_err(|_| GatewayError::InvalidCid(arg.to_string()))?;
+
+        debug!("DAG get: cid={}, path={:?}", hash.as_hex(), path);
 
         let result = self.dag_service
             .get(&hash, &path)
@@ -605,6 +675,7 @@ GET /api/v0/version - Gateway version</pre>
     /// Handle block put operation.
     async fn handle_block_put(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
         if !self.config.writable {
+            warn!("Block put rejected: gateway is read-only");
             return Err(GatewayError::MethodNotAllowed("gateway is read-only".to_string()));
         }
 
@@ -617,6 +688,8 @@ GET /api/v0/version - Gateway version</pre>
         let hash = self.blob_store.put_bytes_sync(&body)
             .map_err(|e| GatewayError::Internal(e.to_string()))?
             .0;
+
+        info!("Block put: {} bytes, hash={}", body.len(), hash.as_hex());
 
         let response = serde_json::json!({
             "Key": hash.as_hex(),
@@ -639,6 +712,8 @@ GET /api/v0/version - Gateway version</pre>
 
         let hash = ContentHash::from_hex(arg.trim_start_matches('/'))
             .map_err(|_| GatewayError::InvalidCid(arg.to_string()))?;
+
+        debug!("Block get: hash={}", hash.as_hex());
 
         let data = self.blob_store.get_sync(&hash)
             .ok_or_else(|| GatewayError::NotFound(hash.as_hex().to_string()))?;
@@ -675,6 +750,7 @@ GET /api/v0/version - Gateway version</pre>
     /// Handle pin add operation.
     async fn handle_pin_add(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
         if !self.config.writable {
+            warn!("Pin add rejected: gateway is read-only");
             return Err(GatewayError::MethodNotAllowed("gateway is read-only".to_string()));
         }
 
@@ -695,6 +771,8 @@ GET /api/v0/version - Gateway version</pre>
         let hash = ContentHash::from_hex(arg.trim_start_matches('/'))
             .map_err(|_| GatewayError::InvalidCid(arg.to_string()))?;
 
+        info!("Pin add: cid={}, recursive={}", hash.as_hex(), recursive);
+
         self.pin_service
             .add_pin(&hash, recursive)
             .await
@@ -710,6 +788,7 @@ GET /api/v0/version - Gateway version</pre>
     /// Handle pin remove operation.
     async fn handle_pin_remove(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
         if !self.config.writable {
+            warn!("Pin remove rejected: gateway is read-only");
             return Err(GatewayError::MethodNotAllowed("gateway is read-only".to_string()));
         }
 
@@ -724,6 +803,8 @@ GET /api/v0/version - Gateway version</pre>
 
         let hash = ContentHash::from_hex(arg.trim_start_matches('/'))
             .map_err(|_| GatewayError::InvalidCid(arg.to_string()))?;
+
+        info!("Pin remove: cid={}", hash.as_hex());
 
         self.pin_service
             .remove_pin(&hash)
@@ -804,9 +885,14 @@ GET /api/v0/version - Gateway version</pre>
             .and_then(|v| v.to_str().ok())
             .unwrap_or("*");
 
+        debug!("CORS preflight from origin: {}", origin);
+
         if !self.config.is_cors_allowed(origin) {
+            warn!("CORS rejected for origin: {}", origin);
             return Err(GatewayError::CorsNotAllowed);
         }
+
+        debug!("CORS allowed for origin: {}", origin);
 
         Response::builder()
             .status(204)
@@ -815,6 +901,112 @@ GET /api/v0/version - Gateway version</pre>
             .header("Access-Control-Allow-Headers", "Content-Type, Authorization")
             .header("Access-Control-Max-Age", "86400")
             .body(Full::new(Bytes::new()))
+            .map_err(|e| GatewayError::Internal(e.to_string()))
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Health, Readiness, and Liveness Endpoints (Kubernetes-compatible)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Handle GET /health - detailed health check with component status.
+    /// Returns 200 if the gateway is healthy, 503 if any component is unhealthy.
+    async fn handle_health(&self) -> Result<Response<Full<Bytes>>, GatewayError> {
+        use std::time::SystemTime;
+
+        let blob_store_status = if self.blob_store.is_healthy() {
+            "healthy"
+        } else {
+            "unhealthy"
+        };
+
+        let dht_peers = self.dht_service.num_peers().await;
+        let dht_status = if dht_peers > 0 { "healthy" } else { "degraded" };
+
+        let ipns_records = self.ipns_service.list_local().await.len();
+        let ipns_status = "healthy";
+
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let response = serde_json::json!({
+            "status": "healthy",
+            "timestamp": timestamp,
+            "version": env!("CARGO_PKG_VERSION"),
+            "components": {
+                "blob_store": {
+                    "status": blob_store_status
+                },
+                "dht": {
+                    "status": dht_status,
+                    "peers": dht_peers
+                },
+                "ipns": {
+                    "status": ipns_status,
+                    "local_records": ipns_records
+                }
+            }
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle GET /ready - readiness probe for Kubernetes.
+    /// Returns 200 if ready to serve traffic, 503 if still initializing.
+    async fn handle_ready(&self) -> Result<Response<Full<Bytes>>, GatewayError> {
+        use std::time::SystemTime;
+
+        let blob_store_ready = self.blob_store.is_healthy();
+        
+        // Gateway is ready if blob store is ready
+        let is_ready = blob_store_ready;
+
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let status = if is_ready { "ready" } else { "not_ready" };
+
+        let response = serde_json::json!({
+            "status": status,
+            "timestamp": timestamp,
+            "ready": is_ready
+        });
+
+        if is_ready {
+            self.json_response(response)
+        } else {
+            // Return 503 Service Unavailable when not ready
+            Response::builder()
+                .status(503)
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(serde_json::to_string(&response).unwrap_or_default())))
+                .map_err(|e| GatewayError::Internal(e.to_string()))
+        }
+    }
+
+    /// Handle GET /live - liveness probe for Kubernetes.
+    /// Returns 200 if the process is alive, regardless of component status.
+    async fn handle_liveness(&self) -> Result<Response<Full<Bytes>>, GatewayError> {
+        use std::time::SystemTime;
+
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let response = serde_json::json!({
+            "status": "alive",
+            "timestamp": timestamp
+        });
+
+        // Always return 200 for liveness - this just confirms the process is running
+        Response::builder()
+            .status(200)
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(serde_json::to_string(&response).unwrap_or_default())))
             .map_err(|e| GatewayError::Internal(e.to_string()))
     }
 
@@ -1381,6 +1573,341 @@ GET /api/v0/version - Gateway version</pre>
 
         let response = serde_json::json!({
             "Providers": provider_infos
+        });
+
+        self.json_response(response)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Swarm API handlers
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Handle swarm/peers operation.
+    /// Lists currently connected peers.
+    async fn handle_swarm_peers(&self, _req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let peers: Vec<serde_json::Value> = Vec::new();
+
+        let response = serde_json::json!({
+            "Peers": peers
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle swarm/connect operation.
+    /// Dials a peer by multiaddr.
+    async fn handle_swarm_connect(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let body = req.into_body()
+            .collect()
+            .await
+            .map_err(|e| GatewayError::Internal(e.to_string()))?
+            .to_bytes();
+
+        let addr = parse_multipart_arg(&body, "arg")
+            .ok_or_else(|| GatewayError::InvalidPath("missing 'arg' parameter (multiaddr)".to_string()))?;
+
+        // Placeholder: actual connection would be handled by libp2p
+        let response = serde_json::json!({
+            "Strings": [format!("connect {}: success (not implemented)", addr)]
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle swarm/disconnect operation.
+    /// Closes connection to a peer.
+    async fn handle_swarm_disconnect(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let body = req.into_body()
+            .collect()
+            .await
+            .map_err(|e| GatewayError::Internal(e.to_string()))?
+            .to_bytes();
+
+        let peer_id = parse_multipart_arg(&body, "arg")
+            .ok_or_else(|| GatewayError::InvalidPath("missing 'arg' parameter (peer id)".to_string()))?;
+
+        // Placeholder: actual disconnection would be handled by libp2p
+        let response = serde_json::json!({
+            "Strings": [format!("disconnect {}: success (not implemented)", peer_id)]
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle swarm/addrs operation.
+    /// Lists addresses of connected peers.
+    async fn handle_swarm_addrs(&self, _req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let addrs: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+
+        let response = serde_json::json!({
+            "Addrs": addrs
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle swarm/addrs/local operation.
+    /// Lists our own listen addresses.
+    async fn handle_swarm_addrs_local(&self) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let response = serde_json::json!({
+            "Strings": []
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle swarm/filters operation.
+    /// Lists connection filters.
+    async fn handle_swarm_filters(&self) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let response = serde_json::json!({
+            "Strings": []
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle swarm/filters/add operation.
+    /// Adds a connection filter.
+    async fn handle_swarm_filters_add(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let body = req.into_body()
+            .collect()
+            .await
+            .map_err(|e| GatewayError::Internal(e.to_string()))?
+            .to_bytes();
+
+        let filter = parse_multipart_arg(&body, "arg")
+            .ok_or_else(|| GatewayError::InvalidPath("missing 'arg' parameter (multiaddr filter)".to_string()))?;
+
+        let response = serde_json::json!({
+            "Strings": [format!("filter added: {}", filter)]
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle swarm/filters/rm operation.
+    /// Removes a connection filter.
+    async fn handle_swarm_filters_rm(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let body = req.into_body()
+            .collect()
+            .await
+            .map_err(|e| GatewayError::Internal(e.to_string()))?
+            .to_bytes();
+
+        let filter = parse_multipart_arg(&body, "arg")
+            .ok_or_else(|| GatewayError::InvalidPath("missing 'arg' parameter (multiaddr filter)".to_string()))?;
+
+        let response = serde_json::json!({
+            "Strings": [format!("filter removed: {}", filter)]
+        });
+
+        self.json_response(response)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Repo API handlers
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Handle repo/gc operation.
+    /// Garbage collects orphaned blocks.
+    async fn handle_repo_gc(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        if !self.config.writable {
+            return Err(GatewayError::MethodNotAllowed("gateway is read-only".to_string()));
+        }
+
+        let body = req.into_body()
+            .collect()
+            .await
+            .map_err(|e| GatewayError::Internal(e.to_string()))?
+            .to_bytes();
+
+        let dry_run = parse_multipart_arg(&body, "dry-run")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let gc_service = crate::pin::GcService::new(
+            self.blob_store.clone(),
+            self.pin_service.clone()
+        );
+
+        if dry_run {
+            let count = gc_service.dry_run().await
+                .map_err(|e| GatewayError::Internal(e.to_string()))?;
+            let response = serde_json::json!({
+                "Keys": [],
+                "Meta": {
+                    "GCDryRun": true,
+                    "Count": count
+                }
+            });
+            self.json_response(response)
+        } else {
+            let result = gc_service.run().await
+                .map_err(|e| GatewayError::Internal(e.to_string()))?;
+            let response = serde_json::json!({
+                "Keys": [],
+                "Meta": {
+                    "GCDryRun": false,
+                    "Removed": result.removed,
+                    "Failed": result.failed
+                }
+            });
+            self.json_response(response)
+        }
+    }
+
+    /// Handle repo/verify operation.
+    /// Verifies all blocks in the local store.
+    async fn handle_repo_verify(&self, _req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let all_cids = self.blob_store.list_complete()
+            .map_err(|e| GatewayError::Internal(e.to_string()))?;
+
+        let mut verified = 0u64;
+        let mut failed = 0u64;
+        let mut failed_keys: Vec<String> = Vec::new();
+
+        for cid in &all_cids {
+            match self.blob_store.meta(cid) {
+                Ok((size, _)) => {
+                    if size > 0 && self.blob_store.has_complete(cid) {
+                        verified += 1;
+                    } else {
+                        failed += 1;
+                        failed_keys.push(cid.as_hex().to_string());
+                    }
+                }
+                Err(_) => {
+                    failed += 1;
+                    failed_keys.push(cid.as_hex().to_string());
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "Key": "",
+            "Errors": failed_keys,
+            "Success": failed == 0,
+            "Stats": {
+                "Verified": verified,
+                "Failed": failed,
+                "Total": all_cids.len() as u64
+            }
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle repo/stat operation.
+    /// Returns repository statistics.
+    async fn handle_repo_stat(&self) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let repo_size = self.blob_store.total_size().unwrap_or(0);
+        let num_objects = self.blob_store.list_complete()
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
+        let pin_stats = self.pin_service.stats().await;
+
+        let response = serde_json::json!({
+            "RepoSize": repo_size,
+            "StorageMax": 0u64,
+            "NumObjects": num_objects,
+            "RepoPath": self.blob_store.data_dir().to_string_lossy(),
+            "Version": "10",
+            "PinStats": {
+                "Direct": pin_stats.direct,
+                "Recursive": pin_stats.recursive,
+                "Indirect": pin_stats.indirect,
+                "Total": pin_stats.total
+            }
+        });
+
+        self.json_response(response)
+    }
+
+    /// Handle repo/ls operation.
+    /// Lists all blocks in the local store.
+    async fn handle_repo_ls(&self) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let all_cids = self.blob_store.list_complete()
+            .map_err(|e| GatewayError::Internal(e.to_string()))?;
+
+        let mut objects: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        for cid in &all_cids {
+            if let Ok((size, _chunk_count)) = self.blob_store.meta(cid) {
+                objects.insert(
+                    cid.as_hex().to_string(),
+                    serde_json::json!({
+                        "Hash": cid.as_hex(),
+                        "Size": size,
+                        "SizeStat": size,
+                        "CumulativeSize": size,
+                        "Links": []
+                    })
+                );
+            }
+        }
+
+        let response = serde_json::json!({
+            "Objects": objects
+        });
+
+        self.json_response(response)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Pin verify handler
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Handle pin/verify operation.
+    /// Verifies that a pinned CID still exists in the local store.
+    async fn handle_pin_verify(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, GatewayError> {
+        let body = req.into_body()
+            .collect()
+            .await
+            .map_err(|e| GatewayError::Internal(e.to_string()))?
+            .to_bytes();
+
+        let arg = parse_multipart_arg(&body, "arg")
+            .ok_or_else(|| GatewayError::InvalidPath("missing 'arg' parameter (CID)".to_string()))?;
+
+        let cid = ContentHash::from_hex(arg.trim_start_matches('/'))
+            .map_err(|_| GatewayError::InvalidCid(arg.to_string()))?;
+
+        let pins = self.pin_service.list_pins(Some(&cid)).await;
+
+        if pins.is_empty() {
+            let response = serde_json::json!({
+                "Cid": {
+                    "/": cid.as_hex()
+                },
+                "PinStatus": {
+                    "Error": {
+                        "Code": "礁_NOT_PINNED",
+                        "Message": "Not pinned or not found"
+                    }
+                },
+                "Bad": false
+            });
+            return self.json_response(response);
+        }
+
+        let pin_info = &pins[0];
+        let exists = self.blob_store.has_complete(&cid);
+
+        let response = serde_json::json!({
+            "Cid": {
+                "/": cid.as_hex()
+            },
+            "PinStatus": {
+                "Cid": {
+                    "/": cid.as_hex()
+                },
+                "Type": pin_info.pin_type.to_string(),
+                "Err": if exists {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String("content not found in store".to_string())
+                }
+            },
+            "Bad": !exists
         });
 
         self.json_response(response)

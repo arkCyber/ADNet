@@ -12,18 +12,193 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // Initialize i18n based on --lang flag
+    init_i18n_from_cli(&cli);
+
+    // Initialize tracing based on CLI flags
+    init_tracing_from_cli(&cli);
+
     let data_dir = PathBuf::from(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
-    // Persist node_id across restarts so tickets and gossip addresses
-    // remain stable — mirrors iroh's per-process `SecretKey` persistence.
+
+    // ── Commands that do NOT need a running Node ──────────────────────────────
+    // These are "offline" commands: they open files/SQLite and exit without
+    // touching the network. We construct a NodeConfig only to get the NodeId.
+    // These run BEFORE the Node is built so we avoid spinning up the runtime.
+
+    let offline_data_dir = data_dir.clone();
+
+    // Resolve the storage budget once for the whole CLI session. The
+    // config is loaded here even for commands that don't need storage,
+    // because `cabs` like `Cmd::Add` need the resolved total to open
+    // the `StorageTopology` with the right hard cap. We use the
+    // platform-default config path so `app.toml` is read on every
+    // invocation; `--config` is handled at the data-dir wiring layer.
+    let config_path = offline_data_dir.join("config.json");
+    let app_config = adnet_cli::config::load_for_cli(Some(&config_path))
+        .map(|l| l.config)
+        .unwrap_or_default();
+    let storage_total_bytes = match app_config.storage.resolved_total_bytes() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!(
+                "adnet: storage.totalBytes is invalid ({e}); falling back to {} bytes",
+                adnet_cli::bytes::DEFAULT_TOTAL_BYTES
+            );
+            adnet_cli::bytes::DEFAULT_TOTAL_BYTES
+        }
+    };
+
+    match &cli.cmd {
+        // ── Offline: config ──────────────────────────────────────────────
+        Cmd::Config { sub } => {
+            adnet_cli::config::run_config(sub, &offline_data_dir)?;
+            return Ok(());
+        }
+
+        // ── Offline: storage ─────────────────────────────────────────────
+        Cmd::Storage { sub } => {
+            let storage_cmd: adnet_cli::storage::StorageCmd = sub.into();
+            adnet_cli::storage::run_storage(&offline_data_dir, &storage_cmd)?;
+            return Ok(());
+        }
+
+        // ── Offline: status ──────────────────────────────────────────────
+        Cmd::Status { json, compact, watch } => {
+            if *watch == Some(0) || watch.is_none() {
+                // Single shot mode
+                if *json {
+                    adnet_cli::status::run_status(&offline_data_dir, *json)?;
+                } else if *compact {
+                    adnet_cli::status::run_status_compact(&offline_data_dir)?;
+                } else {
+                    adnet_cli::status::run_status_rich(&offline_data_dir)?;
+                }
+            } else {
+                // Watch mode - loop with interval
+                let interval = watch.unwrap_or(5);
+                eprintln!("Watching status every {} seconds (Ctrl+C to stop)...", interval);
+                loop {
+                    print!("\x1b[2J\x1b[H"); // Clear screen
+                    if *json {
+                        adnet_cli::status::run_status(&offline_data_dir, *json)?;
+                    } else if *compact {
+                        adnet_cli::status::run_status_compact(&offline_data_dir)?;
+                    } else {
+                        adnet_cli::status::run_status_rich(&offline_data_dir)?;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(interval));
+                }
+            }
+            return Ok(());
+        }
+
+        // ── Offline: diagnostics ──────────────────────────────────────────
+        Cmd::Diagnostics { json } => {
+            adnet_cli::diagnostics::run_diagnostics(&offline_data_dir, *json)?;
+            return Ok(());
+        }
+
+        // ── Offline: bandwidth ─────────────────────────────────────────────
+        Cmd::Bandwidth { json } => {
+            adnet_cli::bandwidth::run_bandwidth(&offline_data_dir, *json)?;
+            return Ok(());
+        }
+
+        // ── Offline: profile ───────────────────────────────────────────────
+        Cmd::Profile { sub } => {
+            adnet_cli::profile::run_profile(sub, &offline_data_dir)?;
+            return Ok(());
+        }
+
+        // ── Offline: roster ───────────────────────────────────────────────
+        Cmd::Roster { sub } => {
+            futures::executor::block_on(adnet_cli::roster::run(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+
+        // ── Offline: user ─────────────────────────────────────────────────
+        Cmd::User { sub } => {
+            futures::executor::block_on(adnet_cli::userstore::run(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+
+        // ── Offline: moments ───────────────────────────────────────────────
+        Cmd::Moments { sub } => {
+            futures::executor::block_on(adnet_cli::moments::run(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+
+        // ── Offline: news ─────────────────────────────────────────────────
+        Cmd::News { sub } => {
+            futures::executor::block_on(adnet_cli::news::run(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+
+        // ── Offline: share ─────────────────────────────────────────────────
+        Cmd::Share { sub } => {
+            futures::executor::block_on(adnet_cli::share::run(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+
+        // ── Offline: mdns ─────────────────────────────────────────────────
+        Cmd::Mdns { sub } => {
+            adnet_cli::mdns::run_mdns(sub, &offline_data_dir)?;
+            return Ok(());
+        }
+
+        // ── Offline: device pairing / invitations / QR / mesh admission ──
+        Cmd::Pair { sub } => {
+            futures::executor::block_on(adnet_cli::pairing_ops::run_pair(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+        Cmd::Invite { sub } => {
+            futures::executor::block_on(adnet_cli::pairing_ops::run_invite(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+        Cmd::Qr { sub } => {
+            futures::executor::block_on(adnet_cli::pairing_ops::run_qr(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+        Cmd::Mesh { sub } => {
+            futures::executor::block_on(adnet_cli::pairing_ops::run_mesh(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+
+        // ── Offline: webhook config management ─────────────────────────────
+        Cmd::Webhook { sub } => {
+            futures::executor::block_on(adnet_cli::webhook_ops::run_webhook(sub, &offline_data_dir))?;
+            return Ok(());
+        }
+
+        // ── Offline: name / key ────────────────────────────────────────────
+        Cmd::Name { sub } => {
+            adnet_cli::ipns_ops::run_name(sub, &offline_data_dir)?;
+            return Ok(());
+        }
+
+        Cmd::Key { sub } => {
+            adnet_cli::ipns_ops::run_key(sub, &offline_data_dir)?;
+            return Ok(());
+        }
+
+        // ── Init (offline, no node needed) ───────────────────────────────
+        Cmd::Init => {
+            let cfg = NodeConfig::load_or_create(&data_dir)?;
+            let node_id = cfg.node_id.clone();
+            println!("node_id  = {}", node_id);
+            println!("short    = adnet-{}", node_id.short());
+            println!("data_dir = {}", data_dir.display());
+            return Ok(());
+        }
+
+        // ── Everything below needs a running Node ──────────────────────────
+        _ => {}
+    }
+
+    // ── Build the Node ──────────────────────────────────────────────────────
     let cfg = NodeConfig::load_or_create(&data_dir)?;
     let node_id = cfg.node_id.clone();
     let node = Node::builder(cfg).build().await?;
@@ -34,20 +209,40 @@ async fn main() -> Result<()> {
         data_dir.display()
     );
 
-    match cli.cmd {
-        Cmd::Init => {
-            println!("node_id  = {}", node_id);
-            println!("short    = adnet-{}", node_id.short());
-            println!("data_dir = {}", data_dir.display());
-        }
+    match &cli.cmd {
+        // ══ Node-required commands ════════════════════════════════════════
 
-        Cmd::Serve => {
+        Cmd::Serve { metrics_addr } => {
             let ep = node.ensure_mesh().await?;
             println!("mesh listening on http://{}/blobs/<hash>", ep);
-            // Graceful shutdown on SIGINT / SIGTERM — the prior
-            // implementation blocked forever with
-            // `std::future::pending()` which prevented Ctrl-C from
-            // tearing the server down cleanly.
+            // Start the Prometheus exporter on the requested
+            // address, if the operator passed `--metrics-addr`.
+            // The handle is dropped on shutdown, which stops the
+            // axum task.
+            let _metrics_handle = if let Some(addr) = metrics_addr {
+                let addr: std::net::SocketAddr = addr
+                    .parse()
+                    .map_err(|e: std::net::AddrParseError| anyhow::anyhow!("parse --metrics-addr {addr}: {e}"))?;
+                match adnet_observability::http::serve(
+                    adnet_observability::http::MetricsServerConfig {
+                        bind_addr: addr,
+                        registry: None,
+                    },
+                )
+                .await
+                {
+                    Ok(handle) => {
+                        println!("metrics listening on http://{}/metrics", handle.local_addr());
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        eprintln!("failed to start metrics server on {addr}: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     info!("received Ctrl-C, shutting down");
@@ -57,17 +252,42 @@ async fn main() -> Result<()> {
             node.shutdown().await?;
         }
 
+        Cmd::MetricsServer { metrics_addr } => {
+            // Standalone Prometheus /metrics endpoint, useful for
+            // gateway-only deployments. Blocks on Ctrl-C.
+            let addr: std::net::SocketAddr = metrics_addr
+                .parse()
+                .map_err(|e: std::net::AddrParseError| anyhow::anyhow!("parse --metrics-addr {metrics_addr}: {e}"))?;
+            let handle = adnet_observability::http::serve(
+                adnet_observability::http::MetricsServerConfig {
+                    bind_addr: addr,
+                    registry: None,
+                },
+            )
+            .await?;
+            println!(
+                "metrics listening on http://{}/metrics (Ctrl-C to stop)",
+                handle.local_addr()
+            );
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("received Ctrl-C, shutting down");
+                }
+                _ = std::future::pending::<()>() => {}
+            }
+        }
+
         Cmd::Announce {
             room,
             file,
             title,
             kind,
         } => {
-            let room: RoomId = room.into();
+            let room: RoomId = RoomId::new(room);
             node.join_room(&room).await?;
-            let kind = CdnContentKind::from_str_loose(&kind)
+            let kind = CdnContentKind::from_str_loose(kind)
                 .ok_or_else(|| anyhow::anyhow!("unknown kind: {kind}"))?;
-            let path = std::path::PathBuf::from(&file);
+            let path = std::path::PathBuf::from(file);
             let ann = node.import_and_announce(&room, &path, title, kind).await?;
             let ticket = ann.ticket.as_ref().map(|t| t.encode()).unwrap_or_default();
             println!(
@@ -82,7 +302,7 @@ async fn main() -> Result<()> {
         }
 
         Cmd::Feed { room } => {
-            let room: RoomId = room.into();
+            let room: RoomId = RoomId::new(room);
             node.join_room(&room).await?;
             let feed = node.room_feed(&room).await?;
             let json = serde_json::to_string_pretty(&feed_for_humans(&feed))?;
@@ -90,7 +310,7 @@ async fn main() -> Result<()> {
         }
 
         Cmd::Echo { room } => {
-            let room: RoomId = room.into();
+            let room: RoomId = RoomId::new(room);
             node.join_room(&room).await?;
             let hash = ContentHash::from_bytes(format!("echo:{room}").as_bytes());
             let ann = adnet_types::Announcement {
@@ -106,126 +326,104 @@ async fn main() -> Result<()> {
                 timestamp: chrono::Utc::now(),
                 signer: None,
                 signature: None,
+                message_id: None,
+                ttl_secs: None,
             };
             node.announce(&room, &ann).await?;
             println!("echoed into {room}");
         }
 
         Cmd::Run => {
-            // Start the mesh server up front so the REPL can talk
-            // about `/mesh`, `/announce`, etc. without each command
-            // having to lazily trigger `ensure_mesh` on first use.
             if let Err(e) = node.ensure_mesh().await {
                 info!(error = %e, "mesh not started (continuing without it)");
             }
-            // Hand the node over to the REPL. The REPL is responsible
-            // for tearing it down on `/quit` / EOF.
             let repl_result = adnet_cli::run_repl(data_dir.clone(), node).await;
             info!("REPL ended, exiting");
             repl_result?;
         }
 
-        // ─── Audit V6: file / pin / repo / routing / dht / swarm ───
-        // These 9 commands run offline against the local blob
-        // store topology — they don't touch the running node and
-        // exit as soon as the on-disk state is updated.
-
-        Cmd::Add {
-            path,
-            recursive,
-            wrap_in_dir,
-            pin,
-            json,
-        } => {
-            let topo = adnet_blobstore::scope::StorageTopology::open(
+        // ─── File / Pin / Repo commands ────────────────────────────────────
+        Cmd::Add { path, recursive, wrap_in_dir, pin, json } => {
+            let topo = adnet_cli::storage::open_topology_with_total_bytes(
                 &data_dir,
-                adnet_blobstore::scope::QuotaPolicy::default_split(
-                    1024u64 * 1024 * 1024 * 1024,
-                ),
+                storage_total_bytes,
             )?;
             let args = adnet_cli::file_ops::AddArgs {
                 path: std::path::PathBuf::from(path),
-                recursive,
-                wrap_in_dir,
-                pin,
-                json,
+                recursive: *recursive,
+                wrap_in_dir: *wrap_in_dir,
+                pin: *pin,
+                json: *json,
             };
             adnet_cli::file_ops::run_add(&args, &topo)?;
         }
 
         Cmd::Get { cid, output, json } => {
-            let topo = adnet_blobstore::scope::StorageTopology::open(
+            let topo = adnet_cli::storage::open_topology_with_total_bytes(
                 &data_dir,
-                adnet_blobstore::scope::QuotaPolicy::default_split(
-                    1024u64 * 1024 * 1024 * 1024,
-                ),
+                storage_total_bytes,
             )?;
             let args = adnet_cli::file_ops::GetArgs {
-                cid,
-                output: output.map(std::path::PathBuf::from),
-                json,
+                cid: cid.clone(),
+                output: output.clone().map(std::path::PathBuf::from),
+                json: *json,
             };
             adnet_cli::file_ops::run_get(&args, &topo)?;
         }
 
         Cmd::Cat { cid, json } => {
-            let topo = adnet_blobstore::scope::StorageTopology::open(
+            let topo = adnet_cli::storage::open_topology_with_total_bytes(
                 &data_dir,
-                adnet_blobstore::scope::QuotaPolicy::default_split(
-                    1024u64 * 1024 * 1024 * 1024,
-                ),
+                storage_total_bytes,
             )?;
-            let args = adnet_cli::file_ops::CatArgs { cid, json };
+            let args = adnet_cli::file_ops::CatArgs {
+                cid: cid.clone(),
+                json: *json,
+            };
             adnet_cli::file_ops::run_cat(&args, &topo)?;
         }
 
         Cmd::Ls { cid, json } => {
-            let topo = adnet_blobstore::scope::StorageTopology::open(
+            let topo = adnet_cli::storage::open_topology_with_total_bytes(
                 &data_dir,
-                adnet_blobstore::scope::QuotaPolicy::default_split(
-                    1024u64 * 1024 * 1024 * 1024,
-                ),
+                storage_total_bytes,
             )?;
-            let args = adnet_cli::file_ops::LsArgs { cid, json };
+            let args = adnet_cli::file_ops::LsArgs {
+                cid: cid.clone(),
+                json: *json,
+            };
             adnet_cli::file_ops::run_ls(&args, &topo)?;
         }
 
         Cmd::Pin { sub } => {
-            let topo = adnet_blobstore::scope::StorageTopology::open(
+            let topo = adnet_cli::storage::open_topology_with_total_bytes(
                 &data_dir,
-                adnet_blobstore::scope::QuotaPolicy::default_split(
-                    1024u64 * 1024 * 1024 * 1024,
-                ),
+                storage_total_bytes,
             )?;
             let pin_cmd = match sub {
                 adnet_cli::cli::PinCmd::Add { cid, recursive } => {
-                    adnet_cli::file_ops::PinCmd::Add {
-                        cid: cid.clone(),
-                        recursive: *recursive,
-                    }
+                    adnet_cli::file_ops::PinCmd::Add { cid: cid.clone(), recursive: *recursive }
                 }
                 adnet_cli::cli::PinCmd::Rm { cid } => {
                     adnet_cli::file_ops::PinCmd::Rm { cid: cid.clone() }
                 }
                 adnet_cli::cli::PinCmd::Ls { cid, json } => {
-                    adnet_cli::file_ops::PinCmd::Ls {
-                        cid: cid.clone(),
-                        json: *json,
-                    }
+                    adnet_cli::file_ops::PinCmd::Ls { cid: cid.clone(), json: *json }
                 }
                 adnet_cli::cli::PinCmd::Verify { cid } => {
                     adnet_cli::file_ops::PinCmd::Verify { cid: cid.clone() }
+                }
+                adnet_cli::cli::PinCmd::Gc => {
+                    adnet_cli::file_ops::PinCmd::Gc
                 }
             };
             adnet_cli::file_ops::run_pin(&pin_cmd, &topo, &data_dir)?;
         }
 
         Cmd::Repo { sub } => {
-            let topo = adnet_blobstore::scope::StorageTopology::open(
+            let topo = adnet_cli::storage::open_topology_with_total_bytes(
                 &data_dir,
-                adnet_blobstore::scope::QuotaPolicy::default_split(
-                    1024u64 * 1024 * 1024 * 1024,
-                ),
+                storage_total_bytes,
             )?;
             let repo_cmd = match sub {
                 adnet_cli::cli::RepoCmd::Stat { json } => {
@@ -234,25 +432,33 @@ async fn main() -> Result<()> {
                 adnet_cli::cli::RepoCmd::Ls { json } => {
                     adnet_cli::file_ops::RepoCmd::Ls { json: *json }
                 }
-                adnet_cli::cli::RepoCmd::Gc { dry_run, json } => {
-                    adnet_cli::file_ops::RepoCmd::Gc {
-                        dry_run: *dry_run,
-                        json: *json,
-                    }
-                }
+                adnet_cli::cli::RepoCmd::Gc {
+                    dry_run,
+                    prune_unpinned,
+                    prune_all,
+                    i_know_what_i_am_doing,
+                    json,
+                } => adnet_cli::file_ops::RepoCmd::Gc {
+                    dry_run: *dry_run,
+                    prune_unpinned: *prune_unpinned,
+                    prune_all: *prune_all,
+                    i_know_what_i_am_doing: *i_know_what_i_am_doing,
+                    json: *json,
+                },
                 adnet_cli::cli::RepoCmd::Verify { json } => {
                     adnet_cli::file_ops::RepoCmd::Verify { json: *json }
                 }
             };
-            adnet_cli::file_ops::run_repo(&repo_cmd, &topo)?;
+            adnet_cli::file_ops::run_repo(&repo_cmd, &topo, &data_dir)?;
         }
 
+        // ─── Routing commands ─────────────────────────────────────────────
         Cmd::Routing { sub } => {
             let routing_cmd = match sub {
                 adnet_cli::cli::RoutingCmd::FindProvs { cid, num, json } => {
                     adnet_cli::routing_ops::RoutingCmd::FindProvs {
                         cid: cid.clone(),
-                        num: *num,
+                        num: num.clone(),
                         json: *json,
                     }
                 }
@@ -279,6 +485,7 @@ async fn main() -> Result<()> {
             adnet_cli::routing_ops::run_routing(&routing_cmd, &node).await?;
         }
 
+        // ─── DHT commands ─────────────────────────────────────────────────
         Cmd::Dht { sub } => {
             let dht_cmd = match sub {
                 adnet_cli::cli::DhtExtraCmd::FindPeer { peer_id, json } => {
@@ -310,6 +517,7 @@ async fn main() -> Result<()> {
             adnet_cli::routing_ops::run_dht_extra(&dht_cmd, &node).await?;
         }
 
+        // ─── Swarm commands ───────────────────────────────────────────────
         Cmd::Swarm { sub } => {
             let swarm_cmd = match sub {
                 adnet_cli::cli::SwarmCmd::Peers { json } => {
@@ -330,9 +538,102 @@ async fn main() -> Result<()> {
                     adnet_cli::routing_ops::SwarmCmd::Filters { json: *json }
                 }
             };
-            adnet_cli::routing_ops::run_swarm(&swarm_cmd, &data_dir).await?;
+            adnet_cli::routing_ops::run_swarm(&swarm_cmd, &data_dir, &node).await?;
         }
+
+        // ─── Bitswap commands ─────────────────────────────────────────────
+        Cmd::Bitswap { sub } => {
+            adnet_cli::bitswap_ops::run_bitswap(sub, &node, &data_dir).await?;
+        }
+
+        // ─── Channel commands ─────────────────────────────────────────────
+        Cmd::Channel { sub } => {
+            let args: adnet_cli::channel_ops::ChannelArgs = sub.into();
+            adnet_cli::channel_ops::run_channel(&args, &node).await?;
+        }
+
+        // ─── News commands ─────────────────────────────────────────────────
+        Cmd::News { sub } => {
+            // News is online (needs gossip) but we can run via block_on
+            futures::executor::block_on(adnet_cli::news::run(sub, &data_dir))?;
+        }
+
+        // ─── Moments commands ──────────────────────────────────────────────
+        // Handled offline above (MomentsCmd::Post / Timeline / etc. are storage-only)
+        // but for consistency with the node-requiring subcommands, we check here too.
+        // Actually handled above in the offline section.
+
+        // ══ End of commands that need a running Node ═════════════════════
+        _ => {}
     }
 
     Ok(())
+}
+
+/// Initialize tracing based on CLI flags.
+///
+/// If `--trace` is set, initializes OpenTelemetry tracing with the configured
+/// endpoint and sampling ratio. Falls back to console-only logging otherwise.
+fn init_tracing_from_cli(cli: &Cli) {
+    // Set up console logging
+    let env_filter = cli
+        .log_filter
+        .as_ref()
+        .map(|f| tracing_subscriber::EnvFilter::new(f.clone()))
+        .unwrap_or_else(|| {
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        });
+
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(true)
+        .with_thread_ids(cli.verbose)
+        .with_thread_names(cli.verbose)
+        .with_file(cli.verbose)
+        .with_line_number(cli.verbose)
+        .init();
+
+    // Initialize OTLP tracing if configured
+    #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+    if cli.trace {
+        use adnet_observability::tracing::{init_tracing, TracingConfig};
+
+        let mut config = TracingConfig::new("adnet-cli")
+            .with_enabled(true);
+
+        if let Some(endpoint) = &cli.trace_endpoint {
+            config = config.with_otlp_endpoint(endpoint.clone());
+        }
+
+        if let Some(ratio) = cli.trace_sample {
+            config = config.with_sampling_ratio(ratio);
+        }
+
+        if cli.verbose {
+            config = config.with_verbose_console();
+        }
+
+        if let Some(filter) = &cli.log_filter {
+            config = config.with_log_filter(filter.clone());
+        }
+
+        if let Err(e) = init_tracing(&config) {
+            eprintln!("Warning: Failed to initialize tracing: {}", e);
+        }
+    }
+}
+
+/// Initialize i18n based on --lang CLI flag.
+fn init_i18n_from_cli(cli: &Cli) {
+    use adnet_tui::i18n::{set_locale, Locale};
+
+    match cli.lang.to_lowercase().as_str() {
+        "zh" | "zh-cn" | "zh_cn" => {
+            set_locale(Locale::ZhCn);
+        }
+        _ => {
+            set_locale(Locale::En);
+        }
+    }
 }

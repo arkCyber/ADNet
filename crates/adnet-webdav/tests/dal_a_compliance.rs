@@ -417,7 +417,7 @@ fn sr_24_pagination_meta_has_correct_total() {
     // Verify pagination metadata fields are set correctly.
     // The total reflects collect() output size (depends on root entry visibility).
     let (xml, meta) = s
-        .handle_propfind(&path, Some(&header), Some(0), Some(50))
+        .handle_propfind(&path, Some(&header), Some(0), Some(50), adnet_webdav::props::Depth::Infinity)
         .unwrap();
     assert_eq!(meta.offset, 0, "offset must match requested");
     assert!(meta.limit <= 50, "limit must be <= requested");
@@ -431,7 +431,7 @@ fn sr_24_pagination_limit_capped_at_10000() {
     let path = adnet_blobstore::PathSegments::decode_http("/").unwrap();
     let header = header_for(&s, "cred-1");
     let (_, meta) = s
-        .handle_propfind(&path, Some(&header), Some(0), Some(999_999))
+        .handle_propfind(&path, Some(&header), Some(0), Some(999_999), adnet_webdav::props::Depth::Infinity)
         .unwrap();
     assert_eq!(meta.limit, 10_000, "limit must be capped at 10000");
 }
@@ -456,7 +456,7 @@ fn sr_24_pagination_offset_skips_items() {
     }
     let path = adnet_blobstore::PathSegments::decode_http("/page").unwrap();
     let (_, meta) = s
-        .handle_propfind(&path, Some(&header), Some(1), Some(10))
+        .handle_propfind(&path, Some(&header), Some(1), Some(10), adnet_webdav::props::Depth::One)
         .unwrap();
     // total = 1 (self) + 3 (children) = 4
     assert_eq!(meta.total, 4, "total = self + children");
@@ -663,4 +663,101 @@ fn sr_19_version_snapshot_no_panic_on_missing() {
             )
     }));
     assert!(res.is_ok() || res.is_err()); // must not unwind
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SR-15 extension: COPY operation audit
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sr_15_copy_logged_to_audit() {
+    let (s, dir) = state_with(CapabilitySet::from_names(["files.write"]), false);
+    let from_path = adnet_blobstore::PathSegments::decode_http("/copy-src.txt").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/copy-dst.txt").unwrap();
+    let h = ContentHash::from_hex(
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .unwrap();
+    let header = header_for(&s, "cred-1");
+    // Create source file
+    s.handle_put(&from_path, h.clone(), 1, Some(&header), Some("ua".into()))
+        .unwrap();
+    // Copy it
+    let token = s.verifier.sign("cred-1", [1u8; 32], i64::MAX);
+    s.handle_copy(&from_path, &to_path, true, Some(&token.to_header()), Some("ua".into()))
+        .unwrap();
+    // Verify audit log
+    let audit_path = dir.path().join("nas").join("audit.jsonl");
+    let body = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(body.contains("\"op\":\"copy\""), "copy must be in audit");
+    assert!(body.contains("copy-src.txt"), "source path must be in audit");
+    assert!(body.contains("copy-dst.txt"), "destination path must be in audit");
+}
+
+#[test]
+fn sr_12_copy_requires_write_capability() {
+    let (s, _dir) = state_with(CapabilitySet::from_names(["files.read"]), false);
+    let from_path = adnet_blobstore::PathSegments::decode_http("/a.txt").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/b.txt").unwrap();
+    let header = header_for(&s, "cred-1");
+    let err = s
+        .handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()))
+        .unwrap_err();
+    assert_eq!(err.status(), 403, "copy requires write capability");
+}
+
+#[test]
+fn sr_12_copy_unauthenticated_returns_401() {
+    let (s, _dir) = state_with(CapabilitySet::from_names(["files.write"]), false);
+    let from_path = adnet_blobstore::PathSegments::decode_http("/a.txt").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/b.txt").unwrap();
+    let err = s
+        .handle_copy(&from_path, &to_path, true, None, Some("ua".into()))
+        .unwrap_err();
+    assert_eq!(err.status(), 401, "copy without auth returns 401");
+}
+
+#[test]
+fn sr_17_copy_is_non_destructive() {
+    // Unlike MOVE, COPY should not remove the source
+    let (s, _dir) = state_with(CapabilitySet::from_names(["files.write"]), false);
+    let from_path = adnet_blobstore::PathSegments::decode_http("/original.txt").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/copy.txt").unwrap();
+    let h = ContentHash::from_hex(
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .unwrap();
+    let header = header_for(&s, "cred-1");
+    // Create source file
+    s.handle_put(&from_path, h.clone(), 1, Some(&header), Some("ua".into()))
+        .unwrap();
+    // Copy it
+    let token = s.verifier.sign("cred-1", [1u8; 32], i64::MAX);
+    s.handle_copy(&from_path, &to_path, true, Some(&token.to_header()), Some("ua".into()))
+        .unwrap();
+    // Both files should exist
+    let src_entry = s.nas.lookup(&from_path);
+    let dst_entry = s.nas.lookup(&to_path);
+    assert!(src_entry.is_some(), "source should still exist after copy");
+    assert!(dst_entry.is_some(), "destination should exist after copy");
+}
+
+#[test]
+fn sr_15_copy_creates_audit_record() {
+    let (s, dir) = state_with(CapabilitySet::from_names(["files.write"]), false);
+    let from_path = adnet_blobstore::PathSegments::decode_http("/audit-copy/src.txt").unwrap();
+    let to_path = adnet_blobstore::PathSegments::decode_http("/audit-copy/dst.txt").unwrap();
+    let h = ContentHash::from_hex(
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .unwrap();
+    let header = header_for(&s, "cred-1");
+    s.handle_put(&from_path, h, 1, Some(&header), Some("ua".into()))
+        .unwrap();
+    let token = s.verifier.sign("cred-1", [1u8; 32], i64::MAX);
+    s.handle_copy(&from_path, &to_path, true, Some(&token.to_header()), Some("ua".into()))
+        .unwrap();
+    let audit_path = dir.path().join("nas").join("audit.jsonl");
+    let body = std::fs::read_to_string(&audit_path).unwrap();
+    assert!(body.contains("\"op\":\"copy\""));
 }

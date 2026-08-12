@@ -1,0 +1,53 @@
+[package]
+name = "adnet-nat-traversal"
+description = "NAT traversal for ADNet: STUN, TURN, UPnP, and hole punching"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Network
+socket2 = "0.5"
+rand = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+once_cell = { workspace = true }
+async-trait = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# HTTP client for TURN
+reqwest = { version = "0.12", features = ["json"] }
+
+# Random number generation
+getrandom = "0.2"
+
+# XML parsing for UPnP
+quick-xml = "0.37"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tempfile = { workspace = true }
+
+[features]
+default = []

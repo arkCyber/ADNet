@@ -22,6 +22,15 @@ hex          = { workspace = true }
 async-trait  = { workspace = true }
 futures      = { workspace = true }
 once_cell    = { workspace = true }
+parking_lot  = { workspace = true }
+rand         = { workspace = true, features = ["small_rng"] }
+chrono       = { workspace = true }
+# Encrypted blob store support: AEAD (XChaCha20-Poly1305) for chunk
+# encryption + Argon2id for passphrase-derived keys. Both live in
+# the workspace dep set so the same versions are used across crates.
+chacha20poly1305 = { workspace = true }
+argon2           = { workspace = true }
+zeroize          = { workspace = true }
 
 # iroh-backed blob store adapter. When the `iroh` feature is on,
 # callers can build an `IrohBlobStore` next to a regular `BlobStore`
@@ -34,6 +43,8 @@ iroh-blobs = { version = "=0.103.0", optional = true, default-features = false, 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio    = { workspace = true }
+proptest = "1.4"
+rand = { workspace = true }
 
 [features]
 # Default: only the legacy `BlobStore` is available. The `iroh`
@@ -41,3 +52,13 @@ tokio    = { workspace = true }
 # Bao-verified fs store.
 default = []
 iroh = ["dep:iroh-blobs"]
+scope = []
+bitswap = []
+car = []
+# GraphSync DAG-sync support: re-exports the wire envelope,
+# `GraphSyncClient` / `GraphSyncServer` / `MockGraphSyncTransport` /
+# `MemDagStore` from the `graphsync` module so callers can drive the
+# protocol against the on-disk `BlobStore` (or an in-memory store).
+# The QUIC bridge / dispatcher wiring lives in `adnet-node` under
+# the same feature gate.
+graphsync = []

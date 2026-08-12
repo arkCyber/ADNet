@@ -21,6 +21,8 @@ tracing     = { workspace = true }
 anyhow      = { workspace = true }
 chrono      = { workspace = true }
 hex         = { workspace = true }
+parking_lot = { workspace = true }
+argon2      = { workspace = true }
 
 # iroh-backed gossip transport. Pulls in `iroh-gossip` (which depends
 # on iroh itself via `iroh-base` for EndpointId re-export). When the

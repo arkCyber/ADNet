@@ -28,6 +28,8 @@
 pub mod billing;
 pub mod client;
 pub mod config;
+pub mod metrics;
+pub mod proxy_policy;
 pub mod server;
 
 pub use billing::BillingMode;
@@ -35,4 +37,5 @@ pub use billing::BillingMode;
 pub use billing::BillingState;
 pub use client::RelayClient;
 pub use config::{RelayConfig, RelayServerInfo};
-pub use server::{RelayServer, RelayServerHandle};
+pub use proxy_policy::HostPolicy;
+pub use server::{RelayServer, RelayServerHandle, ServerPolicy};

@@ -135,6 +135,8 @@ mod tests {
             source_url: None,
             ticket: None,
             timestamp: chrono::Utc::now(),
+            message_id: None,
+            ttl_secs: None,
             signer: None,
             signature: None,
         }

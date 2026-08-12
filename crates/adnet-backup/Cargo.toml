@@ -1,0 +1,29 @@
+[package]
+name        = "adnet-backup"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Snapshot / restore for an ADNet data directory — package blobstore, gossip spools, DHT store, pair records and identity into a single tar archive with a checksummed trailer."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio       = { workspace = true, features = ["full"] }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+hex         = { workspace = true }
+sha2        = { workspace = true }
+chrono      = { workspace = true }
+parking_lot = { workspace = true }
+walkdir     = "2"
+tar         = "0.4"
+flate2      = "1"
+blake3      = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

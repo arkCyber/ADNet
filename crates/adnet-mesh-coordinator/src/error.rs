@@ -65,6 +65,12 @@ pub enum CoordinatorError {
         grant_id: String,
         valid_until: chrono::DateTime<chrono::Utc>,
     },
+
+    /// Roster signature is invalid: empty, wrong length, malformed hex,
+    /// or the Ed25519 verify call failed. The inner string carries a
+    /// short diagnostic.
+    #[error("mesh roster signature is invalid: {0}")]
+    RosterSignatureInvalid(String),
 }
 
 #[cfg(test)]

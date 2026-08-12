@@ -59,6 +59,12 @@ pub trait IpnTransport: Send + Sync {
     /// Subscribe to inbound records for the given name.
     async fn subscribe(&self, name: &str) -> Result<IpnRecordStream, IpnsError>;
 
+    /// Resolve a record from the network now (not from local cache).
+    /// Returns `Ok(record)` if found, `Err(IpnsError::NotFound)` if not found.
+    async fn resolve_now(&self, name: &str) -> Result<IpnRecord, IpnsError> {
+        Err(IpnsError::NotFound)
+    }
+
     /// Best-effort liveness check; `None` means the transport has no
     /// natural health probe.
     async fn health(&self) -> Result<TransportHealth, IpnsError> {

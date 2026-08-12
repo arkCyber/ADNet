@@ -51,6 +51,11 @@ pub mod stats;
 pub mod dht;
 pub mod swarm;
 pub mod ipc;
+pub mod bitswap_api;
+
+pub mod websocket;
+
+pub mod auth;
 
 pub use config::GatewayConfig;
 pub use handler::{GatewayHandler, IpfsResponse, GatewayError, IpfsPath};
@@ -71,6 +76,23 @@ pub use swarm::{
     BitswapApi, BitswapLedger, BitswapStats,
     KeyApi, KeyInfo,
     RepoApi,
+};
+pub use bitswap_api::{
+    BitswapStatResponse, BitswapLedgerResponse, BitswapListResponse,
+    WantlistEntry, ReprovideResponse,
+    create_bitswap_router, create_bitswap_state, BitswapAppState,
+};
+
+pub use websocket::{
+    PubSubService, WsMessage, Event, EventTopic,
+    start_websocket_server,
+};
+
+pub use auth::{
+    AuthService, AuthConfig, AuthResult, AuthContext,
+    Role, User, RateLimit, RateLimitInfo,
+    AuthorizationResult,
+    bearer_token, basic_auth,
 };
 
 /// Gateway metrics for observability
@@ -125,5 +147,27 @@ pub mod metrics {
         fn default() -> Self {
             Self::register(&std::sync::Arc::new(Registry::default()))
         }
+    }
+
+    /// Stand-alone helper that wires the gateway's registry into
+    /// the `adnet-observability` HTTP server so callers can expose
+    /// `/metrics`, `/health`, `/metrics.json` and `/diagnostics`
+    /// without hand-rolling the axum router.
+    ///
+    /// The function is **opt-in** — the gateway itself does not
+    /// start this server; production callers wire it in from
+    /// their own bootstrap (e.g. `adnet serve` in the CLI). It
+    /// requires the `http-server` feature to be enabled on
+    /// `adnet-observability`.
+    #[cfg(feature = "metrics-http")]
+    pub async fn install_metrics_server(
+        bind_addr: std::net::SocketAddr,
+        registry: std::sync::Arc<Registry>,
+    ) -> ::std::io::Result<adnet_observability::http::MetricsServer> {
+        adnet_observability::http::serve(adnet_observability::http::MetricsServerConfig {
+            bind_addr,
+            registry: Some(registry),
+        })
+        .await
     }
 }

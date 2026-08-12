@@ -42,7 +42,6 @@ use tokio::sync::broadcast;
 
 use crate::bitswap_transport::{BitswapBlockOutcome, BitswapNetworkAdapter};
 use tracing::{debug, info, warn};
-
 /// Bitswap configuration for adnet-node.
 #[derive(Debug, Clone)]
 pub struct BitswapConfig {
@@ -108,6 +107,7 @@ impl ProviderRecord {
 /// - Local BlobStore for content storage
 /// - DHT for provider discovery
 /// - GossipBus for content announcements
+#[derive(Clone)]
 pub struct BitswapHandle {
     /// Bitswap engine instance.
     engine: Arc<RwLock<BitswapEngine>>,
@@ -120,7 +120,16 @@ pub struct BitswapHandle {
     /// Content that we provide (local blob store content).
     local_providers: Arc<RwLock<HashSet<ContentHash>>>,
     /// Gossip bus for content announcements (optional).
-    gossip_bus: Option<Arc<GossipBus>>,
+    /// Wrapped in RwLock so `set_gossip_bus` can work on `&self`.
+    gossip_bus: Arc<RwLock<Option<Arc<GossipBus>>>>,
+    /// Network adapter wired to the live QUIC transport, if any.
+    /// Populated by [`BitswapHandle::attach_transport`] when the
+    /// production wiring code (see `bitswap_wiring::wire_bitswap_to_transport`)
+    /// instantiates a `BitswapQuicBridge` + `BitswapNetworkAdapter`
+    /// pipeline. When `Some`, callers can fetch the live adapter via
+    /// [`BitswapHandle::bitswap_adapter`] and pass it to
+    /// [`BitswapHandle::want_block_from_peer`].
+    bitswap_adapter: Arc<RwLock<Option<Arc<BitswapNetworkAdapter>>>>,
     /// DHT handle for provider announcements / discovery (optional).
     #[cfg(feature = "dht")]
     dht_handle: Option<Arc<crate::dht::DhtHandle>>,
@@ -163,7 +172,8 @@ impl BitswapHandle {
             blob_store,
             local_node_id,
             local_providers,
-            gossip_bus: None,
+            gossip_bus: Arc::new(RwLock::new(None)),
+            bitswap_adapter: Arc::new(RwLock::new(None)),
             #[cfg(feature = "dht")]
             dht_handle: None,
         }
@@ -194,8 +204,36 @@ impl BitswapHandle {
     }
 
     /// Attach a gossip bus for content announcements.
-    pub fn set_gossip_bus(&mut self, bus: Arc<GossipBus>) {
-        self.gossip_bus = Some(bus);
+    pub fn set_gossip_bus(&self, bus: Arc<GossipBus>) {
+        *self.gossip_bus.write() = Some(bus);
+    }
+
+    /// Attach a live [`BitswapNetworkAdapter`] returned by
+    /// [`crate::bitswap_wiring::wire_bitswap_to_transport`]. Once
+    /// attached, [`BitswapHandle::bitswap_adapter`] returns a clone
+    /// of the adapter so callers can pass it to
+    /// [`BitswapHandle::want_block_from_peer`].
+    ///
+    /// The adapter is the engine's view of the wire — every Want-Have
+    /// / Want-Block / Block / Have / DontHave frame emitted by the
+    /// engine after this call traverses the QUIC bridge; every inbound
+    /// frame lands on the shared `pending` map so waiting
+    /// `want_block_from_peer` futures resolve.
+    ///
+    /// Idempotent: replacing an existing adapter overwrites the slot.
+    /// Callers should not attach a different adapter per request.
+    pub fn attach_transport(&self, adapter: Arc<BitswapNetworkAdapter>) {
+        *self.bitswap_adapter.write() = Some(adapter);
+    }
+
+    /// Borrow the wired transport adapter, if any.
+    pub fn bitswap_adapter(&self) -> Option<Arc<BitswapNetworkAdapter>> {
+        self.bitswap_adapter.read().clone()
+    }
+
+    /// Whether a live transport adapter is currently attached.
+    pub fn has_transport(&self) -> bool {
+        self.bitswap_adapter.read().is_some()
     }
 
     /// Attach the DHT handle used for provider announcements and discovery.
@@ -212,7 +250,7 @@ impl BitswapHandle {
 
     /// Whether a gossip bus is currently attached.
     pub fn has_gossip(&self) -> bool {
-        self.gossip_bus.is_some()
+        self.gossip_bus.read().is_some()
     }
 
     /// Add a peer to the Bitswap engine.
@@ -422,7 +460,7 @@ impl BitswapHandle {
 
         // Announce on gossip bus if enabled and attached.
         if self.config.gossip_announce_enabled {
-            if let Some(bus) = &self.gossip_bus {
+            if let Some(bus) = self.gossip_bus.read().as_ref() {
                 let announcement = Announcement {
                     room_id: RoomId::new("bitswap:announcements"),
                     content_hash: hash.clone(),
@@ -436,6 +474,8 @@ impl BitswapHandle {
                     timestamp: chrono::Utc::now(),
                     signer: None,
                     signature: None,
+                    message_id: None,
+                    ttl_secs: None,
                 };
                 if let Err(e) = bus.publish(&announcement.room_id, &announcement).await {
                     warn!("gossip publish failed: {}", e);
@@ -465,7 +505,7 @@ impl BitswapHandle {
         }
 
         if self.config.gossip_announce_enabled {
-            if let Some(bus) = &self.gossip_bus {
+            if let Some(bus) = self.gossip_bus.read().as_ref() {
                 let announcement = Announcement {
                     room_id: RoomId::new("bitswap:announcements"),
                     content_hash: hash.clone(),
@@ -479,6 +519,8 @@ impl BitswapHandle {
                     timestamp: chrono::Utc::now(),
                     signer: None,
                     signature: None,
+                    message_id: None,
+                    ttl_secs: None,
                 };
                 if let Err(e) = bus.publish(&announcement.room_id, &announcement).await {
                     warn!("gossip publish failed: {}", e);

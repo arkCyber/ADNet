@@ -80,6 +80,11 @@ struct GossipInner {
 #[derive(Debug, Clone)]
 struct AppliedGrant {
     grant_id: PeeringGrantId,
+    /// When this grant expires. The expiry is captured here
+    /// at accept-time so `prune_expired_at` can walk the list
+    /// without re-fetching the underlying
+    /// [`PeeringGrant`](crate::peering::PeeringGrant).
+    valid_until: DateTime<Utc>,
     /// The hops we added. Each entry is
     /// `(target_network, hop_to_install)`. On revocation
     /// we remove the entry whose `target_network`
@@ -256,6 +261,7 @@ impl GossipFederatedTopology {
             self.inner.inner.set_paths(paths);
             applied.push(AppliedGrant {
                 grant_id: grant.grant_id.clone(),
+                valid_until: grant.valid_until,
                 hops,
             });
         }
@@ -293,27 +299,45 @@ impl GossipFederatedTopology {
     }
 
     /// Time-parameterised variant of [`prune_expired`].
+    ///
+    /// Walks the in-process list of applied grants, removes
+    /// any whose `valid_until <= now`, and rebuilds the
+    /// path table for the affected entries. Returns the
+    /// number of grants pruned.
     pub fn prune_expired_at(&self, now: DateTime<Utc>) -> usize {
-        let applied = self.inner.applied.read().clone();
-        let pruned = 0;
-        for entry in applied {
-            // We don't store `valid_until` on
-            // `AppliedGrant`; instead we look it up via
-            // the inner topology. For v1 we don't track
-            // the expiry post-revoke, so this is best-
-            // effort: the topology may keep stale entries
-            // until the next revoke or full reset.
-            // A future revision can store `valid_until`
-            // directly on `AppliedGrant`.
-            let _ = (entry, now);
+        let mut applied = self.inner.applied.write();
+        let before = applied.len();
+        let mut pruned_paths: std::collections::HashSet<MeshNetworkId> =
+            std::collections::HashSet::new();
+        applied.retain(|entry| {
+            if entry.valid_until <= now {
+                // Remember every target so we can drop the
+                // empty hop lists below.
+                for (target, _hop) in &entry.hops {
+                    pruned_paths.insert(target.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
+        let pruned = before.saturating_sub(applied.len());
+        if pruned > 0 {
+            // Rebuild the path table so the pruned entries
+            // no longer contribute.
+            let mut new_paths: std::collections::HashMap<MeshNetworkId, Vec<TransitHop>> =
+                std::collections::HashMap::new();
+            for entry in applied.iter() {
+                for (target, hop) in &entry.hops {
+                    new_paths
+                        .entry(target.clone())
+                        .or_insert_with(Vec::new)
+                        .push(hop.clone());
+                }
+            }
+            new_paths.retain(|k, v| !v.is_empty() && !pruned_paths.contains(k));
+            self.inner.inner.set_paths(new_paths);
         }
-        // The cheap correctness path is: walk every
-        // applied grant's `hops` and check if the grant
-        // record still references a live envelope.
-        // For PR #2 we expose the API but the body is
-        // a no-op until `AppliedGrant` carries expiry.
-        // The integration test suite treats this as
-        // "best effort" (see `prune_expired_is_best_effort`).
         pruned
     }
 
@@ -620,13 +644,12 @@ mod tests {
     }
 
     #[test]
-    fn prune_expired_is_best_effort_noop_for_now() {
+    fn prune_expired_keeps_fresh_grants_until_their_valid_until() {
         let t = GossipFederatedTopology::new(nid(7), net(1));
         t.observe_grant(grant(1, 2, 3)).unwrap();
-        // Even after "expiry" the topology may still
-        // hold the hop. The PR #2 contract is "best
-        // effort"; revocation is the only hard way to
-        // drop a grant today.
+        // Fresh grants (60-second default TTL) are never
+        // pruned by `prune_expired` (it uses `now` as the
+        // cutoff, and the grant outlives `now`).
         let pruned = t.prune_expired();
         assert_eq!(pruned, 0);
     }
@@ -842,5 +865,95 @@ mod tests {
             }
             other => panic!("expected Forward, got {other:?}"),
         }
+    }
+
+    /// Build a grant with an explicit `valid_until` for the
+    /// pruning tests.
+    fn grant_expiring_at(
+        source: u8,
+        target: u8,
+        grantor: u8,
+        valid_until: DateTime<Utc>,
+    ) -> PeeringGrant {
+        let mut g = grant(source, target, grantor);
+        g.valid_until = valid_until;
+        g
+    }
+
+    /// Regression for the v1 `prune_expired_at` no-op: expired
+    /// grants must now drop from the applied list and the path
+    /// table must no longer route through the pruned network.
+    #[test]
+    fn prune_expired_at_drops_expired_entries_and_paths() {
+        let t = GossipFederatedTopology::new(nid(7), net(1));
+        // The verifier refuses to accept grants whose
+        // `valid_until <= Utc::now()`, so we ingest everything
+        // with a future expiry, then drive pruning forward in
+        // time.
+        let t0 = Utc::now();
+        let obs_t0 = t0 + chrono::Duration::seconds(3600);
+        t.observe_grant(grant_expiring_at(1, 2, 3, obs_t0)).unwrap();
+        t.observe_grant(grant_expiring_at(1, 4, 5, obs_t0)).unwrap();
+        t.observe_grant(grant_expiring_at(1, 6, 7, obs_t0)).unwrap();
+
+        assert_eq!(t.applied_count(), 3);
+
+        // Prune one second past the expiry window — everything
+        // expires together.
+        let pruned = t.prune_expired_at(obs_t0 + chrono::Duration::seconds(1));
+        assert_eq!(pruned, 3, "all three grants should be pruned");
+        assert_eq!(t.applied_count(), 0);
+        // The path table is empty.
+        assert!(t.peered_networks().is_empty());
+    }
+
+    /// Pruning on an empty topology must be a no-op (`0`) and
+    /// must not error.
+    #[test]
+    fn prune_expired_at_on_empty_topology_returns_zero() {
+        let t = GossipFederatedTopology::new(nid(7), net(1));
+        assert_eq!(t.prune_expired_at(Utc::now()), 0);
+    }
+
+    /// Walking past every grant's `valid_until` removes them
+    /// all in a single call.
+    #[test]
+    fn prune_expired_at_at_long_future_drops_all() {
+        let t = GossipFederatedTopology::new(nid(7), net(1));
+        // Ingest all grants with a uniform future expiry so
+        // `observe_grant` doesn't reject them outright.
+        let obs_t0 = Utc::now() + chrono::Duration::seconds(60);
+        for (i, target) in [2u8, 3u8].iter().enumerate() {
+            // Avoid granting the same network as the local
+            // network (which would be a self-loop).
+            let mut g = grant_expiring_at(1, *target, 9, obs_t0);
+            g.direction = PeeringDirection::SourceToTarget;
+            // Use target's 0 as a stand-in for unique source
+            // per iteration to dodge the self-loop rejection
+            // when target == local.
+            if *target == 1 {
+                let _ = i; // silence unused warning
+                continue;
+            }
+            t.observe_grant(g).unwrap();
+        }
+        let applied = t.applied_count();
+        assert_eq!(applied, 2);
+        let pruned = t.prune_expired_at(obs_t0 + chrono::Duration::seconds(1));
+        assert_eq!(pruned, 2);
+        assert_eq!(t.applied_count(), 0);
+    }
+
+    /// Boundary condition: a grant whose `valid_until` is one
+    /// nanosecond in the future is not yet pruned.
+    #[test]
+    fn prune_expired_at_keeps_grants_at_or_after_valid_until() {
+        let t = GossipFederatedTopology::new(nid(7), net(1));
+        let obs_t0 = Utc::now() + chrono::Duration::seconds(3600);
+        t.observe_grant(grant_expiring_at(1, 2, 3, obs_t0)).unwrap();
+        // One second earlier — not yet expired.
+        assert_eq!(t.prune_expired_at(obs_t0 - chrono::Duration::seconds(1)), 0);
+        // One second past `valid_until` — pruned.
+        assert_eq!(t.prune_expired_at(obs_t0 + chrono::Duration::seconds(1)), 1);
     }
 }

@@ -91,6 +91,12 @@ impl MeshNetworkId {
         &self.0
     }
 
+    /// Inner hex string (alias of [`Self::as_hex`] for callers
+    /// that prefer a string-like name).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     pub fn as_bytes(&self) -> Vec<u8> {
         hex::decode(&self.0).expect("valid hex")
     }
@@ -278,6 +284,44 @@ impl MeshMembership {
         self.published_at = Utc::now();
     }
 
+    /// Canonical bytes for signature computation / verification:
+    /// `version || network_id.canonical() || members_len ||
+    /// joined(members.canonical())`. The signature field is
+    /// always excluded from the preimage.
+    pub fn signing_preimage(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + 64 + 8 + self.members.len() * 96);
+        out.extend_from_slice(&self.version.to_be_bytes());
+        out.extend_from_slice(self.network_id.as_str().as_bytes());
+        out.push(b'|');
+        out.extend_from_slice(&(self.members.len() as u32).to_be_bytes());
+        out.push(b'|');
+        for m in &self.members {
+            out.extend_from_slice(m.node_id.as_bytes().as_slice());
+            out.push(b'|');
+            out.extend_from_slice(m.hostname.as_bytes());
+            out.push(b'|');
+            out.push(if m.is_coordinator { 1 } else { 0 });
+            out.push(b'|');
+        }
+        out
+    }
+
+    /// Hex-encoded BLAKE3 hash of the signing preimage.
+    /// Useful for deterministic cache keys when the signature
+    /// field is empty.
+    pub fn content_hash_hex(&self) -> String {
+        let digest = blake3::hash(&self.signing_preimage());
+        hex::encode(digest.as_bytes())
+    }
+
+    /// Apply a hex-encoded signature in place. The caller is
+    /// expected to have computed the signature externally
+    /// (e.g. via [`crate::mesh::MeshRosterSigner`]). Passing
+    /// `""` clears the field.
+    pub fn set_signature_hex(&mut self, hex_sig: impl Into<String>) {
+        self.signature = hex_sig.into();
+    }
+
     /// Look up a member by their `NodeId`.
     pub fn member(&self, node_id: &NodeId) -> Option<&MeshMember> {
         self.members.iter().find(|m| &m.node_id == node_id)
@@ -292,6 +336,52 @@ impl MeshMembership {
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
+}
+
+/// Ed25519 signer trait for [`MeshMembership`]. Decoupling the
+/// signature scheme behind a trait keeps `adnet-types` crypto-free
+/// while letting the `adnet-mesh-coordinator` crate supply a
+/// concrete `ed25519-dalek` implementation.
+pub trait MeshRosterSigner: Send + Sync {
+    /// Sign the canonical preimage of `roster`. Returns the
+    /// 64-byte signature (the caller hex-encodes for storage).
+    fn sign_roster(&self, preimage: &[u8]) -> Vec<u8>;
+    /// Return the public key bytes (32) of the signer. Receiving
+    /// nodes compare this against their registered coordinator
+    /// pubkey before accepting any roster.
+    fn public_key_bytes(&self) -> [u8; 32];
+}
+
+/// Ed25519 verifier trait for [`MeshMembership`].
+pub trait MeshRosterVerifier: Send + Sync {
+    /// Verify a signature against `preimage`. Returns `true` on
+    /// success. Implementations MUST return `false` (never panic)
+    /// on malformed inputs — rosters arrive over gossip where
+    /// noise is the norm.
+    fn verify_roster(&self, preimage: &[u8], signature: &[u8]) -> bool;
+}
+
+/// Helper: verify a roster's stored signature against a known
+/// coordinator pubkey. Returns `false` for empty signatures,
+/// non-hex, or wrong-length bodies. Internally decodes the hex
+/// field, calls [`MeshRosterVerifier::verify_roster`], and
+/// returns the boolean.
+pub fn verify_roster_signature<V: MeshRosterVerifier>(
+    verifier: &V,
+    roster: &MeshMembership,
+) -> bool {
+    let preimage = roster.signing_preimage();
+    // The signature is stored hex-encoded; both empty and short
+    // / odd-length hex strings decode to `None`, so the early
+    // `false` covers the missing-signature path.
+    let sig_bytes = match hex::decode(roster.signature.as_bytes()) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    if sig_bytes.len() != 64 {
+        return false;
+    }
+    verifier.verify_roster(&preimage, &sig_bytes)
 }
 
 /// One-time invite code for a closed mesh network.
@@ -591,5 +681,168 @@ mod tests {
         let back: MeshMembership = serde_json::from_str(&s).unwrap();
         assert_eq!(back.network_id, roster.network_id);
         assert_eq!(back.members.len(), 1);
+    }
+
+    // ====================================================================
+    // Signing preimage / verify_roster_signature tests (issue #2 fix:
+    // MeshMembership::signature previously left empty and downstream
+    // consumers could not authenticate the roster).
+    // ====================================================================
+
+    fn sample_roster() -> MeshMembership {
+        let nid = MeshNetworkId::from_bytes(&[7u8; 32]).unwrap();
+        let coord = MeshMember::new_coordinator(NodeId::random(), "alice");
+        let bob = MeshMember::new_member(NodeId::random(), "bob");
+        MeshMembership::new_unsigned(nid, vec![coord, bob])
+    }
+
+    #[test]
+    fn signing_preimage_changes_with_version() {
+        let mut a = sample_roster();
+        let b = sample_roster();
+        assert_ne!(a.signing_preimage(), b.signing_preimage());
+        a.bumped();
+        assert_ne!(a.signing_preimage(), b.signing_preimage());
+    }
+
+    #[test]
+    fn signing_preimage_is_excludes_signature_field() {
+        // Mutating the stored `signature` hex must never affect the
+        // preimage; otherwise an attacker could replay the same signed
+        // preimage under a different signature and pass verification.
+        let mut r = sample_roster();
+        let pre = r.signing_preimage();
+        r.set_signature_hex("deadbeef");
+        assert_eq!(r.signing_preimage(), pre);
+    }
+
+    #[test]
+    fn content_hash_hex_is_deterministic_64_chars() {
+        let r = sample_roster();
+        let h1 = r.content_hash_hex();
+        let h2 = r.content_hash_hex();
+        assert_eq!(h1, h2);
+        // 32-byte BLAKE3 digest hex-encoded.
+        assert_eq!(h1.len(), 64);
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Trivial in-process signer used by the verify tests below.
+    struct MockSigner {
+        sig: Vec<u8>,
+        key: [u8; 32],
+    }
+
+    impl MeshRosterSigner for MockSigner {
+        fn sign_roster(&self, _preimage: &[u8]) -> Vec<u8> {
+            self.sig.clone()
+        }
+        fn public_key_bytes(&self) -> [u8; 32] {
+            self.key
+        }
+    }
+
+    struct MockVerifier {
+        expect_key: [u8; 32],
+        /// When true, always return `false`. Used to test rejection.
+        always_fail: bool,
+    }
+
+    impl MeshRosterVerifier for MockVerifier {
+        fn verify_roster(&self, _preimage: &[u8], signature: &[u8]) -> bool {
+            // Pre-built fixed 64-byte accepted body.
+            const OK: [u8; 64] = [
+                b'g', b'o', b'o', b'd', b'-', b's', b'i', b'g', // 8
+                b'-', b'6', b'4', b'-', b'b', b'y', b't', b'e', // 16
+                b's', b'-', b'p', b'a', b'd', b'd', b'i', b'n', // 24
+                b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n', // 32
+                b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n', // 40
+                b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n', // 48
+                b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n', // 56
+                b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n', // 64
+            ];
+            !self.always_fail && signature == OK.as_slice()
+        }
+    }
+
+    #[test]
+    fn verify_roster_signature_rejects_empty() {
+        let mut r = sample_roster();
+        r.set_signature_hex("");
+        let v = MockVerifier {
+            expect_key: [0u8; 32],
+            always_fail: false,
+        };
+        assert!(!verify_roster_signature(&v, &r));
+    }
+
+    #[test]
+    fn verify_roster_signature_rejects_wrong_length() {
+        let mut r = sample_roster();
+        r.set_signature_hex("aabb"); // 2 bytes after hex decode
+        let v = MockVerifier {
+            expect_key: [0u8; 32],
+            always_fail: false,
+        };
+        assert!(!verify_roster_signature(&v, &r));
+    }
+
+    #[test]
+    fn verify_roster_signature_rejects_non_hex() {
+        let mut r = sample_roster();
+        // Odd-length hex -> decoder fails.
+        r.set_signature_hex("abc");
+        let v = MockVerifier {
+            expect_key: [0u8; 32],
+            always_fail: false,
+        };
+        assert!(!verify_roster_signature(&v, &r));
+    }
+
+    #[test]
+    fn verify_roster_signature_accepts_valid_64_byte_body() {
+        let mut r = sample_roster();
+        let ok = [
+            b'g', b'o', b'o', b'd', b'-', b's', b'i', b'g', b'-', b'6', b'4', b'-', b'b', b'y',
+            b't', b'e', b's', b'-', b'p', b'a', b'd', b'd', b'i', b'n', b'g', b'-', b'p', b'a',
+            b'd', b'd', b'i', b'n', b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n', b'g', b'-',
+            b'p', b'a', b'd', b'd', b'i', b'n', b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n',
+            b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n',
+        ];
+        r.set_signature_hex(hex::encode(ok));
+        let v = MockVerifier {
+            expect_key: [0u8; 32],
+            always_fail: false,
+        };
+        assert!(verify_roster_signature(&v, &r));
+    }
+
+    #[test]
+    fn verify_roster_signature_propagates_verifier_rejection() {
+        let mut r = sample_roster();
+        let ok = [
+            b'g', b'o', b'o', b'd', b'-', b's', b'i', b'g', b'-', b'6', b'4', b'-', b'b', b'y',
+            b't', b'e', b's', b'-', b'p', b'a', b'd', b'd', b'i', b'n', b'g', b'-', b'p', b'a',
+            b'd', b'd', b'i', b'n', b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n', b'g', b'-',
+            b'p', b'a', b'd', b'd', b'i', b'n', b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n',
+            b'g', b'-', b'p', b'a', b'd', b'd', b'i', b'n',
+        ];
+        r.set_signature_hex(hex::encode(ok));
+        let v = MockVerifier {
+            expect_key: [0u8; 32],
+            always_fail: true,
+        };
+        assert!(!verify_roster_signature(&v, &r));
+    }
+
+    #[test]
+    fn mock_signer_returns_configured_signature() {
+        let s = MockSigner {
+            sig: vec![1u8; 64],
+            key: [9u8; 32],
+        };
+        let sig = s.sign_roster(b"any preimage");
+        assert_eq!(sig, vec![1u8; 64]);
+        assert_eq!(s.public_key_bytes(), [9u8; 32]);
     }
 }

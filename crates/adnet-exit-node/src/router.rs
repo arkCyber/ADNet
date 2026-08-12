@@ -18,7 +18,8 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use adnet_types::{MESH_IPV4_BASE, MESH_IPV4_PREFIX_LEN, MESH_IPV6_PREFIX_BYTES, NodeId, VirtualIpv4, VirtualIpv6};
+use adnet_types::node::NodeId;
+use adnet_types::virtual_ip::{MESH_IPV4_BASE, MESH_IPV4_PREFIX_LEN, MESH_IPV6_PREFIX_BYTES, VirtualIp, VirtualIpv4, VirtualIpv6};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -169,7 +170,7 @@ mod tests {
     use super::*;
     use crate::client::{Client, ClientConfig};
     use crate::gateway::Gateway;
-    use adnet_types::{VirtualIp, VirtualIpv4, VirtualIpv6};
+    use adnet_types::virtual_ip::{VirtualIp, VirtualIpv4, VirtualIpv6};
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]

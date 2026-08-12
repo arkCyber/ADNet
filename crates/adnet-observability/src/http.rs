@@ -106,6 +106,11 @@ impl AppState {
     pub fn new(registry: Arc<Registry>) -> Self {
         Self { registry }
     }
+
+    /// Get a reference to the registry.
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.registry
+    }
 }
 
 /// Start the metrics server on the address from `config`. The

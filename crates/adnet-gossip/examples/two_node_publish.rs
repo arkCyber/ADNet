@@ -49,6 +49,8 @@ fn main() {
             source_url: Some("https://example.com/llama.gguf".into()),
             ticket: None,
             timestamp: Utc::now(),
+            message_id: None,
+            ttl_secs: None,
             signer: None,
             signature: None,
         };

@@ -10,14 +10,15 @@ description = "Magic DNS — name resolution for the ADNet mesh VPN. Maps `<host
 workspace = true
 
 [dependencies]
-adnet-types    = { workspace = true }
-tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
-parking_lot    = { version = "0.12", default-features = false }
-thiserror      = { workspace = true }
-tracing        = { workspace = true }
-serde          = { workspace = true }
-serde_json     = { workspace = true }
-chrono         = { workspace = true }
+adnet-types   = { workspace = true }
+adnet-tun     = { workspace = true }
+tokio         = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+parking_lot   = { version = "0.12", default-features = false }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+chrono        = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

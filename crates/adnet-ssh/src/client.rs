@@ -19,7 +19,10 @@
 pub mod proxy;
 
 #[cfg(feature = "iroh")]
-pub use proxy::{InviteToken, ParsedInvite, parse_invite};
+pub use proxy::{
+    InviteToken, ParsedInvite, SftpConfig, DEFAULT_SFTP_BINARY, parse_invite, run_sftp,
+    run_sftp_with,
+};
 #[cfg(feature = "iroh")]
 use iroh::endpoint::{RecvStream, SendStream};
 

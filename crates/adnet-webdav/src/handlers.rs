@@ -1,6 +1,6 @@
 //! Verb dispatcher. The verb-→-handler map is the single audit
 //! choke-point: every state-changing verb here produces an
-//! audit record via `Nas::put/mkcol/delete/rename`.
+//! audit record via `Nas::put/mkcol/delete/rename/copy`.
 
 use std::collections::BTreeMap;
 
@@ -12,7 +12,7 @@ use adnet_types::ContentHash;
 use thiserror::Error;
 
 use crate::acl::{AclDecision, AclMiddleware, CapabilityResolver, StaticCapabilityResolver};
-use crate::props::multistatus_xml;
+use crate::props::{multistatus_xml, Depth};
 use crate::token::{CapabilityToken, TokenVerifier};
 
 #[derive(Debug, Error)]
@@ -194,12 +194,13 @@ impl HandlerState {
         auth: Option<&str>,
         offset: Option<usize>,
         limit: Option<usize>,
+        depth: Depth,
     ) -> Result<(String, PaginationMeta), HttpError> {
         self.verify_and_authorise("propfind", auth)?;
         let offset = offset.unwrap_or(0);
         let limit = limit.unwrap_or(1000).min(10000);
         let mut items: Vec<(String, Entry)> = Vec::new();
-        self.collect(path, path, 0, &mut items);
+        self.collect(path, path, 0, depth, &mut items);
         let total = items.len();
         let page = items.into_iter().skip(offset).take(limit);
         let refs: Vec<(String, Entry)> = page.collect();
@@ -217,23 +218,46 @@ impl HandlerState {
         root: &PathSegments,
         current: &PathSegments,
         depth: usize,
+        max_depth: Depth,
         out: &mut Vec<(String, Entry)>,
     ) {
-        if depth > 1 {
-            return;
+        // Check if we've reached the depth limit
+        match max_depth {
+            Depth::Zero => {
+                // Only include the resource itself
+                if depth > 0 {
+                    return;
+                }
+            }
+            Depth::One => {
+                // Include resource and immediate children (depth 0 and 1)
+                if depth > 1 {
+                    return;
+                }
+            }
+            Depth::Infinity => {
+                // No limit (within reasonable bounds)
+                if depth > 64 {
+                    return;
+                }
+            }
+            Depth::None => {
+                // Include nothing
+                return;
+            }
         }
+
         let snap = self.nas.snapshot();
         let entry = walk(&snap.root, current);
         if let Some(e) = entry {
             out.push((format_root(root, current), e.clone()));
-            if depth == 0
-                && let Entry::Directory { children } = e {
-                    for name in children.keys() {
-                        let mut path = current.0.clone();
-                        path.push(name.clone());
-                        self.collect(root, &PathSegments(path), depth + 1, out);
-                    }
+            if let Entry::Directory { children } = e {
+                for name in children.keys() {
+                    let mut child_path = current.0.clone();
+                    child_path.push(name.clone());
+                    self.collect(root, &PathSegments(child_path), depth + 1, max_depth, out);
                 }
+            }
         }
     }
 
@@ -336,6 +360,7 @@ impl HandlerState {
         &self,
         from: &PathSegments,
         to: &PathSegments,
+        overwrite: bool,
         auth: Option<&str>,
         user_agent: Option<String>,
     ) -> Result<(), HttpError> {
@@ -343,7 +368,24 @@ impl HandlerState {
         self.verify_and_authorise("move", auth)?;
         let ctx = self.audit(Some(token.capability_id.clone()), user_agent);
         self.nas
-            .rename(from, to, &ctx, &*self.clock)
+            .rename(from, to, overwrite, &ctx, &*self.clock)
+            .map_err(map_ns)?;
+        Ok(())
+    }
+
+    pub fn handle_copy(
+        &self,
+        from: &PathSegments,
+        to: &PathSegments,
+        overwrite: bool,
+        auth: Option<&str>,
+        user_agent: Option<String>,
+    ) -> Result<(), HttpError> {
+        let token = self.verify(auth)?;
+        self.verify_and_authorise("copy", auth)?;
+        let ctx = self.audit(Some(token.capability_id.clone()), user_agent);
+        self.nas
+            .copy(from, to, overwrite, &ctx, &*self.clock)
             .map_err(map_ns)?;
         Ok(())
     }

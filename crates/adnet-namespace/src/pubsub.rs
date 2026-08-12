@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::ipns::{IpnRecord, IpnsError, IpnResolver};
+use crate::ipns::{IpnRecord, IpnsError, IpnResolver, TrustLevel};
 
 /// Stable room id used for IPNS-over-gossip. Operators that want a
 /// custom name can pass their own [`RoomId`] to
@@ -221,7 +221,12 @@ impl PubsubIpnsResolver {
                 };
                 match envelope.decode_record() {
                     Ok(record) => {
-                        resolver.cache_record(record);
+                        // Network-received records are cached with TrustLevel::Network
+                        // which requires caller-side signature verification.
+                        // For gossip, we rely on sequence monotonicity as a first-order
+                        // defense; full signature verification should be done by the
+                        // resolver using the publisher's public key.
+                        resolver.cache_record_verified(record, TrustLevel::Network);
                     }
                     Err(e) => {
                         tracing::trace!("IPN pubsub: bad record dropped: {e}");
@@ -259,7 +264,7 @@ mod tests {
     use crate::ipns::{Ed25519SecretKey, IpnPublisher};
     use std::time::Duration;
 
-    fn make_signed_record() -> IpnRecord {
+    async fn make_signed_record() -> IpnRecord {
         let secret = Ed25519SecretKey::generate();
         let publisher = IpnPublisher::new(std::sync::Arc::new(secret));
         publisher
@@ -268,12 +273,13 @@ mod tests {
                 "abc123".to_string(),
                 Duration::from_secs(60),
             )
+            .await
             .expect("publish")
     }
 
-    #[test]
-    fn envelope_round_trips_record() {
-        let record = make_signed_record();
+    #[tokio::test]
+    async fn envelope_round_trips_record() {
+        let record = make_signed_record().await;
         let env = IpnGossipPayload::from_record(&record, "deadbeef").expect("from_record");
         assert_eq!(env.kind, "ipns");
         assert_eq!(env.from_node, "deadbeef");
@@ -288,8 +294,8 @@ mod tests {
         assert_eq!(back.sequence, record.sequence);
     }
 
-    #[test]
-    fn envelope_rejects_wrong_kind() {
+    #[tokio::test]
+    async fn envelope_rejects_wrong_kind() {
         let env = IpnGossipPayload {
             kind: "content".to_string(),
             from_node: "node".to_string(),
@@ -299,8 +305,8 @@ mod tests {
         assert!(matches!(err, IpnsError::Deserialize(_)));
     }
 
-    #[test]
-    fn envelope_decode_rejects_malformed_record() {
+    #[tokio::test]
+    async fn envelope_decode_rejects_malformed_record() {
         let env = IpnGossipPayload {
             kind: "ipns".to_string(),
             from_node: "node".to_string(),
@@ -311,10 +317,10 @@ mod tests {
         assert!(matches!(err, IpnsError::Deserialize(_)));
     }
 
-    #[test]
-    fn publish_payload_returns_announcement_payload() {
+    #[tokio::test]
+    async fn publish_payload_returns_announcement_payload() {
         use adnet_types::NodeId;
-        let record = make_signed_record();
+        let record = make_signed_record().await;
         let payload =
             publish_payload(&record, "nodeid", NodeId::random()).expect("publish_payload");
         let env: IpnGossipPayload = serde_json::from_value(payload.payload).expect("envelope");
@@ -356,6 +362,7 @@ mod tests {
                 "deadbeef".to_string(),
                 Duration::from_secs(60),
             )
+            .await
             .expect("publish");
 
         // Publish via bus_a using the same envelope shape as a
@@ -410,6 +417,7 @@ mod tests {
         let publisher = IpnPublisher::new(Arc::new(secret));
         let record = publisher
             .publish(&name, "v1".to_string(), Duration::from_secs(60))
+            .await
             .expect("publish");
         let payload = publish_payload(&record, "node", NodeId::random()).expect("payload");
         let _ = bus_a

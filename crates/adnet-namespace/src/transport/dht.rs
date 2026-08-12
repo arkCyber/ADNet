@@ -64,6 +64,18 @@ pub trait DhtBackend: Send + Sync {
     /// contract is fan-out, not transactional.
     async fn put_value(&self, key: &DhtKey, data: Vec<u8>, ttl: Duration);
     async fn get_value(&self, key: &DhtKey) -> Option<Vec<u8>>;
+
+    /// Health check for the DHT backend.
+    /// Returns `true` if the backend is operational.
+    async fn is_healthy(&self) -> bool {
+        true // Default implementation assumes healthy
+    }
+
+    /// Get the number of peers known to this backend.
+    /// Used for health reporting.
+    async fn peer_count(&self) -> usize {
+        0 // Default: no peers
+    }
 }
 
 /// Default implementation backed by an [`adnet_dht::query::DhtQuery`].
@@ -101,6 +113,8 @@ impl DhtBackend for DhtQueryBackend {
         let mut q = self.inner.write().await;
         q.get_value(key).await
     }
+
+    // is_healthy and peer_count use default implementations from the trait
 }
 
 /// Local-only backend, useful for tests and for offline nodes
@@ -137,6 +151,16 @@ impl DhtBackend for LocalDhtBackend {
 
     async fn get_value(&self, key: &DhtKey) -> Option<Vec<u8>> {
         self.store.get_value(key).map(|v| v.data)
+    }
+
+    /// Local backend is always healthy (in-memory store).
+    async fn is_healthy(&self) -> bool {
+        true
+    }
+
+    /// Local backend has no peers.
+    async fn peer_count(&self) -> usize {
+        0
     }
 }
 
@@ -255,10 +279,18 @@ impl IpnTransport for DhtIpnTransport {
     }
 
     async fn health(&self) -> Result<TransportHealth, IpnsError> {
-        // The abstract backend doesn't expose a health probe yet.
-        // We report `Unknown` so the multi-transport health
-        // aggregator stays conservative.
-        Ok(TransportHealth::Unknown)
+        // Check if the backend reports healthy
+        if self.backend.is_healthy().await {
+            let peer_count = self.backend.peer_count().await;
+            if peer_count > 0 {
+                Ok(TransportHealth::Healthy)
+            } else {
+                // No peers yet, but backend is functional
+                Ok(TransportHealth::Degraded)
+            }
+        } else {
+            Ok(TransportHealth::Down)
+        }
     }
 }
 
@@ -294,10 +326,9 @@ mod tests {
     fn signed_record(value: &str) -> IpnRecord {
         let secret = Ed25519SecretKey::generate();
         let name = secret.ipns_name();
-        let publisher = IpnPublisher::new(Arc::new(secret));
-        publisher
-            .publish(&name, value.to_string(), Duration::from_secs(60))
-            .expect("publish")
+        let mut record = IpnRecord::new(name.clone(), value.to_string(), Duration::from_secs(60));
+        record.sign(&secret).expect("sign");
+        record
     }
 
     #[test]
@@ -359,6 +390,7 @@ mod tests {
 
         let record = publisher
             .publish(&name, "/ipfs/QmHello".into(), Duration::from_secs(60))
+            .await
             .expect("sign+publish");
 
         transport.publish(&record).await.expect("publish to DHT");
@@ -391,11 +423,13 @@ mod tests {
         // synthetic older sequence.
         let v1 = publisher
             .publish(&name, "/ipfs/QmV1".into(), Duration::from_secs(60))
+            .await
             .expect("publish v1");
         transport.publish(&v1).await.unwrap();
 
         let v2 = publisher
             .publish(&name, "/ipfs/QmV2".into(), Duration::from_secs(60))
+            .await
             .expect("publish v2");
         transport.publish(&v2).await.unwrap();
 
@@ -426,7 +460,34 @@ mod tests {
         let store = adnet_dht::store::new_in_memory_store();
         let transport = DhtIpnTransport::local(store);
         assert_eq!(transport.name(), "dht");
+        
+        // Local backend is always healthy (even with no values stored)
         let h = transport.health().await.unwrap();
-        assert_eq!(h, TransportHealth::Unknown);
+        assert!(h == TransportHealth::Healthy || h == TransportHealth::Degraded);
+    }
+
+    /// Test that health changes based on backend state.
+    #[tokio::test]
+    async fn dht_transport_health_reflects_backend() {
+        let store = adnet_dht::store::new_in_memory_store();
+        let transport = DhtIpnTransport::local(store);
+        
+        // Initially degraded (no peers, just values)
+        let h1 = transport.health().await.unwrap();
+        assert_eq!(h1, TransportHealth::Degraded);
+        
+        // Add a record
+        let secret = Ed25519SecretKey::generate();
+        let name = secret.ipns_name();
+        let publisher = IpnPublisher::new(Arc::new(secret));
+        let record = publisher
+            .publish(&name, "/ipfs/QmHealth".into(), Duration::from_secs(60))
+            .await
+            .expect("publish");
+        transport.publish(&record).await.expect("publish to DHT");
+        
+        // Still degraded (no peers)
+        let h2 = transport.health().await.unwrap();
+        assert_eq!(h2, TransportHealth::Degraded);
     }
 }

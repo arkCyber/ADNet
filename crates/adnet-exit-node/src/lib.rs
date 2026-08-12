@@ -47,16 +47,31 @@
 #![forbid(unsafe_code)]
 #![deny(unused_must_use)]
 
+pub mod bandwidth;
+pub mod billing;
 pub mod client;
 pub mod error;
+pub mod exit_handler;
 pub mod gateway;
 pub mod router;
 pub mod transit;
 pub mod transit_gossip;
 
+pub use bandwidth::{
+    BandwidthSnapshot, BandwidthStats, ClientMeter, ExitNodeMeter, GlobalBandwidthLimit,
+    RateLimitConfig, RateLimitResult, TrafficDirection,
+};
+pub use billing::{
+    BillingEngine, BillingStatus, Invoice, InvoiceStatus, LineItem, PricingModel,
+    PricingTier, RateCard, UsageRecord,
+};
 pub use client::{Client, ClientConfig, ClientState};
 #[allow(unused_imports)]
 pub use error::{ExitError, ExitResult};
+pub use exit_handler::{
+    AsyncExitHandler, ExitEvent, ExitHandler, ExitHandlerConfig, ExitHandlerSnapshot,
+    PacketAction, PacketRecord, PacketResult, TrafficKind,
+};
 pub use gateway::{Gateway, GatewayAdvert, GatewayState};
 #[allow(unused_imports)]
 pub use router::{is_mesh_address, RouteAction, Router, RouterConfig, RouterSnapshot};

@@ -53,13 +53,16 @@ pub mod retry;
 pub mod service;
 pub mod transport;
 
+#[cfg(test)]
+mod tests;
+
 pub use bucket::{KBucket, KBUCKET_SIZE, RoutingTable, Contact, InsertError};
 pub use record::{
     DhtKey, ProviderRecord, IpnRecord, DhtMessage, DhtValue, NodeInfo,
     Signer, Verifier,
 };
 pub use store::{DhtStorage, InMemoryDhtStore, SharedDhtStore, new_in_memory_store, cleanup_task};
-pub use query::{DhtQuery, QueryResult, QueryError, DhtMessageSender};
+pub use query::{DhtQuery, QueryResult, QueryError, DhtMessageSender, node_id_from_key, node_id_from_key_str};
 pub use node::{DhtNode, DhtConfig, DhtTransport};
 pub use protocol::{
     DhtCodec, DhtWireMessage, DhtMessageBuilder, DHT_ALPN, DHT_VERSION,
@@ -75,4 +78,4 @@ pub use handler::{DhtProtocolHandler, DhtEvent};
 pub use network::{DhtNetworkSender, TransportDhtSender};
 pub use retry::{RetryPolicy, PeerFailureTracker, is_transient};
 pub use service::{DhtService, DhtServiceConfig, DhtServiceTask};
-pub use transport::{DhtTransportAdapter, TransportBridge};
+pub use transport::{DhtTransportAdapter, DynResponseSink, TransportBridge};

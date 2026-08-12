@@ -172,12 +172,18 @@ impl UserspaceTun {
     /// How many packets are buffered in the kernel → tunnel
     /// direction. Useful for tests asserting that the mesh
     /// has not yet drained the queue.
+    ///
+    /// `mpsc::Sender::capacity()` reports the current number
+    /// of *free* slots; combined with `max_capacity()` (the
+    /// configured upper bound) we can derive how many packets
+    /// are pending. If the channel has been closed (the
+    /// `take()` paths) we report `0`.
     pub fn from_kernel_capacity(&self) -> usize {
-        // mpsc::Sender doesn't expose its capacity, but we
-        // can approximate by trying to send and recovering.
-        // For now we report 0 and rely on test-time probing
-        // via `try_send`.
-        0
+        let guard = self.inner.from_kernel_tx.lock();
+        match guard.as_ref() {
+            Some(tx) => tx.max_capacity().saturating_sub(tx.capacity()),
+            None => 0,
+        }
     }
 }
 
@@ -391,5 +397,39 @@ mod tests {
         assert_eq!(info.name, "utun42");
         assert_eq!(info.mtu, 1380);
         assert_eq!(info.local_ipv4, Ipv4Addr::new(100, 64, 5, 5));
+    }
+
+    /// `from_kernel_capacity` must report non-zero pending slots
+    /// after `inject_from_kernel` and zero after the slot is
+    /// consumed by `recv`. Regression for the prior stub that
+    /// hard-coded `0` for both cases.
+    #[tokio::test]
+    async fn userspace_from_kernel_capacity_tracks_pending() {
+        let dev = UserspaceTun::with_capacity(UserspaceTunConfig::default(), 8);
+        dev.bring_up();
+
+        // Inject three packets without consuming any.
+        for i in 0..3u8 {
+            let mut pkt = vec![0u8; 24];
+            pkt[0] = 0x45;
+            pkt[3] = 24;
+            pkt[9] = i;
+            dev.inject_from_kernel(pkt).await.unwrap();
+        }
+        // Channel math: 8 - tx.capacity() == 3 → capacity() == 5.
+        assert_eq!(dev.from_kernel_capacity(), 3);
+
+        // Drain one; remaining count drops by one.
+        let _ = dev.recv().await.unwrap().unwrap();
+        assert_eq!(dev.from_kernel_capacity(), 2);
+        let _ = dev.recv().await.unwrap().unwrap();
+        assert_eq!(dev.from_kernel_capacity(), 1);
+        let _ = dev.recv().await.unwrap().unwrap();
+        assert_eq!(dev.from_kernel_capacity(), 0);
+
+        // After full shutdown the value resolves to zero
+        // deterministically (the slot is `None`).
+        dev.shutdown().await.unwrap();
+        assert_eq!(dev.from_kernel_capacity(), 0);
     }
 }

@@ -1,303 +1,104 @@
-# ADNet AI Model Distribution Network
+# adnet-model-catalog
 
-A decentralized P2P system for distributing AI models built on top of ADNet's Iroh-based infrastructure.
+> ADNet 模型目录:去中心化 AI 模型(P2P + Bao 校验 + gossip 发现 + 信誉标签)分发网络 / ADNet model catalog — decentralized AI model distribution backed by P2P, Bao verification, gossip discovery, and provider reputation.
 
-## Overview
+## 概览(Overview)
 
-The ADNet Model Catalog enables:
-- **Decentralized Distribution**: Share AI models via P2P network without central servers
-- **Bao-Verified Transfers**: Cryptographically verified content integrity
-- **NAT Traversal**: Works behind firewalls via DERP relay servers
-- **Model Discovery**: Gossip-based model announcements
-- **Beautiful Web UI**: Modern model store interface
+`adnet-model-catalog` 处于 ADNet 体系的应用层,负责把 AI 模型(LLM、LoRA、SDXL、Whisper 等)从一台 provider 节点,以 P2P 方式、以 Bao 内容可校验的格式,投递到任意数量的 consumer 节点。具体来说:
 
-## Architecture
+- **元数据目录 (SQLite)** — 记录 manifest(`ModelManifest`)的所有属性(name / version / type / architecture / quantization / license / size / content_hash / iroh_ticket / tags);
+- **协议层 (iroh feature)** — 模型文件经 iroh blob store 导入,生成 `BlobTicket`;之后任何 peer 都能从该 ticket 拉取并由 Bao 校验;
+- **发现层 (iroh feature)** — provider 通过 `adnet-gossip` 广播 `ModelAnnouncement`,其他节点无需预先知道 node id 也能发现新模型;
+- **信誉层** — `ProviderReputationTracker` 汇总下载结果、用户举报与 manifest 完整性校验,提供 trust tier 给 UI 排序;
+- **HTTP 网关 (server feature)** — axum 暴露 REST API(`/api/models`, `/api/search?q=…`),自带 minijinja 模板渲染的 Web UI。
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Model Distribution Network                       │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  ┌──────────────────┐         ┌──────────────────┐                      │
-│  │   Model Provider │         │   Model Provider │                      │
-│  │   (Your NAS)     │         │   (Community)    │                      │
-│  │                  │         │                  │                      │
-│  │  ┌────────────┐  │         │  ┌────────────┐  │                      │
-│  │  │ Blob Store │  │         │  │ Blob Store │  │                      │
-│  │  │ (Models)   │  │         │  │ (Models)   │  │                      │
-│  │  └────────────┘  │         │  └────────────┘  │                      │
-│  │         │        │         │         │        │                      │
-│  │         ▼        │         │         ▼        │                      │
-│  │  ┌────────────┐  │         │  ┌────────────┐  │                      │
-│  │  │  Catalog   │  │         │  │  Catalog   │  │                      │
-│  │  │  Index     │  │         │  │  Index     │  │                      │
-│  │  └────────────┘  │         │  └────────────┘  │                      │
-│  └────────┬─────────┘         └────────┬─────────┘                      │
-│           │                             │                                 │
-│           │    ┌─────────────────────┐  │                                 │
-│           │    │  Gossip Bus         │  │                                 │
-│           │    │  (Model Discovery)  │◄─┤                                 │
-│           │    └─────────────────────┘  │                                 │
-│           │              │              │                                 │
-│           ▼              ▼              ▼                                 │
-│  ┌──────────────────────────────────────────────────────────┐             │
-│  │                  P2P Network (Iroh)                     │             │
-│  │   ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐ │             │
-│  │   │ Provider│  │ Provider│  │  Peer   │  │  Peer   │ │             │
-│  │   │  Node   │◄─┤  Node   │◄─┤  Node   │◄─┤  Node   │ │             │
-│  │   └─────────┘  └─────────┘  └─────────┘  └─────────┘ │             │
-│  └──────────────────────────────────────────────────────────┘             │
-│                              │                                            │
-│                              ▼                                            │
-│  ┌──────────────────────────────────────────────────────────┐             │
-│  │                    Web Interface                          │             │
-│  │  ┌────────────┐  ┌────────────┐  ┌──────────────────┐  │             │
-│  │  │ Model Store │  │   Search   │  │ Download Manager │  │             │
-│  │  │     UI      │  │   Engine   │  │  (Iroh WASM)     │  │             │
-│  │  └────────────┘  └────────────┘  └──────────────────────┘ │             │
-│  └──────────────────────────────────────────────────────────┘             │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+整个 crate 是 `adnet-cli` 命令行 `adnet model-catalog …` 的后端,也可独立运行(`adnet-model-catalog serve`)。
 
-## Quick Start
+## 特性(Features)
 
-### 1. Add a Model to Your Catalog
+| 名称 | 描述 |
+|------|------|
+| `ModelCatalog::open(path)` | 打开 / 创建 SQLite 库,自动建表 + FTS5 触发器 |
+| `ModelProvider::publish_model(path, metadata)` | 读取文件 → 算 blake3 → 导入 blob store → 生成 ticket → 写 manifest |
+| `ModelProvider::publish_bytes(bytes, metadata)` | 同上,接受内存里已经装配好的字节 |
+| `ModelCatalog::list(filter)` | 按 type / tag / architecture / size / query 过滤 + 分页 |
+| `ModelCatalog::search(q)` | 全文搜索(name / description / author / tags) |
+| `ModelProvider::update_status / remove_model / delete_model` | 软删除 + 硬删除(后端尽力回收 blob) |
+| `ProviderReputationTracker` | 记录下载结果,持久化 trust tier |
+| `ModelAnnouncement` (iroh feature) | gossip 广播 / 订阅 |
 
-```bash
-# Build the CLI
-cargo build -p adnet-model-catalog --features server
+## 安装(Installation)
 
-# Add a model
-./target/debug/adnet-model-catalog add \
-    --path ./models/my_lora.safetensors \
-    --name "Cyberpunk_LoRA" \
-    --model-type lora \
-    --author "Your Name" \
-    --description "Cyberpunk style LoRA for Stable Diffusion" \
-    --architecture stable-diffusion \
-    --tags "cyberpunk,sci-fi,art"
-```
-
-### 2. Start the Web Server
-
-```bash
-# Start the catalog server
-./target/debug/adnet-model-catalog serve --host 0.0.0.0 --port 8080
-
-# Or use the library directly
-cargo run -p adnet-model-catalog --features server -- serve
-```
-
-### 3. Browse Models
-
-Open http://localhost:8080 in your browser to see the model store UI.
-
-## Usage
-
-### Using as a Library
+`adnet-model-catalog` 是 ADNet workspace 的 path 依赖。
 
 ```rust
-use adnet_model_catalog::{ModelCatalog, ModelProvider, ModelType, Quantization};
+use adnet_model_catalog::{
+    ModelCatalog, ModelProvider, ModelType, Quantization,
+    ModelMetadata, ModelFilter,
+};
 use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Open catalog
-    let catalog = ModelCatalog::open("models.db").await?;
-    let catalog = Arc::new(catalog);
-
-    // Create provider
-    let provider = ModelProvider::new(catalog.clone());
-
-    // Publish a model
-    let manifest = provider.publish_model(
-        "path/to/model.bin",
-        "MyModel".to_string(),
-        "1.0.0".to_string(),
-        ModelType::Llm,
-        "Author".to_string(),
-        "Description".to_string(),
-        vec!["tag1".to_string()],
-        "llama3".to_string(),
-        Quantization::Q4("K_M".to_string()),
-        "MIT".to_string(),
-    ).await?;
-
-    println!("Published: {}", manifest.id);
-
-    // List models
-    let models = catalog.list(Default::default()).await?;
-    println!("Total models: {}", models.total);
-
-    Ok(())
-}
 ```
 
-### Using the CLI
-
+CLI 子命令入口:
 ```bash
-# List all models
+adnet-model-catalog add    --path ./model.bin --name "…" --model-type llm …
 adnet-model-catalog list
-
-# Search for models
 adnet-model-catalog search "cyberpunk"
-
-# Get model info
-adnet-model-catalog info <model-id>
-
-# Download a model
-adnet-model-catalog download <model-id> --output ./models/
-
-# Show statistics
-adnet-model-catalog stats
-
-# List all tags
-adnet-model-catalog tags
-
-# Import models from a directory
-adnet-model-catalog import \
-    --path ./models/ \
-    --model-type lora \
-    --author "My Name" \
-    --recursive
+adnet-model-catalog serve  --host 0.0.0.0 --port 8080
 ```
 
-## Model Types
+## 使用(Usage)
 
-The catalog supports various AI model types:
+```rust
+let catalog = Arc::new(ModelCatalog::open("models.db").await?);
+let provider = ModelProvider::new(catalog.clone());
 
-| Type | Description | Examples |
-|------|-------------|----------|
-| `llm` | Large Language Models | Llama, Mistral, GPT |
-| `lora` | LoRA Adapters | Style LoRAs, Control LoRAs |
-| `text_to_image` | Text-to-Image | Stable Diffusion, SDXL |
-| `image_to_image` | Image-to-Image | Img2Img models |
-| `controlnet` | ControlNet models | Canny, Depth |
-| `vae` | VAE models | SD VAE, Anime VAE |
-| `embedding` | Embedding models | BGE, E5 |
-| `speech_to_text` | Speech Recognition | Whisper |
-| `text_to_speech` | Speech Synthesis | XTTS |
-| `vision` | Vision models | CLIP, SAM |
+let metadata = ModelMetadata::new("llama3-8b", ModelType::Llm)
+    .with_author("Meta")
+    .with_description("Llama 3 8B chat model")
+    .with_tags(vec!["chat".into(), "instruct".into()])
+    .with_architecture("llama3")
+    .with_quantization(Quantization::Q4("K_M".into()))
+    .with_license("LLAMA-3")
+    .with_source_url("https://huggingface.co/meta/llama3-8b");
 
-## Quantization Formats
-
-| Format | Description |
-|--------|-------------|
-| `none` | Full precision (FP32) |
-| `fp16` | Half precision (FP16/BF16) |
-| `Q4_K_M` | 4-bit quantization, balanced |
-| `Q8_0` | 8-bit quantization, high quality |
-| `GGUF` | GGUF format (Q4_K_M implied) |
-| `GPTQ` | GPTQ quantized |
-| `AWQ` | AWQ quantized |
-
-## API Reference
-
-### REST API
-
-The web server exposes a REST API at `/api/`:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/models` | GET | List models with filters |
-| `/api/models/:id` | GET | Get model details |
-| `/api/models/:id/ticket` | GET | Get Iroh download ticket |
-| `/api/stats` | GET | Get catalog statistics |
-| `/api/tags` | GET | List all tags |
-| `/api/search?q=` | GET | Search models |
-
-### Example API Usage
-
-```bash
-# Get all LLMs
-curl http://localhost:8080/api/models?type=llm
-
-# Search for models
-curl http://localhost:8080/api/search?q=cyberpunk
-
-# Get download ticket
-curl http://localhost:8080/api/models/<id>/ticket
-
-# Get statistics
-curl http://localhost:8080/api/stats
+let manifest = provider.publish_model("llama3-8b-instruct-q4_k_m.gguf", metadata).await?;
+println!("Published: id={} hash={}…", manifest.id, &manifest.content_hash[..16]);
 ```
 
-## Model Manifest Schema
-
-```json
-{
-  "id": "uuid-v4",
-  "name": "Model Name",
-  "version": "1.0.0",
-  "model_type": "llm",
-  "size_bytes": 4294967296,
-  "content_hash": "blake3-hash-64-chars",
-  "iroh_ticket": "iroh://blob/...",
-  "author": "Author Name",
-  "description": "Model description",
-  "tags": ["tag1", "tag2"],
-  "architecture": "llama3",
-  "quantization": "Q4_K_M",
-  "license": "MIT",
-  "download_count": 1234,
-  "created_at": "2024-01-01T00:00:00Z",
-  "updated_at": "2024-01-01T00:00:00Z"
+```rust
+// 列出全部 LLM
+let page = catalog.list(ModelFilter {
+    model_type: Some(ModelType::Llm),
+    ..Default::default()
+}).await?;
+for m in page.items {
+    println!("{} v{} ({} bytes)", m.name, m.version, m.size_bytes);
 }
+
+// 全文搜索
+let hits = catalog.search("cyberpunk").await?;
+assert!(hits.iter().any(|m| m.tags.contains(&"cyberpunk".into())));
 ```
 
-## Features
+```rust
+// 软删除 / 硬删除
+provider.remove_model(&manifest.id).await?;     // AVAILABLE → REMOVED
+provider.delete_model(&manifest.id).await?;    // REMOVED + 期望 blob 回收
+```
 
-### 1. Full-Text Search
+```rust
+// 拉取部署用的下载 ticket
+let ticket = catalog.get_ticket(&manifest.id).await?.unwrap();
+assert!(ticket.starts_with("iroh://blob/"));
+```
 
-The catalog uses SQLite FTS5 for fast full-text search across model names, descriptions, and tags.
+## 应用案例(Use Cases / Examples)
 
-### 2. Tag-Based Filtering
+1. **家庭 NAS 当作社区模型源。** 用户的家里有一台 24 小时开机的 Mac mini,跑着 `adnet-model-catalog serve`,把 `~/.cache/huggingface/hub/` 里的几十个 GGUF 全部 publish 出去。同事在地铁里用 `adnet-model-catalog search "qwen"` 就能看到 ticket,后台 P2P 拉取,Bao 校验保证分毫不差。
+2. **离线实验室的可重现部署。** 实验室的实验脚本里 `adnet-model-catalog list --model-type lora` 拿到当前可用的所有 LoRA,按 `Quantization::Q4` 过滤再用 `get_ticket` 拼出 `BlobTicket`,丢进 docker base image。CI 跑回归时不需要从中央站点下载,完全本地闭环。
+3. **公司内网 model 商店 + 信誉。** 内部 P2P 网络上,IT 管理员把通过审计的若干个 Llama / BGE 模型发布出去,把 `ProviderReputationTracker` 集成进 SSO 控制台,reject 任何 trust tier < 0.3 的 provider。一切更新经过 gossip,manifest 与历史比对,blake3 不匹配直接拒绝消费。
 
-Models can be tagged with arbitrary labels for easy categorization and filtering.
-
-### 3. Download Tracking
-
-Each model tracks download counts and provides download statistics.
-
-### 4. Gossip-Based Discovery
-
-When running with Iroh support, models are announced via gossip protocol for peer discovery.
-
-### 5. Bao Verification
-
-All model transfers are verified using Bao (BLAKE3 authenticated organization) for cryptographic integrity.
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ADNET_CATALOG_DB` | `model-catalog.db` | Path to catalog database |
-| `ADNET_DOWNLOAD_DIR` | `./downloads` | Directory for downloaded models |
-| `ADNET_SERVER_HOST` | `0.0.0.0` | Server bind address |
-| `ADNET_SERVER_PORT` | `8080` | Server port |
-
-### Feature Flags
-
-| Feature | Description |
-|---------|-------------|
-| `iroh` | Enable Iroh P2P integration (blob transfer, gossip) |
-| `server` | Enable web server and API |
-
-## Future Enhancements
-
-- [ ] Model rating and reviews system
-- [ ] Provider reputation/trust system
-- [ ] Incremental model updates (delta sync)
-- [ ] WebAssembly browser client for direct downloads
-- [ ] IPNS-style mutable naming for model updates
-- [ ] Multi-provider redundancy using erasure coding
-- [ ] Model recommendation engine
-- [ ] Automatic quantization detection
-- [ ] Integration with HuggingFace Hub
-
-## License
+## 许可
 
 MIT OR Apache-2.0

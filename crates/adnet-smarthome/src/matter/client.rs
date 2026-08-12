@@ -8,6 +8,7 @@ use crate::device::{Device, DeviceType};
 use crate::error::{Result, SmartHomeError};
 use crate::matter::error::MatterError;
 use crate::matter::types::MatterClusterSpec;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap as StdHashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -63,7 +64,7 @@ pub enum MatterAttestationTrust {
 }
 
 /// A commissioned Matter device node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatterNode {
     pub node_id: u64,
     pub label: Option<String>,
@@ -100,6 +101,12 @@ impl MatterNode {
 }
 
 /// The Matter controller client.
+///
+/// `Arc<MatterController>` is `Send + Sync` per the
+/// `matter-controller` crate's contract, and the
+/// `Mutex`/`broadcast::Sender` pair contained in `sub_senders`
+/// are themselves `Send + Sync`, so the compiler can derive the
+/// auto trait bounds without a manual `unsafe impl`.
 pub struct MatterClient {
     controller: Arc<MatterController>,
     /// Send handles for active subscriptions, keyed by node_id.
@@ -107,8 +114,16 @@ pub struct MatterClient {
     sub_senders: std::sync::Mutex<StdHashMap<u64, tokio::sync::broadcast::Sender<crate::hub::HubEvent>>>,
 }
 
-unsafe impl Send for MatterClient {}
-unsafe impl Sync for MatterClient {}
+// Manual `unsafe impl Send/Sync` were removed; the `Send + Sync`
+// bounds are enforced implicitly by the field types. The block
+// below is a compile-time assertion that keeps the constraint
+// visible to maintainers: if either field is ever relaxed from
+// `Send + Sync` this will fail to compile.
+#[allow(dead_code)]
+const _: () = {
+    trait AssertSendSync: Send + Sync {}
+    impl AssertSendSync for MatterClient {}
+};
 
 impl MatterClient {
     /// Build a new controller. Call `ensure_fabric()` before commissioning.
@@ -373,5 +388,26 @@ pub fn decode_matter_value(v: &matter_controller::Value) -> serde_json::Value {
         }),
         MV::Null => serde_json::Value::Null,
         _ => serde_json::json!({ "type": "unknown" }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Compile-time guard: a `MatterClient` must be safe to share
+    /// across `tokio::spawn` boundaries. The previous
+    /// implementation expressed this via `unsafe impl Send/Sync`;
+    /// after the cleanup the test must still hold.
+    ///
+    /// If someone removes an inner type's `Send + Sync` bound
+    /// this `fn _assert_send_sync(c: MatterClient)` will fail to
+    /// compile, surfacing the regression immediately.
+    #[test]
+    fn matter_client_is_send_and_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<MatterClient>();
+        assert_sync::<MatterClient>();
     }
 }

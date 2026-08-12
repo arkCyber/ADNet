@@ -10,11 +10,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use adnet_gossip::{GossipBus, InProcessGossip};
+use adnet_gossip::{GossipBus, InProcessGossip, dedup::{DedupeFilter, TtlTracker, DEFAULT_MESSAGE_TTL}};
 use adnet_types::{
     Announcement, AnnouncementPayload, CdnContentKind, ContentHash, NodeId, RoomId,
 };
 use chrono::Utc;
+use parking_lot::RwLock;
 use tokio::sync::broadcast::error::RecvError;
 
 fn make_ann(publisher: &NodeId, room: &RoomId, seq: u32) -> Announcement {
@@ -29,6 +30,8 @@ fn make_ann(publisher: &NodeId, room: &RoomId, seq: u32) -> Announcement {
         source_url: None,
         ticket: None,
         timestamp: Utc::now(),
+        message_id: None,
+        ttl_secs: None,
         signer: None,
         signature: None,
     }
@@ -63,9 +66,6 @@ async fn two_nodes_same_room_delivery() {
 
 #[tokio::test]
 async fn subscriber_receives_own_publish_on_shared_transport() {
-    // When two buses share a transport, the sender's own messages
-    // should be visible on its own subscriber — this is the
-    // InProcessGossip broadcast contract.
     let transport = Arc::new(InProcessGossip::new());
     let node = NodeId::random();
     let room: RoomId = "self-echo".into();
@@ -102,18 +102,15 @@ async fn different_rooms_do_not_cross_contaminate() {
     let mut alpha_rx = alice_bus.subscribe(&room_a);
     let mut beta_rx = bob_bus.subscribe(&room_b);
 
-    // Publish to alpha only.
     let ann_alpha = make_ann(&alice, &room_a, 1);
     alice_bus.publish(&room_a, &ann_alpha).await.unwrap();
 
-    // Alpha subscriber gets it.
     let got_alpha = tokio::time::timeout(Duration::from_millis(100), alpha_rx.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(got_alpha.content_hash, ann_alpha.content_hash);
 
-    // Beta subscriber must NOT see it.
     let beta_sees_nothing = tokio::time::timeout(Duration::from_millis(100), beta_rx.recv())
         .await;
     assert!(beta_sees_nothing.is_err(), "beta should not receive alpha's message");
@@ -128,6 +125,9 @@ async fn multiple_subscribers_all_receive_same_message() {
     let room: RoomId = "multi-sub-test".into();
     let bus = GossipBus::new(publisher.clone(), Arc::clone(&transport) as _);
     bus.join_room(&room).await.unwrap();
+
+    // Give the subscription a moment to establish.
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     let mut rxs = Vec::new();
     for _ in 0..5 {
@@ -156,21 +156,13 @@ async fn fast_publisher_does_not_drop_slow_consumer() {
     let bus = GossipBus::new(publisher.clone(), Arc::clone(&transport) as _);
     bus.join_room(&room).await.unwrap();
 
-    // Very small buffer to test backpressure handling.
-    let mut rx = {
-        // We can't control the channel size from outside, but we CAN
-        // verify that the decode_stream task handles RecvError::Lagged gracefully.
-        bus.subscribe(&room)
-    };
+    let mut rx = bus.subscribe(&room);
 
-    // Publish rapidly.
     for i in 1..=200u32 {
         let ann = make_ann(&publisher, &room, i);
         bus.publish(&room, &ann).await.unwrap();
     }
 
-    // Consumer reads only 10 messages then stops. The broadcast
-    // channel's internal lag tracking should prevent panics.
     let mut count = 0u32;
     loop {
         match tokio::time::timeout(Duration::from_millis(10), rx.recv()).await {
@@ -181,12 +173,10 @@ async fn fast_publisher_does_not_drop_slow_consumer() {
                 }
             }
             Ok(Err(RecvError::Lagged(n))) => {
-                // LAG events mean messages were skipped — the consumer
-                // must not panic. We count them but keep going.
                 tracing::debug!("consumer lagged {n} messages at count={count}");
             }
             Ok(Err(RecvError::Closed)) => break,
-            Err(_) => break, // timeout
+            Err(_) => break,
         }
     }
     assert!(count >= 10, "consumer should have read at least 10 messages");
@@ -216,16 +206,13 @@ async fn message_source_from_node_is_preserved() {
         .await
         .unwrap()
         .unwrap();
-    // The announcement's node_id is alice's.
     assert_eq!(received.node_id, alice);
-    // The bridge's from_node should also be alice.
-    // We can verify this indirectly: the wire payload has from_node = alice.
+
     let wire = AnnouncementPayload {
         from_node: alice.clone(),
         payload: serde_json::to_value(&received).unwrap(),
     };
-    let decoded: Announcement =
-        serde_json::from_value(wire.payload).unwrap();
+    let decoded: Announcement = serde_json::from_value(wire.payload).unwrap();
     assert_eq!(decoded.node_id, alice);
 }
 
@@ -260,7 +247,7 @@ async fn join_then_rejoin_is_idempotent() {
     let bus = GossipBus::new(node.clone(), Arc::clone(&transport) as _);
 
     bus.join_room(&room).await.unwrap();
-    bus.join_room(&room).await.unwrap(); // second join
+    bus.join_room(&room).await.unwrap();
     let mut rx = bus.subscribe(&room);
 
     let ann = make_ann(&node, &room, 1);
@@ -273,23 +260,131 @@ async fn join_then_rejoin_is_idempotent() {
     assert_eq!(received.content_hash, ann.content_hash);
 }
 
-// ─── subscribe_tracked ─────────────────────────────────────────────────────
+// ─── Deduplication tests (using subscribe_with_filter) ─────────────────────
 
 #[tokio::test]
-async fn subscribe_tracked_returns_live_receiver() {
+async fn deduplication_filters_duplicate_messages() {
     let transport = Arc::new(InProcessGossip::new());
     let node = NodeId::random();
-    let room: RoomId = "tracked".into();
+    let room: RoomId = "dedup-test".into();
     let bus = GossipBus::new(node.clone(), Arc::clone(&transport) as _);
-    bus.join_room(&room).await.unwrap();
 
-    let mut tracked = bus.subscribe_tracked(&room);
-    let ann = make_ann(&node, &room, 1);
+    // Create shared deduplication infrastructure.
+    let dedup_filter = Arc::new(RwLock::new(DedupeFilter::with_capacity(100, DEFAULT_MESSAGE_TTL)));
+    let ttl_tracker = Arc::new(RwLock::new(TtlTracker::new(DEFAULT_MESSAGE_TTL)));
+
+    bus.join_room(&room).await.unwrap();
+    let mut rx = bus.subscribe_with_filter(&room, dedup_filter, ttl_tracker);
+
+    // Create an announcement with explicit message_id.
+    let mut ann = make_ann(&node, &room, 1);
+    ann.message_id = Some("unique-msg-1".to_string());
+
+    // Publish the same message twice.
+    bus.publish(&room, &ann).await.unwrap();
     bus.publish(&room, &ann).await.unwrap();
 
-    let received = tokio::time::timeout(Duration::from_secs(2), tracked.recv())
+    // Should only receive it once.
+    let received = tokio::time::timeout(Duration::from_millis(200), rx.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(received.content_hash, ann.content_hash);
+    assert_eq!(received.message_id, Some("unique-msg-1".to_string()));
+
+    // Second receive should timeout (no duplicate delivered).
+    let second = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+    assert!(second.is_err(), "duplicate should have been filtered");
+}
+
+#[tokio::test]
+async fn deduplication_allows_different_messages() {
+    let transport = Arc::new(InProcessGossip::new());
+    let alice = NodeId::random();
+    let bob = NodeId::random();
+    let room: RoomId = "multi-msg-test".into();
+
+    let alice_bus = GossipBus::new(alice.clone(), Arc::clone(&transport) as _);
+    let bob_bus = GossipBus::new(bob.clone(), Arc::clone(&transport) as _);
+
+    // Bob uses deduplication.
+    let dedup_filter = Arc::new(RwLock::new(DedupeFilter::default()));
+    let ttl_tracker = Arc::new(RwLock::new(TtlTracker::new(DEFAULT_MESSAGE_TTL)));
+
+    alice_bus.join_room(&room).await.unwrap();
+    bob_bus.join_room(&room).await.unwrap();
+
+    let mut rx = bob_bus.subscribe_with_filter(&room, dedup_filter, ttl_tracker);
+
+    // Alice and Bob publish different messages.
+    let mut ann1 = make_ann(&alice, &room, 1);
+    ann1.message_id = Some("msg-from-alice".to_string());
+    let mut ann2 = make_ann(&bob, &room, 2);
+    ann2.message_id = Some("msg-from-bob".to_string());
+
+    alice_bus.publish(&room, &ann1).await.unwrap();
+    bob_bus.publish(&room, &ann2).await.unwrap();
+
+    // Should receive both.
+    let mut received_ids = Vec::new();
+    for _ in 0..2 {
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        received_ids.push(received.message_id);
+    }
+    assert!(received_ids.contains(&Some("msg-from-alice".to_string())));
+    assert!(received_ids.contains(&Some("msg-from-bob".to_string())));
+}
+
+#[tokio::test]
+async fn dedup_filter_tracks_cache_size() {
+    let filter = DedupeFilter::with_capacity(100, DEFAULT_MESSAGE_TTL);
+    assert_eq!(filter.cache_size(), 0);
+}
+
+#[tokio::test]
+async fn dedup_filter_clear_works() {
+    let mut filter = DedupeFilter::with_capacity(100, DEFAULT_MESSAGE_TTL);
+    let ann = make_ann(&NodeId::random(), &RoomId::new("test"), 1);
+    filter.check_and_insert(&ann);
+    assert_eq!(filter.cache_size(), 1);
+    filter.clear_cache();
+    assert_eq!(filter.cache_size(), 0);
+}
+
+// ─── TTL tests ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ttl_tracker_tracks_expiration() {
+    let mut tracker = TtlTracker::new(Duration::from_millis(10));
+    tracker.register_default("msg1".to_string());
+
+    assert!(!tracker.is_expired("msg1"));
+
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    assert!(tracker.is_expired("msg1"));
+}
+
+#[tokio::test]
+async fn ttl_tracker_remaining_ttl() {
+    let mut tracker = TtlTracker::new(Duration::from_secs(100));
+    tracker.register("msg1".to_string(), Duration::from_secs(100));
+
+    let remaining = tracker.remaining_ttl("msg1");
+    assert!(remaining.is_some());
+    assert!(remaining.unwrap() > Duration::from_secs(90));
+}
+
+#[tokio::test]
+async fn ttl_tracker_cleanup_returns_expired() {
+    let mut tracker = TtlTracker::new(Duration::from_millis(10));
+    tracker.register_default("msg1".to_string());
+    tracker.register_default("msg2".to_string());
+
+    tokio::time::sleep(Duration::from_millis(15)).await;
+
+    let expired = tracker.cleanup_expired();
+    assert!(expired.contains(&"msg1".to_string()));
+    assert!(tracker.is_empty());
 }

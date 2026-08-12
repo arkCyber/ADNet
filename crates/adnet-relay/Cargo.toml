@@ -20,8 +20,12 @@ tracing     = { workspace = true }
 chrono      = { workspace = true }
 url         = "2"
 hex         = { workspace = true }
+bytes       = "1"
+futures     = "0.3"
 adnet-resilience = { workspace = true }
 adnet-types = { workspace = true }
+adnet-observability = { workspace = true }
+once_cell   = "1"
 
 # Optional billing: when the relay operator enables the `billing` feature,
 # pledge/receipt verification happens locally on this crate without

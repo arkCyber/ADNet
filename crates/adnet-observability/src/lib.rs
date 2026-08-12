@@ -11,11 +11,13 @@
 //! - A [`prometheus::PrometheusExporter`] that renders the registry
 //!   to the standard Prometheus text exposition format
 //!   (`text/plain; version=0.0.4`).
+//! - **Distributed tracing** via OpenTelemetry with support for multiple
+//!   exporters (OTLP gRPC, OTLP HTTP, Jaeger).
 //!
 //! ## Design constraints
 //!
 //! 1. **No external metrics crate**. We deliberately do not depend
-//!    on `prometheus` / `metrics` / `OpenTelemetry` — they are
+//!    on `prometheus` / `metrics` — they are
 //!    large and pull in a runtime/SDK we don't need. The text
 //!    format is small enough to hand-roll and the API surface
 //!    exactly fits ADNet's three primitive types.
@@ -38,6 +40,8 @@
 //!
 //! ## Quick start
 //!
+//! ### Metrics
+//!
 //! ```no_run
 //! use adnet_observability::registry::Registry;
 //! use adnet_observability::prometheus::PrometheusExporter;
@@ -55,6 +59,27 @@
 //! assert!(output.text().contains("adnet_demo_requests_total 3"));
 //! ```
 //!
+//! ### Tracing
+//!
+//! ```no_run
+//! use adnet_observability::tracing::{TracingConfig, init_tracing};
+//!
+//! let config = TracingConfig::new("adnet-node")
+//!     .with_otlp_endpoint("http://localhost:4317")
+//!     .with_sampling_ratio(0.1);
+//!
+//! init_tracing(&config)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! ## Feature Flags
+//!
+//! - `http-server`: Enables the Prometheus/Health HTTP endpoint
+//! - `otlp-grpc`: Enables OTLP gRPC exporter (for Jaeger, Tempo, etc.)
+//! - `otlp-http`: Enables OTLP HTTP/protobuf exporter
+//! - `jaeger`: Enables native Jaeger exporter
+//! - `full`: Enables all exporters
+//!
 //! [`Counter`]: crate::metrics::Counter
 //! [`Gauge`]: crate::metrics::Gauge
 //! [`Histogram`]: crate::metrics::Histogram
@@ -64,6 +89,7 @@
 
 pub mod bridge;
 pub mod dashboard;
+pub mod alerts;
 pub mod health;
 pub mod histogram;
 pub mod labels;
@@ -71,8 +97,14 @@ pub mod metrics;
 pub mod prometheus;
 pub mod registry;
 
+#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+pub mod tracing;
+
 #[cfg(feature = "http-server")]
 pub mod http;
+
+#[cfg(feature = "http-server")]
+pub mod dashboard_http;
 
 /// Convenience re-exports. Most callers want
 /// `use adnet_observability::prelude::*;` and not the full module
@@ -97,11 +129,23 @@ pub mod prelude {
     pub use crate::metrics::{Counter, Gauge, MetricKind};
     pub use crate::prometheus::{PrometheusExporter, PrometheusOutput};
     pub use crate::registry::{GLOBAL, Registry, RegistrySnapshot};
+    #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+    pub use crate::tracing::{
+        attr, add_content_attrs, add_peer_attrs, add_result_attrs, child_span, dht_span,
+        gossip_span, init_tracing, network_span, record_error, shutdown_tracing, storage_span,
+        TracingConfig,
+    };
     #[cfg(feature = "http-server")]
     pub use crate::http::{MetricsServer, MetricsServerConfig, health_handler, metrics_handler};
+    #[cfg(feature = "http-server")]
+    pub use crate::dashboard_http::{
+        DashboardConfig, DashboardState, register_dashboard_routes, serve_dashboard,
+    };
     #[cfg(feature = "http-server")]
     pub use crate::health::{
         CheckResult, HealthCheck, HealthCheckError, HealthStatus,
         clear_health_checks, register_health_check, run_checks,
     };
+    #[cfg(all(feature = "http-server", any(feature = "otlp-grpc", feature = "otlp-http")))]
+    pub use crate::tracing::TracingError;
 }

@@ -20,6 +20,12 @@ pub const NODE_ID_HEX_LEN: usize = NODE_ID_BYTES * 2;
 #[serde(transparent)]
 pub struct NodeId(String);
 
+impl Default for NodeId {
+    fn default() -> Self {
+        Self::random()
+    }
+}
+
 impl NodeId {
     pub const HEX_LEN: usize = NODE_ID_HEX_LEN;
 
@@ -88,6 +94,20 @@ impl NodeId {
 impl std::fmt::Display for NodeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl std::str::FromStr for NodeId {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(s).map_err(|e| e.to_string())
+    }
+}
+
+impl TryFrom<&str> for NodeId {
+    type Error = String;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::from_hex(s).map_err(|e| e.to_string())
     }
 }
 

@@ -64,6 +64,28 @@ pub fn diagnostics_snapshot(data_dir: &Path) -> Result<DiagnosticsSnapshot> {
     })
 }
 
+/// Top-level dispatcher for `adnet diagnostics [--json]`. Offline — does not
+/// require a running node.
+pub fn run_diagnostics(data_dir: &Path, json: bool) -> Result<()> {
+    let snap = diagnostics_snapshot(data_dir)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&snap)?);
+    } else {
+        println!("ADNet Diagnostics");
+        println!("{}", "=".repeat(50));
+        println!("  data_dir    : {}", snap.data_dir);
+        println!("  node_id     : {}", snap.node_id);
+        println!("  short_id    : adnet-{}", snap.node_id_short);
+        println!("  public_key  : {}", snap.public_key);
+        if let Some(url) = &snap.mesh_url {
+            println!("  mesh_url    : {}", url);
+        } else {
+            println!("  mesh_url    : (not configured)");
+        }
+    }
+    Ok(())
+}
+
 /// Read the 32-byte Ed25519 identity blob from
 /// `<data_dir>/identity.key` and parse it as a `NodeId`.
 ///
@@ -71,32 +93,49 @@ pub fn diagnostics_snapshot(data_dir: &Path) -> Result<DiagnosticsSnapshot> {
 /// raw 32 bytes (no length prefix, no hex). Older formats
 /// used a 64-byte hex-encoded public key; we accept that
 /// too for backwards compatibility with operator backups.
+///
+/// Also supports `<data_dir>/node_id` file containing hex string.
 fn load_node_id(data_dir: &Path) -> Result<NodeId> {
-    let path = data_dir.join("identity.key");
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("read identity file at {}", path.display()))?;
+    // Try identity.key first
+    let identity_path = data_dir.join("identity.key");
+    if identity_path.exists() {
+        let bytes = std::fs::read(&identity_path)
+            .with_context(|| format!("read identity file at {}", identity_path.display()))?;
 
-    // Legacy format: 64 ASCII hex chars (optionally
-    // surrounded by whitespace / newlines from operators'
-    // hand-edits). Detect by checking that the contents are
-    // valid hex *and* decode to 32 bytes.
-    if let Ok(s) = std::str::from_utf8(&bytes) {
-        let trimmed: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-            let raw = hex_decode(&trimmed).with_context(|| "decoding legacy hex identity")?;
-            return NodeId::from_bytes(&raw)
-                .with_context(|| "legacy 32-byte identity blob is not a valid NodeId");
+        // Legacy format: 64 ASCII hex chars (optionally
+        // surrounded by whitespace / newlines from operators'
+        // hand-edits). Detect by checking that the contents are
+        // valid hex *and* decode to 32 bytes.
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            let trimmed: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+            if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                let raw = hex_decode(&trimmed).with_context(|| "decoding legacy hex identity")?;
+                return NodeId::from_bytes(&raw)
+                    .with_context(|| "legacy 32-byte identity blob is not a valid NodeId");
+            }
+        }
+
+        if bytes.len() == 32 {
+            return NodeId::from_bytes(&bytes)
+                .with_context(|| "32-byte identity blob is not a valid NodeId");
         }
     }
 
-    if bytes.len() == 32 {
-        NodeId::from_bytes(&bytes).with_context(|| "32-byte identity blob is not a valid NodeId")
-    } else {
-        anyhow::bail!(
-            "identity file has unexpected length {} (expected 32 raw bytes or 64 hex bytes)",
-            bytes.len()
-        )
+    // Fallback to node_id file (hex string without file extension)
+    let node_id_path = data_dir.join("node_id");
+    if node_id_path.exists() {
+        let content = std::fs::read_to_string(&node_id_path)
+            .with_context(|| format!("read node_id file at {}", node_id_path.display()))?;
+        let hex = content.trim();
+        if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return NodeId::from_hex(hex)
+                .context("hex node_id is not a valid NodeId");
+        }
     }
+
+    anyhow::bail!(
+        "no valid identity found: expected 32-byte identity.key, 64-char hex identity.key, or 64-char hex node_id"
+    )
 }
 
 /// Best-effort read of the mesh HTTP bind URL from the JSON
@@ -246,7 +285,8 @@ mod tests {
         assert!(
             msg.contains("unexpected length")
                 || msg.contains("expected 32 bytes")
-                || msg.contains("got 16"),
+                || msg.contains("got 16")
+                || msg.contains("no valid identity found"),
             "got: {msg}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -535,7 +575,11 @@ mod tests {
 
         let err = super::load_node_id(&dir).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unexpected length"));
+        assert!(
+            msg.contains("unexpected length")
+                || msg.contains("no valid identity found"),
+            "got: {msg}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

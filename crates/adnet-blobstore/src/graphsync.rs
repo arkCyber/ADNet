@@ -35,7 +35,8 @@ use adnet_types::graphsync::{
     BlockMessage, BlockStore, GraphSyncError, GraphSyncMessage, GraphSyncResponder, RequestMessage,
     ResponseItem, ResponseMessage, ResponseStatus,
 };
-use adnet_types::{Cid, NodeId};
+use adnet_types::cid::Cid;
+use adnet_types::NodeId;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -308,7 +309,17 @@ impl GraphSyncClient {
         &self,
         id: u64,
     ) -> mpsc::Receiver<Result<(Cid, Vec<u8>), GraphSyncTransportError>> {
-        let (tx, rx) = mpsc::channel(64);
+        // Per-request channel is generously sized so the dispatcher
+        // can buffer the entire DAG without back-pressuring the
+        // transport. The previous default (64) was too tight for
+        // DAGs with thousands of blocks: the dispatcher would
+        // start dropping frames via `try_send` and the request
+        // would only terminate via a per-request timeout, leaving
+        // the caller wondering why half the blocks were missing.
+        // 1024 strikes a balance between memory cost (each entry is
+        // a `Cid` + `Vec<u8>`, so ~64 bytes for typical IPLD nodes
+        // plus the block payload) and back-pressure headroom.
+        let (tx, rx) = mpsc::channel(1024);
         self.pending.lock().insert(id, tx);
         rx
     }
@@ -382,6 +393,17 @@ impl GraphSyncClient {
     }
 
     /// Route an incoming frame to the matching pending request.
+    ///
+    /// Note: this method is **synchronous** (`fn` not `async fn`)
+    /// because callers drive it from a tokio task. We use
+    /// [`tokio::sync::mpsc::Sender::try_send`] for the block path
+    /// (which is best-effort: a full channel means the request has
+    /// already fallen so far behind that we drop the block rather
+    /// than head-of-line-blocking the dispatcher). Status frames
+    /// are always critical — they signal terminal state — so a
+    /// `try_send` failure on the status path is logged but still
+    /// surfaced by dropping the sender so the handle sees EOF on
+    /// its next `recv()`.
     pub fn on_frame(&self, frame: GraphSyncWire) {
         let id = frame.request_id();
         let mut pending = self.pending.lock();
@@ -390,7 +412,16 @@ impl GraphSyncClient {
         };
         match frame {
             GraphSyncWire::Block { cid, data, .. } => {
-                let _ = tx.try_send(Ok((cid, data)));
+                // Best-effort: if the per-request channel is full,
+                // drop the block rather than block the dispatcher.
+                // The request will eventually time out or hit the
+                // terminal Response, so the user sees a clear error.
+                if let Err(e) = tx.try_send(Ok((cid, data))) {
+                    tracing::debug!(
+                        request_id = id,
+                        "graphsync client dropped block: {e:?}"
+                    );
+                }
             }
             GraphSyncWire::Response { status, .. } => {
                 let status = ResponseStatus::from_u32(status).unwrap_or(ResponseStatus::Failed);
@@ -510,6 +541,13 @@ impl GraphSyncServer {
                             tracing::warn!(%peer, "graphsync send failed: {}", e);
                             break;
                         }
+                        // Yield to the runtime so the dispatcher
+                        // task on the peer's side can drain its
+                        // inbound queue. Without this, a server
+                        // task that emits multiple frames can hog
+                        // the worker thread when the peer is a
+                        // mock transport with bounded channels.
+                        tokio::task::yield_now().await;
                     }
                     inflight.lock().remove(&id);
                 });
@@ -555,16 +593,25 @@ pub trait GraphSyncTransportBridge: Send + Sync {
 /// In-process transport for tests / single-process demos. Each peer
 /// has a `mpsc::Sender<Vec<u8>>` registered; `send_to` writes to it
 /// so the peer's listener receives the frame.
+///
+/// We use `parking_lot::RwLock` rather than `tokio::sync::RwLock`
+/// for the peer map so the transport's internal book-keeping never
+/// participates in the runtime's task-scheduling — every send /
+/// register / unregister is a single acquire/release with no `await`
+/// point. Mixing `await` points into the inner book-keeping is a
+/// recipe for the kind of join-handle starvation that the
+/// `concurrent_requests_to_same_peer_stay_isolated` test catches
+/// (see that test's commentary for the full failure mode).
 pub struct MockGraphSyncTransport {
     local_node_id: NodeId,
-    peers: tokio::sync::RwLock<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>,
+    peers: parking_lot::RwLock<HashMap<NodeId, mpsc::Sender<Vec<u8>>>>,
 }
 
 impl MockGraphSyncTransport {
     pub fn new(local_node_id: NodeId) -> Self {
         Self {
             local_node_id,
-            peers: tokio::sync::RwLock::new(HashMap::new()),
+            peers: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 }
@@ -573,7 +620,7 @@ impl MockGraphSyncTransport {
 impl GraphSyncTransportBridge for MockGraphSyncTransport {
     async fn send_to(&self, peer: &NodeId, data: Vec<u8>) -> Result<(), GraphSyncTransportError> {
         let tx = {
-            let peers = self.peers.read().await;
+            let peers = self.peers.read();
             peers
                 .get(peer)
                 .cloned()
@@ -589,11 +636,11 @@ impl GraphSyncTransportBridge for MockGraphSyncTransport {
     }
 
     async fn register_inbound_sender(&self, peer: NodeId, tx: mpsc::Sender<Vec<u8>>) {
-        self.peers.write().await.insert(peer, tx);
+        self.peers.write().insert(peer, tx);
     }
 
     async fn unregister_peer(&self, peer: &NodeId) {
-        self.peers.write().await.remove(peer);
+        self.peers.write().remove(peer);
     }
 }
 

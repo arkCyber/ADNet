@@ -19,6 +19,126 @@ use tokio::sync::mpsc;
 
 use crate::frame::Frame;
 
+/// Connection type indicating how the connection was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionType {
+    /// Direct connection (e.g., public IP, LAN).
+    Direct,
+    /// Connection via relay.
+    Relay,
+    /// Loopback connection.
+    Loopback,
+    /// Mixed: some paths are direct, some are relay.
+    Mixed,
+    /// Connection is closed.
+    Closed,
+}
+
+impl ConnectionType {
+    /// Check if this connection is relay-only.
+    pub fn is_relay_only(&self) -> bool {
+        matches!(self, ConnectionType::Relay)
+    }
+
+    /// Check if this connection has a direct path.
+    pub fn has_direct(&self) -> bool {
+        matches!(self, ConnectionType::Direct | ConnectionType::Mixed | ConnectionType::Loopback)
+    }
+
+    /// Check if this connection uses a relay.
+    pub fn has_relay(&self) -> bool {
+        matches!(self, ConnectionType::Relay | ConnectionType::Mixed)
+    }
+
+    /// Check if this connection is closed.
+    pub fn is_closed(&self) -> bool {
+        matches!(self, ConnectionType::Closed)
+    }
+}
+
+impl ConnectionType {
+    /// Get a string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConnectionType::Direct => "direct",
+            ConnectionType::Relay => "relay",
+            ConnectionType::Loopback => "loopback",
+            ConnectionType::Mixed => "mixed",
+            ConnectionType::Closed => "closed",
+        }
+    }
+}
+
+/// Stream priority for outgoing data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamPriority {
+    /// Priority level (higher = more urgent).
+    pub level: i32,
+    /// Whether this is a broadcast (no bandwidth reservation).
+    pub broadcast: bool,
+}
+
+impl StreamPriority {
+    /// High priority constant (Quinn priority = 1).
+    pub const High: Self = Self {
+        level: 1,
+        broadcast: false,
+    };
+
+    /// Low priority constant (Quinn priority = -1).
+    pub const Low: Self = Self {
+        level: -1,
+        broadcast: false,
+    };
+
+    /// Normal priority constant (Quinn priority = 0, default).
+    pub const Normal: Self = Self {
+        level: 0,
+        broadcast: false,
+    };
+
+    /// Critical priority constant (Quinn priority = 2).
+    pub const Critical: Self = Self {
+        level: 2,
+        broadcast: false,
+    };
+
+    /// High priority for urgent data.
+    pub fn high() -> Self {
+        Self::High
+    }
+
+    /// Low priority for background data.
+    pub fn low() -> Self {
+        Self::Low
+    }
+
+    /// Normal priority (default).
+    pub fn normal() -> Self {
+        Self::Normal
+    }
+
+    /// Critical priority for highest urgency.
+    pub fn critical() -> Self {
+        Self::Critical
+    }
+
+    /// Convert to Quinn priority value.
+    pub fn as_quinn_i32(self) -> i32 {
+        if self.broadcast {
+            -1 // Lowest priority for broadcast
+        } else {
+            self.level
+        }
+    }
+}
+
+impl Default for StreamPriority {
+    fn default() -> Self {
+        Self::normal()
+    }
+}
+
 /// Errors that can come out of any transport backend.
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -64,6 +184,23 @@ pub trait OutgoingConnection: Send + Sync + Debug + 'static {
 
     /// Close the underlying connection gracefully.
     async fn close(self: Box<Self>) -> TransportResult<()>;
+
+    /// Get the connection type.
+    async fn connection_type(&self) -> ConnectionType {
+        ConnectionType::Direct
+    }
+
+    /// Set the priority for outgoing data.
+    async fn set_priority(&mut self, _priority: StreamPriority) -> TransportResult<()> {
+        Ok(())
+    }
+
+    /// Get the maximum datagram size for this connection.
+    ///
+    /// Returns `None` if datagrams are not supported.
+    async fn max_datagram_size(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Backend contract.
@@ -124,6 +261,34 @@ pub trait Transport: Send + Sync + 'static {
     async fn take_incoming_receiver(
         &self,
     ) -> Option<mpsc::Receiver<(NodeId, Box<dyn OutgoingConnection>)>> {
+        None
+    }
+
+    /// Perform a health check on the transport.
+    fn health_check(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Resolve a peer's socket address from the transport's internal registry.
+    ///
+    /// Returns `None` if the peer is not registered.
+    async fn resolve_peer(&self, node: &NodeId) -> Option<std::net::SocketAddr> {
+        let _ = node;
+        None
+    }
+
+    /// Watch for endpoint address changes.
+    ///
+    /// Returns a stream that yields endpoint addresses when they change.
+    /// The iroh endpoint exposes `watch_addr()` which returns a `Watcher`;
+    /// we wrap it in a boxed `futures::Stream`. Non-iroh backends return `None`.
+    async fn watch_endpoint_addr(
+        &self,
+    ) -> Option<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = crate::endpoint::EndpointAddr> + Send + Sync + 'static>,
+        >,
+    > {
         None
     }
 }

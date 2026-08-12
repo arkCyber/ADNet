@@ -1,0 +1,38 @@
+# Fuzzing configuration for cargo-fuzz
+
+[target.x86_64-unknown-linux-gnu]
+sanitizer = "address"
+
+[target.aarch64-unknown-linux-gnu]
+sanitizer = "address"
+
+[target.x86_64-apple-darwin]
+sanitizer = "address"
+
+[target.aarch64-apple-darwin]
+sanitizer = "address"
+
+# Corpus directories
+[[bin]]
+name = "parse_announcement"
+path = "fuzz_targets/parse_announcement.rs"
+
+[[bin]]
+name = "parse_cid"
+path = "fuzz_targets/parse_cid.rs"
+
+[[bin]]
+name = "parse_node_id"
+path = "fuzz_targets/parse_node_id.rs"
+
+[[bin]]
+name = "parse_dht_message"
+path = "fuzz_targets/parse_dht_message.rs"
+
+[[bin]]
+name = "parse_graphsync"
+path = "fuzz_targets/parse_graphsync.rs"
+
+[[bin]]
+name = "parse_bitswap"
+path = "fuzz_targets/parse_bitswap.rs"

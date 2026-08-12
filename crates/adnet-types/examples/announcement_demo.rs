@@ -30,6 +30,8 @@ fn main() {
         source_url: Some("https://example.com/README.md".into()),
         ticket: Some(ticket.clone()),
         timestamp: Utc::now(),
+        message_id: None,
+        ttl_secs: None,
         signer: None,
         signature: None,
     };

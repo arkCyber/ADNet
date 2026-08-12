@@ -1,0 +1,52 @@
+[package]
+name        = "adnet-webtransport"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "WebTransport (HTTP/3) transport for ADNet. Browser-friendly and symmetric native↔native."
+
+[lints]
+workspace = true
+
+[dependencies]
+adnet-types    = { workspace = true }
+adnet-identity = { workspace = true }
+adnet-webrtc   = { workspace = true, features = ["signaling"] }
+
+tokio          = { workspace = true }
+futures        = { workspace = true }
+async-trait    = { workspace = true }
+thiserror      = { workspace = true }
+anyhow         = { workspace = true }
+tracing        = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+bytes          = { workspace = true }
+hex            = { workspace = true }
+blake3         = { workspace = true }
+rand           = { workspace = true }
+parking_lot    = { workspace = true }
+once_cell      = { workspace = true }
+time           = { version = "0.3", features = ["std"] }
+hmac           = "0.12"
+sha2           = { workspace = true }
+base64         = { workspace = true }
+
+# WebTransport over HTTP/3 — pure Rust, builds on rustls + quinn.
+wtransport = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio    = { workspace = true }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+
+[features]
+# Default: zero-cost. Only types + helpers that don't pull in
+# `wtransport`. Useful for downstream code (CLI, FFI) that wants to
+# hold a `WebTransportConfig` without paying the cold-build cost.
+default = []
+
+# Full runtime — pulls in wtransport + the noise handshake (via the
+# `signaling` feature on `adnet-webrtc`).
+webtransport = ["dep:wtransport"]

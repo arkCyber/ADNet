@@ -675,6 +675,8 @@ mod tests {
             timestamp: Utc::now() + ChronoDuration::hours(MAX_CLOCK_SKEW_HOURS + 1),
             signer: None,
             signature: None,
+            message_id: None,
+            ttl_secs: None,
         };
         let err = PeerSource::from_announcement_checked(&ann).unwrap_err();
         assert!(
@@ -704,6 +706,8 @@ mod tests {
             timestamp: Utc::now() + ChronoDuration::hours(MAX_CLOCK_SKEW_HOURS + 1),
             signer: None,
             signature: None,
+            message_id: None,
+            ttl_secs: None,
         };
         let src = PeerSource::from_announcement(&ann);
         // Bad record still constructable; validate() catches it.
@@ -881,6 +885,8 @@ mod tests {
             timestamp: Utc::now(),
             signer: None,
             signature: None,
+            message_id: None,
+            ttl_secs: None,
         };
         let src = PeerSource::from_announcement_checked(&ann).unwrap();
         assert!(src.validate().is_ok());

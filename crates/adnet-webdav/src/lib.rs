@@ -18,6 +18,23 @@
 //! | `MOVE`    | rename (server-side)| SR-12, SR-15, SR-17 |
 //! | `COPY`    | duplicate file      | SR-12, SR-15 |
 //!
+//! ## PROPFIND Properties
+//!
+//! Supports standard DAV: properties:
+//! - `resourcetype` (collection for dirs, empty for files)
+//! - `getcontentlength` (file size)
+//! - `getcontenttype` (MIME type, guessed from extension)
+//! - `displayname` (basename)
+//! - `getetag` (content hash)
+//! - `supportedlock` (no locking support)
+//!
+//! ## Depth Header
+//!
+//! PROPFIND supports `Depth` header per RFC 4918:
+//! - `0`: only the resource itself
+//! - `1`: the resource and immediate children
+//! - `infinity`: the resource and all descendants (default)
+//!
 //! `LOCK` / `UNLOCK` are deliberately **out of scope** for v0.1;
 //! a family NAS does not need WEBDAV `LOCK` semantics — the OS
 //! uses its own file-locking, and WebDAV's `LOCK` is famously
@@ -64,3 +81,4 @@ pub use acl::{AclDecision, AclMiddleware, CapabilityResolver, ResolvedCapability
 pub use server::{WebdavConfig, WebdavServer, WebdavServerHandle};
 pub use token::{CapabilityToken, TokenError, TokenVerifier};
 pub use handlers::{HandlerState, HttpError};
+pub use props::Depth;

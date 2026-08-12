@@ -1,0 +1,61 @@
+[package]
+name = "adnet-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Criterion-based benchmark suite for ADNet"
+publish = false
+
+[[bin]]
+name = "adnet-bench"
+path = "src/main.rs"
+
+[[bench]]
+name = "bao_large"
+path = "benches/bao_large.rs"
+harness = false
+
+[dependencies]
+# Workspace dependencies
+adnet-dht = { workspace = true }
+adnet-gossip = { workspace = true }
+# `adnet-transport` is gated behind a bench-only feature so it does
+# not leak into `adnet-blobstore`'s dependency closure (which would
+# form a workspace-level cycle: transport → blobstore → bench →
+# transport via the bench feature). Default builds of the
+# benchmark binaries don't need a transport stack — they hit the
+# pure storage / hash / crypto paths.
+adnet-transport = { workspace = true, optional = true }
+adnet-blobstore = { workspace = true }
+adnet-identity = { workspace = true }
+adnet-types = { workspace = true }
+
+# Benchmark framework
+criterion = "0.5"
+tokio = { workspace = true, features = ["full"] }
+tempfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = "1.0"
+num_cpus = "1.16"
+rand = { workspace = true }
+chrono = { workspace = true }
+
+# Crypto (for benchmarks)
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+argon2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+hex = { workspace = true }
+
+[features]
+# Pulls in the QUIC transport so the network bench targets can run.
+# Off by default so the default `cargo build -p adnet-bench` does
+# not form a workspace-level cycle through adnet-transport.
+transport = ["dep:adnet-transport"]

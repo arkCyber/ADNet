@@ -36,7 +36,10 @@ use adnet_transport::{Frame, SharedTransport};
 /// typically `Arc::new(move |bytes| sender.handle_response(...))`
 /// or a thin closure that decodes the wire frame and forwards to
 /// `DhtNetworkSender::handle_response`.
-pub type DynResponseSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+///
+/// Re-exported from `adnet_dht::DynResponseSink` so callers don't
+/// have to pull `adnet_dht` directly to name the type.
+pub type DynResponseSink = adnet_dht::DynResponseSink;
 
 /// Maximum number of bytes the bridge will read from a single
 /// DHT response stream. Matches the wire layer's `MAX_VALUE_SIZE`.
@@ -127,10 +130,24 @@ impl TransportBridge for DynTransportBridge {
         // strip the outer prefix and hand back the inner prefix
         // as the "payload" (i.e. a 4-byte integer), corrupting
         // every DHT message.
+        // `OutgoingConnection::send` already prepends a length
+        // prefix via `FrameCodec::encode`. The bridge must NOT
+        // prepend its own — doing so yields
+        // `outer-len || inner-len || payload` on the wire, and
+        // the receiver's `FrameCodec::decode_stream` would only
+        // strip the outer prefix and hand back the inner prefix
+        // as the "payload" (i.e. a 4-byte integer), corrupting
+        // every DHT message.
         tokio::time::timeout(Duration::from_secs(5), conn.send(Frame(msg)))
             .await
             .map_err(|_| QueryError::Timeout)?
             .map_err(|e| QueryError::Network(e.to_string()))?;
+
+        // If a response sink is installed, read a single
+        // response frame and hand it to the sink. The sink is
+        // responsible for parsing + request-id matching. We
+        // bound the read so a malicious peer cannot fill our
+        // memory.
 
         // If a response sink is installed, read a single
         // response frame and hand it to the sink. The sink is

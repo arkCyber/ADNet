@@ -1,0 +1,24 @@
+[package]
+name        = "adnet-tui"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "ADNet terminal UI primitives — ASCII boxes, progress bars, colors, i18n"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Serialization (for i18n JSON)
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Lazy initialization
+once_cell = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

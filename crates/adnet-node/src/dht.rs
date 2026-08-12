@@ -20,12 +20,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use adnet_dht::{DhtKey, DhtNode, ProviderRecord as DhtProviderRecord};
+use adnet_dht::{
+    DhtKey, DhtNode, DhtNetworkSender, ProviderRecord as DhtProviderRecord, TransportDhtSender,
+};
 use adnet_namespace::{IpnsError, IpnPublisher, IpnResolver};
 use adnet_types::{ContentHash, NodeId};
 
 #[cfg(feature = "pubsub")]
 use adnet_namespace::PubsubSubscription;
+
+use crate::dht_bridge::BridgeSenderAdapter;
 
 /// Public alias for the IPNS-over-PubSub subscription handle. Only
 /// available when the `pubsub` feature of `adnet-namespace` is on
@@ -243,6 +247,64 @@ impl DhtHandle {
         }
     }
 
+    /// Wire a transport bridge into the DHT so that `provide()`
+    /// and `find_providers()` actually go over the wire.
+    ///
+    /// This is the audit-fix entry point: before this method exists,
+    /// the DHT was a placeholder — `DhtHandle::new` constructed a
+    /// `DhtNode` whose `sender` slot stayed `None`, so
+    /// `announce_content` only stored locally and `find_providers`
+    /// short-circuited to "no sender wired; local-only".
+    ///
+    /// After this call, `provide()` fans `AddProvider` out to the K
+    /// closest peers, and `find_providers()` issues `GetProviders`
+    /// against those peers when the local store misses. The caller
+    /// is responsible for installing any response sink on the bridge
+    /// before passing it in (via `DynTransportBridge::set_response_sink`).
+    ///
+    /// Returns the shared sender so callers (tests, RPC layers) can
+    /// drive requests directly when needed.
+    pub fn set_transport(
+        &self,
+        bridge: Arc<dyn adnet_dht::transport::TransportBridge>,
+    ) -> Arc<DhtNetworkSender> {
+        // Build a `TransportDhtSender` adapter over the bridge for
+        // the legacy `send_raw` path used by `announce_provider`.
+        let adapter: Arc<dyn TransportDhtSender> =
+            Arc::new(crate::dht_bridge::BridgeSenderAdapter::new(bridge));
+
+        // Build the network sender and install it on the inner node.
+        let routing_table = self.node.routing_table();
+        let sender = Arc::new(DhtNetworkSender::new(
+            self.local_id.clone(),
+            adapter,
+            routing_table,
+        ));
+
+        self.node.attach_sender(Some(sender.clone()));
+
+        // Mirror the configured external address to the inner node
+        // so the wire-protocol broadcast path carries it.
+        if let Some(addr) = self.external_addr.read().clone() {
+            self.node.set_local_addr(addr);
+        }
+
+        sender
+    }
+
+    /// Detach the network sender (revert to local-only `find_providers`).
+    ///
+    /// Useful for tests that want to verify the local-only path
+    /// even after wiring a transport.
+    pub fn detach_transport(&self) {
+        self.node.attach_sender(None);
+    }
+
+    /// Borrow the (optional) network sender wired to this handle.
+    pub fn sender(&self) -> Option<Arc<DhtNetworkSender>> {
+        self.node.sender()
+    }
+
     /// Borrow the underlying DHT node.
     pub fn inner(&self) -> Arc<DhtNode> {
         Arc::clone(&self.node)
@@ -253,14 +315,24 @@ impl DhtHandle {
         &self.local_id
     }
 
-    /// Set the multiaddr the local node is reachable at.
-    ///
-    /// Subsequent `provide()` calls will surface this address in
-    /// `ProviderRecord::provider_addr` so peers can dial us back.
-    /// Pass `None` to clear.
-    pub fn set_external_addr(&self, addr: Option<String>) {
-        *self.external_addr.write() = addr;
+/// Set the multiaddr the local node is reachable at.
+///
+/// Subsequent `provide()` calls will surface this address in
+/// `ProviderRecord::provider_addr` so peers can dial us back.
+/// Pass `None` to clear.
+pub fn set_external_addr(&self, addr: Option<String>) {
+    *self.external_addr.write() = addr.clone();
+    // Mirror `Some` to the inner `DhtNode` so the wire-protocol
+    // broadcast path (which calls `node.announce_content` directly)
+    // carries the same address. We intentionally skip the `None`
+    // branch — clearing the handle's external addr must not
+    // retroactively rewrite records already on the wire (covered by
+    // the dedicated `dht_handle_clear_external_addr_preserves_records`
+    // test).
+    if let Some(a) = addr {
+        self.node.set_local_addr(a);
     }
+}
 
     /// Get the currently-configured external address, if any.
     pub fn external_addr(&self) -> Option<String> {
@@ -360,6 +432,32 @@ impl DhtHandle {
             external_addr: self.external_addr.read().clone(),
             metrics: *self.metrics.read(),
         }
+    }
+
+    /// Get a value from the DHT store.
+    pub fn get_value(&self, key: &DhtKey) -> Option<adnet_dht::record::DhtValue> {
+        self.node.get_value(key)
+    }
+
+    /// Put a value into the DHT store.
+    pub fn put_value(&self, key: &DhtKey, value: adnet_dht::record::DhtValue) {
+        self.node.put_value(key, value);
+    }
+
+    /// Get all known peers from the routing table.
+    pub async fn get_peers(&self) -> Vec<NodeId> {
+        self.node.get_peers().await
+    }
+
+    /// Run an iterative FIND_NODE query for the peers closest to
+    /// `target`. Returns the query's full result so callers can
+    /// inspect the candidate set, elapsed time, and timed-out
+    /// flag.
+    pub async fn find_node(
+        &self,
+        key: &DhtKey,
+    ) -> adnet_dht::query::QueryResult {
+        self.node.find_node(key).await
     }
 }
 
@@ -477,7 +575,7 @@ impl IpnHandle {
     }
 
     /// Publish a new value under `name`.
-    pub fn publish(
+    pub async fn publish(
         &self,
         name: &str,
         value: String,
@@ -487,17 +585,18 @@ impl IpnHandle {
             .publisher
             .as_ref()
             .ok_or_else(|| IpnsError::NotAuthorized)?;
-        publisher.publish(name, value, ttl).map(|_| ())
+        publisher.publish(name, value, ttl).await?;
+        Ok(())
     }
 
     /// Publish a new value under `name` using the default TTL from
     /// [`IpnConfig::record_ttl_secs`].
-    pub fn publish_default(
+    pub async fn publish_default(
         &self,
         name: &str,
         value: String,
     ) -> Result<(), IpnsError> {
-        self.publish(name, value, self.default_record_ttl)
+        self.publish(name, value, self.default_record_ttl).await
     }
 
     /// Drop expired entries from the resolver cache.
@@ -665,6 +764,7 @@ mod tests {
         let handle = IpnHandle::new(IpnConfig::default(), NodeId::random());
         let err = handle
             .publish("name", "value".to_string(), Duration::from_secs(60))
+            .await
             .unwrap_err();
         assert!(matches!(err, IpnsError::NotAuthorized));
     }
@@ -684,6 +784,7 @@ mod tests {
         let hash = hash_of(b"ipns-content");
         handle
             .publish_default(&name, hash.as_hex().to_string())
+            .await
             .expect("publish_default");
 
         let record = publisher.get_local(&name).expect("record present");
@@ -709,6 +810,7 @@ mod tests {
                 hash.as_hex().to_string(),
                 Duration::from_secs(300),
             )
+            .await
             .expect("publish");
 
         // Pre-seed the resolver cache with the same record so resolve works.

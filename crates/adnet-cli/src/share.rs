@@ -58,8 +58,14 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use adnet_blobstore::{BlobReader, BlobStore};
+#[cfg(feature = "iroh")]
 use adnet_share::{
     PutBytesFn, ReceiveOptions, RemoteFetchOptions, ShareTicket, WalkOptions,
+    walk_import,
+};
+#[cfg(not(feature = "iroh"))]
+use adnet_share::{
+    PutBytesFn, ReceiveOptions, ShareTicket, WalkOptions,
     walk_import,
 };
 use adnet_types::ContentHash;
@@ -185,7 +191,7 @@ async fn run_send(
     // iroh path doesn't need this because the manifest comes
     // back as a regular `get(manifest_hash)` round-trip, but the
     // local path needs the bytes on disk.
-    let manifest_bytes = match postcard::to_allocvec(&manifest) {
+    let manifest_bytes: Vec<u8> = match postcard::to_stdvec(&manifest) {
         Ok(b) => b,
         Err(e) => {
             warn!(
@@ -416,7 +422,7 @@ async fn run_receive_local_only(
         .map_err(|e| anyhow!("receive: {e}"))?;
 
     // Persist manifest for future resume.
-    let manifest_bytes = postcard::to_allocvec(&manifest)
+    let manifest_bytes: Vec<u8> = postcard::to_stdvec(&manifest)
         .map_err(|e| anyhow!("serialize manifest: {e}"))?;
     std::fs::write(adnet_share::manifest_path(&incoming_root), &manifest_bytes)
         .map_err(|e| anyhow!("write manifest.bin: {e}"))?;
@@ -560,7 +566,7 @@ async fn run_local_receive(
         .map_err(|e| anyhow!("receive: {e}"))?;
 
     // Persist manifest for future resume.
-    let manifest_bytes = postcard::to_allocvec(manifest)
+    let manifest_bytes = postcard::to_vec(manifest)
         .map_err(|e| anyhow!("serialize manifest: {e}"))?;
     std::fs::write(adnet_share::manifest_path(&incoming_root), &manifest_bytes)
         .map_err(|e| anyhow!("write manifest.bin: {e}"))?;

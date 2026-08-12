@@ -607,6 +607,7 @@ mod tests {
                 "/ipfs/QmDhtPath".into(),
                 std::time::Duration::from_secs(60),
             )
+            .await
             .expect("sign+publish");
         transport.publish(&record).await.expect("publish to DHT");
 

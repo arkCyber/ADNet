@@ -11,14 +11,16 @@ workspace = true
 
 [dependencies]
 adnet-types     = { workspace = true }
-adnet-blobstore = { workspace = true }
+adnet-blobstore = { workspace = true, features = ["bitswap"] }
 adnet-gossip    = { workspace = true }
 adnet-ipc       = { workspace = true }
 adnet-mesh      = { workspace = true }
 adnet-transport = { workspace = true }
 adnet-relay      = { workspace = true }
 adnet-workspace  = { workspace = true }
+adnet-observability = { workspace = true }
 adnet-chatstore  = { workspace = true, optional = true }
+adnet-news       = { workspace = true, optional = true }
 tokio            = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
@@ -29,6 +31,8 @@ tracing         = { workspace = true }
 chrono          = { workspace = true }
 reqwest         = { workspace = true }
 anyhow          = { workspace = true }
+parking_lot    = { workspace = true }
+once_cell       = { workspace = true }
 
 # iroh-backed runtime. When the `iroh` feature is on, callers can pass
 # an `iroh::Endpoint` (already constructed and bound) to
@@ -41,16 +45,27 @@ iroh-blobs      = { version = "=0.103.0", optional = true, default-features = fa
 iroh-gossip     = { version = "=0.101.0", optional = true, default-features = false, features = ["net"] }
 iroh-docs       = { version = "=0.101.0", optional = true, default-features = false, features = ["fs-store"] }
 
-# Opt-in identity/token dependencies. They pull in secp256k1, blake3,
-# AES-GCM and the entire pledge/receipt state machine, which most
-# production deployments don't need. Build with `cargo build -p
-# adnet-node --features billing` to opt in.
+# Opt-in identity/token dependencies.
 adnet-identity = { workspace = true, optional = true }
 adnet-token    = { workspace = true, optional = true }
+
+# DHT + IPNS layer.
+adnet-dht       = { workspace = true, optional = true }
+adnet-namespace = { workspace = true, optional = true }
 
 [features]
 # Default: pure forward-proxy node, no crypto deps for billing.
 default = []
+# Enable Bitswap content exchange (requires adnet-blobstore/bitswap).
+bitswap = ["adnet-blobstore/bitswap"]
+# Enable GraphSync DAG-sync content exchange (IPFS-style GraphSync on
+# top of the QUIC bridge). Pulls in the node-side graphsync module
+# (ALPN handshake + QUIC bridge + dispatcher service + `NodeBuilder
+# ::with_graphsync` wiring) and the `adnet-blobstore` graphsync
+# support that backs it. Activating this feature gates every
+# graphsync-related symbol under `cfg(feature = "graphsync")` so a
+# default build does not pay the cost.
+graphsync = ["adnet-blobstore/graphsync"]
 # Internal feature forwarded to `iroh-docs` so the
 # `iroh_runtime::spawn` persistent-mode branch is compiled. Not
 # intended to be enabled directly — opt into `iroh` instead.
@@ -79,6 +94,19 @@ iroh = [
     "adnet-chatstore/iroh",
     "fs-store",
 ]
+# Opt in to the DHT + IPNS layer. Pulls in `adnet-dht` and
+# `adnet-namespace` and wires `DhtHandle` + `IpnHandle` into
+# `Node`. Enables the CLI's `adnet dht {provide,find,peers,stats}`
+# and `adnet ipfs name {publish,resolve}` commands.
+dht = [
+    "dep:adnet-dht",
+    "dep:adnet-namespace",
+    "adnet-namespace/dht",
+]
+# Opt in to the news/announcements pub/sub surface. Pulls in
+# `adnet-news`; consumers (e.g. the FFI `news` feature) can
+# forward this directly.
+news = ["dep:adnet-news"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -203,6 +203,21 @@ impl IpnTransport for MultiTransport {
         Ok(s)
     }
 
+    async fn resolve_now(&self, name: &str) -> Result<IpnRecord, IpnsError> {
+        // Try each transport in parallel, return the first successful result.
+        let mut last_err: Option<IpnsError> = None;
+        for t in &self.inner.transports {
+            match t.resolve_now(name).await {
+                Ok(record) => return Ok(record),
+                Err(e) => {
+                    tracing::trace!(backend = t.name(), error = %e, "resolve_now failed");
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or(IpnsError::NotFound))
+    }
+
     async fn health(&self) -> Result<TransportHealth, IpnsError> {
         // Aggregate: if any backend is healthy, we are healthy.
         let mut worst = TransportHealth::Down;
@@ -224,17 +239,56 @@ impl IpnTransport for MultiTransport {
     }
 }
 
+/// Lightweight *shape* checks for [`IpnRecord::signature`] that
+/// can be made without knowing the publisher's public key.
+///
+/// The real cryptographic verification lives in
+/// [`crate::ipns::IpnRecord::verify_signature`] — that one
+/// requires the caller to know the publisher's pubkey, which
+/// this transport-agnostic layer does not. So we instead run
+/// the lightweight sanity checks that catch the obvious
+/// "shape-but-no-substance" attacks a malicious gossip peer
+/// might attempt:
+///
+/// 1. The signature is the right length (64 bytes).
+/// 2. The signature is not all zero (placeholder).
+/// 3. At least one byte of the signature is non-zero past
+///    position 16 — anyone who produces 64 bytes by repeating
+///    a small header would still fail this heuristic.
+///
+/// Anyone wanting real cryptographic guarantees must call
+/// `IpnRecord::verify_signature` with the publisher's pubkey.
+fn signature_shape_acceptable(signature: &[u8]) -> bool {
+    if signature.len() != 64 {
+        return false;
+    }
+    if signature.iter().all(|b| *b == 0) {
+        return false;
+    }
+    // Reject signatures whose upper 32 bytes are uniformly
+    // zero — RFC-8032-style Ed25519 signatures are
+    // indistinguishable from random in every byte, so a
+    // legitimate signature never exhibits this pattern.
+    if signature[32..].iter().all(|b| *b == 0) {
+        return false;
+    }
+    true
+}
+
 trait SigExt {
     fn verify_signature_field(&self) -> Result<bool, IpnsError>;
 }
 
 impl SigExt for IpnRecord {
     fn verify_signature_field(&self) -> Result<bool, IpnsError> {
-        // The actual ed25519 verify requires the publisher's pubkey;
-        // here we only validate the shape (64 bytes). The
-        // higher-level resolver uses `IpnRecord::verify_signature`
-        // with the real Verifier once it has the key.
-        Ok(self.signature.len() == 64)
+        // The actual ed25519 verify requires the publisher's
+        // pubkey; here we only validate the *shape* of the
+        // signature. The higher-level resolver uses
+        // [`IpnRecord::verify_signature`] with the real
+        // Verifier once it has the key. See the function
+        // above for the heuristics that qualify a signature
+        // as "non-placeholder".
+        Ok(signature_shape_acceptable(&self.signature))
     }
 }
 
@@ -385,9 +439,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_signature_field_accepts_64_bytes() {
+    fn verify_signature_field_accepts_64_byte_varied_signature() {
         let mut r = rec();
-        r.signature = vec![0u8; 64];
+        // 64 bytes with the upper half non-zero satisfies the
+        // shape check (length, no all-zero, no high-half-zero).
+        let mut sig = vec![1u8; 64];
+        sig[0..16].fill(0);
+        r.signature = sig;
         assert!(r.verify_signature_field().unwrap());
     }
 
@@ -396,5 +454,53 @@ mod tests {
         let mut r = rec();
         r.signature = vec![0u8; 32];
         assert!(!r.verify_signature_field().unwrap());
+    }
+
+    #[test]
+    fn verify_signature_field_rejects_all_zero() {
+        let mut r = rec();
+        r.signature = vec![0u8; 64];
+        assert!(!r.verify_signature_field().unwrap());
+    }
+
+    #[test]
+    fn verify_signature_field_rejects_high_half_zero() {
+        // A signature whose upper 32 bytes are all zero is
+        // indistinguishable from a placeholder — Ed25519
+        // signatures never expose that pattern.
+        let mut r = rec();
+        let mut sig = vec![1u8; 64];
+        sig[32..].fill(0);
+        r.signature = sig;
+        assert!(!r.verify_signature_field().unwrap());
+    }
+
+    /// Subscribe filters records whose signature shape is
+    /// unacceptable (e.g. all-zero placeholder).
+    #[tokio::test]
+    async fn subscribe_drops_placeholder_signed_records() {
+        use crate::transport::IpnTransport;
+        use futures::stream::StreamExt;
+
+        struct Yielding {
+            rec: IpnRecord,
+        }
+        #[async_trait]
+        impl IpnTransport for Yielding {
+            fn name(&self) -> &'static str { "yielding" }
+            async fn publish(&self, _r: &IpnRecord) -> Result<(), IpnsError> { Ok(()) }
+            async fn subscribe(&self, _n: &str) -> Result<IpnRecordStream, IpnsError> {
+                let r = self.rec.clone();
+                Ok(Box::pin(futures::stream::once(async move { Ok(r) })))
+            }
+        }
+
+        let mut bad = rec();
+        bad.signature = vec![0u8; 64]; // all-zero placeholder
+
+        let mt = MultiTransport::new(vec![Arc::new(Yielding { rec: bad })]);
+        let mut s = mt.subscribe("any").await.unwrap();
+        let got = s.next().await;
+        assert!(got.is_none(), "all-zero records must be filtered");
     }
 }
