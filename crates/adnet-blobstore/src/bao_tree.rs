@@ -42,6 +42,24 @@
 
 use adnet_types::ContentHash;
 
+/// Combine two 32-byte siblings into their parent hash.
+///
+/// This is the inner-loop operation of [`BaoTree::build_tree_structure`].
+/// It used to go through hex (decode each sibling → concat → re-hash →
+/// re-encode hex) which was the single biggest performance hit on large
+/// blobs. The hex trip adds no semantics — it just unwraps a
+/// `ContentHash` to its raw bytes, which [`ContentHash::as_bytes_array`]
+/// now gives us without allocation.
+#[inline]
+fn combine_hash_pair(a: &ContentHash, b: &ContentHash) -> ContentHash {
+    let a_bytes = a.as_bytes_array();
+    let b_bytes = b.as_bytes_array();
+    let mut combined = [0u8; 64];
+    combined[..32].copy_from_slice(&a_bytes);
+    combined[32..].copy_from_slice(&b_bytes);
+    ContentHash::from_bytes(&combined)
+}
+
 /// Bao tree leaf node — a single chunk with its verification hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaoLeaf {
@@ -231,11 +249,7 @@ impl BaoTree {
 
             for pair in current_level.chunks(2) {
                 if pair.len() == 2 {
-                    let bytes0 = hex::decode(pair[0].as_hex()).expect("valid hex");
-                    let bytes1 = hex::decode(pair[1].as_hex()).expect("valid hex");
-                    let combined = [bytes0.as_slice(), bytes1.as_slice()].concat();
-                    let parent_hash = ContentHash::from_bytes(&combined);
-                    next_level.push(parent_hash);
+                    next_level.push(combine_hash_pair(&pair[0], &pair[1]));
                 } else {
                     next_level.push(pair[0].clone());
                 }
@@ -296,11 +310,7 @@ impl BaoTree {
 
             for pair in current_level.chunks(2) {
                 if pair.len() == 2 {
-                    let bytes0 = hex::decode(pair[0].as_hex()).expect("valid hex");
-                    let bytes1 = hex::decode(pair[1].as_hex()).expect("valid hex");
-                    let combined = [bytes0.as_slice(), bytes1.as_slice()].concat();
-                    let parent_hash = ContentHash::from_bytes(&combined);
-                    next_level.push(parent_hash);
+                    next_level.push(combine_hash_pair(&pair[0], &pair[1]));
                 } else {
                     next_level.push(pair[0].clone());
                 }
@@ -662,20 +672,21 @@ impl MerklePath {
                 continue;
             }
 
-            let bytes_current = hex::decode(current.as_hex())
-                .map_err(|e| BaoTreeError::ProofVerificationFailed(e.to_string()))?;
-            let bytes_sibling = hex::decode(sibling.hash.as_hex())
-                .map_err(|e| BaoTreeError::ProofVerificationFailed(e.to_string()))?;
-
-            let combined = if sibling.is_left {
-                // Sibling is left, current is right
-                [bytes_sibling.as_slice(), bytes_current.as_slice()].concat()
+            // Bao hashes (left || right). When `sibling.is_left` the
+            // canonical input is (sibling || current); otherwise it's
+            // (current || sibling). Skip the hex decode/hex encode round
+            // trip the original implementation paid on every hash combine.
+            let s = sibling.hash.as_bytes_array();
+            let c = current.as_bytes_array();
+            let mut buf = [0u8; 64];
+            if sibling.is_left {
+                buf[..32].copy_from_slice(&s);
+                buf[32..].copy_from_slice(&c);
             } else {
-                // Current is left, sibling is right
-                [bytes_current.as_slice(), bytes_sibling.as_slice()].concat()
-            };
-
-            current = ContentHash::from_bytes(&combined);
+                buf[..32].copy_from_slice(&c);
+                buf[32..].copy_from_slice(&s);
+            }
+            current = ContentHash::from_bytes(&buf);
         }
 
         Ok(current)

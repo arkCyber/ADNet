@@ -53,8 +53,7 @@ impl ContentHash {
     }
 
     /// Decode the hex representation into a 32-byte vector. Callers
-    /// that need a borrow should use [`Self::as_bytes_array`] which
-    /// copies into a stack buffer.
+    /// that need a stack buffer should use [`Self::as_bytes_array`].
     pub fn as_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(32);
         let bytes = self.0.as_bytes();
@@ -62,6 +61,32 @@ impl ContentHash {
             let hi = Self::hex_nibble(chunk[0]);
             let lo = Self::hex_nibble(chunk[1]);
             out.push((hi << 4) | lo);
+        }
+        out
+    }
+
+    /// Stack-allocated 32-byte digest view.
+    ///
+    /// This is the zero-allocation sibling of [`Self::as_bytes`]. Hot paths
+    /// that need raw bytes for hashing (BaoTree parent-node construction,
+    /// Merkle proof verification, signature comparisons) should prefer this
+    /// over [`Self::as_bytes`] to avoid the 32-byte heap allocation on every
+    /// call. Elision in C/Rust makes this competitive with hand-rolled
+    /// inline hex decoding.
+    ///
+    /// # Panics
+    ///
+    /// The hex string is validated by the public constructors
+    /// ([`Self::from_bytes`], [`Self::from_reader`], [`Self::from_hex`]) so
+    /// this conversion is total; an invariant violation is unreachable.
+    pub fn as_bytes_array(&self) -> [u8; 32] {
+        let bytes = self.0.as_bytes();
+        debug_assert_eq!(bytes.len(), Self::HEX_LEN);
+        let mut out = [0u8; 32];
+        for (i, chunk) in bytes.chunks_exact(2).enumerate() {
+            let hi = Self::hex_nibble(chunk[0]);
+            let lo = Self::hex_nibble(chunk[1]);
+            out[i] = (hi << 4) | lo;
         }
         out
     }
@@ -184,5 +209,49 @@ mod tests {
             Some(CdnContentKind::VideoModel)
         );
         assert_eq!(CdnContentKind::from_str_loose("wat"), None);
+    }
+
+    /// `as_bytes_array()` and `as_bytes()` must agree on every input.
+    /// This is the regression contract for the zero-allocation path.
+    #[test]
+    fn as_bytes_array_matches_as_bytes() {
+        for payload in [
+            b"".as_slice(),
+            b"a",
+            b"adnet",
+            &vec![0u8; 1024],
+            &vec![0xFFu8; 4096],
+        ] {
+            let h = ContentHash::from_bytes(payload);
+            let vec = h.as_bytes();
+            let arr = h.as_bytes_array();
+            assert_eq!(vec.len(), 32, "hex must decode to 32 raw bytes");
+            assert_eq!(arr.len(), 32);
+            assert_eq!(vec.as_slice(), &arr[..], "array view must match vec");
+        }
+    }
+
+    /// `as_bytes_array()` must match the bytes `blake3::hash` would emit
+    /// for the original payload. This is the wire-format contract that
+    /// every downstream consumer (BaoTree, signatures, iroh proxy) relies
+    /// on.
+    #[test]
+    fn as_bytes_array_matches_blake3_native() {
+        let payload = b"the quick brown fox jumps over the lazy dog";
+        let h = ContentHash::from_bytes(payload);
+        let arr = h.as_bytes_array();
+        let binding = blake3::hash(payload);
+        let expected = binding.as_bytes();
+        assert_eq!(arr, *expected);
+    }
+
+    /// Round-trip: hex → array → hex is the identity (cheap sanity check
+    /// that the nibble decoder handles every nibble cleanly).
+    #[test]
+    fn as_bytes_array_roundtrips_to_hex() {
+        let h = ContentHash::from_bytes(b"hello world");
+        let arr = h.as_bytes_array();
+        let encoded: String = arr.iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(encoded, h.as_hex());
     }
 }
