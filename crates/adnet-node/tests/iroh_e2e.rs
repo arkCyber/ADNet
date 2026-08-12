@@ -180,6 +180,8 @@ async fn gossip_announcement_propagates_between_nodes() -> anyhow::Result<()> {
         source_url: None,
         ticket: None,
         timestamp: Utc::now(),
+        message_id: None,
+        ttl_secs: None,
         signer: None,
         signature: None,
     };
