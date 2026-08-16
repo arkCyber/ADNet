@@ -40,3 +40,9 @@ Exodus@src-backup/
 /test-mail.sh
 /test-mail-full.sh
 /.tmp_*.txt
+
+# Local DNS-server scratch / sibling project — not part of the published workspace
+/exodus-dns-server/
+
+# Runtime artefacts produced by moderation tests / local runs
+/crates/a3chat-app/<memory>

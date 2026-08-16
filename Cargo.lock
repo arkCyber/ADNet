@@ -942,22 +942,17 @@ dependencies = [
 name = "a3net-nat-traversal"
 version = "0.1.0"
 dependencies = [
- "a3net-observability",
  "anyhow",
  "async-trait",
  "chrono",
  "futures",
  "getrandom 0.2.17",
- "hmac",
- "md-5",
  "once_cell",
- "proptest",
  "quick-xml 0.37.5",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha1",
  "socket2 0.5.10",
  "tempfile",
  "thiserror 1.0.69",
@@ -6469,7 +6464,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -10472,8 +10466,6 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
- "rustls 0.23.43",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -10481,7 +10473,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls 0.26.4",
  "tokio-util",
  "tower",
  "tower-http",
@@ -10491,7 +10482,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
