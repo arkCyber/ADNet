@@ -1,0 +1,52 @@
+[package]
+name        = "a3chat-rpc"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "a3chat JSON-RPC 2.0 server: HTTP /rpc, SSE /rpc/stream for live push, WebSocket fallback. Wraps a3chat-app's A3chatApp dispatcher and NotificationBus."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal A3Net deps
+a3chat-core                = { workspace = true }
+a3chat-app                 = { workspace = true }
+a3net-types                = { workspace = true }
+a3net-error                = { workspace = true }
+
+# Async runtime
+tokio                      = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "signal"] }
+async-trait                = { workspace = true }
+futures                    = { workspace = true }
+async-stream               = { workspace = true }
+tokio-stream               = { workspace = true }
+
+# Error handling
+thiserror                  = { workspace = true }
+
+# Serialization
+serde                      = { workspace = true }
+serde_json                 = { workspace = true }
+
+# HTTP / SSE
+axum                       = { version = "0.7", features = ["macros"] }
+tower                      = "0.5"
+tower-http                 = { version = "0.6", features = ["cors", "trace"] }
+hyper                      = "1"
+
+# Encoding
+uuid                       = { workspace = true }
+chrono                     = { workspace = true }
+
+# Logging
+tracing                    = { workspace = true }
+parking_lot                = { workspace = true }
+
+[dev-dependencies]
+tokio                      = { workspace = true, features = ["full", "macros"] }
+tempfile                   = { workspace = true }
+reqwest                    = { workspace = true, features = ["json", "stream"] }
+eventsource-stream         = "0.2"
+futures                    = { workspace = true }

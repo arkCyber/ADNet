@@ -1,0 +1,38 @@
+[package]
+name        = "a3chat-core"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "a3chat core domain types, JSON Schema, and zero-dependency RpcClient trait. Shared by Rust server, Flutter mobile client, and Tauri desktop client."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal A3Net deps
+a3net-types = { workspace = true }
+a3net-error = { workspace = true }
+
+# Serialization
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+
+# Async runtime
+tokio       = { workspace = true, features = ["sync"] }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror   = { workspace = true }
+
+# Time / IDs
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+
+# Crypto primitives (only blake3 for hashing, no actual encryption here)
+blake3      = { workspace = true }
+hex         = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+tokio       = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

@@ -1,0 +1,64 @@
+[package]
+name        = "a3chat-cli"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "a3chat command-line client — DO-178C-style audit, doctor, and operator tooling for the a3chat distributed communication stack."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "a3chat"
+path = "src/main.rs"
+
+[lib]
+name = "a3chat_cli"
+path = "src/lib.rs"
+
+[dependencies]
+# Internal a3chat stack
+a3chat-core            = { workspace = true }
+a3chat-app             = { workspace = true }
+a3chat-rpc             = { workspace = true }
+
+# Async runtime
+tokio                  = { workspace = true, features = ["full"] }
+async-trait            = { workspace = true }
+futures                = { workspace = true }
+
+# Error handling
+thiserror              = { workspace = true }
+anyhow                 = { workspace = true }
+
+# Serialization
+serde                  = { workspace = true, features = ["derive"] }
+serde_json             = { workspace = true }
+toml                   = "0.8"
+
+# Time / hashing
+chrono                 = { workspace = true }
+sha2                   = { workspace = true }
+hex                    = { workspace = true }
+
+# CLI parsing + completion
+clap                   = { workspace = true, features = ["env"] }
+clap_complete          = "4"
+
+# HTTP client (for talking to a3chat-rpc daemon)
+reqwest                = { workspace = true }
+base64                 = { workspace = true }
+uuid                   = { workspace = true }
+eventsource-stream     = "0.2"
+
+# Logging / observability
+tracing                = { workspace = true }
+tracing-subscriber     = { workspace = true }
+
+[dev-dependencies]
+tempfile               = "3"
+tokio                  = { workspace = true, features = ["full", "macros", "test-util"] }
+serial_test            = "3"
+eventsource-stream     = "0.2"
+futures                = { workspace = true }

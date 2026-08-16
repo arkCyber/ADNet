@@ -1,0 +1,45 @@
+[package]
+name        = "a3chat-tauri"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "a3chat Tauri desktop shell — HTTP client over loopback to a3chat-rpc. P0 ships a thin JSON-RPC client wrapper; P1 will plug in the actual Tauri React UI."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal A3Net deps
+a3chat-core                = { workspace = true }
+a3chat-rpc                 = { workspace = true }
+a3chat-app                 = { workspace = true }
+
+# Async runtime
+tokio                      = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros"] }
+async-trait                = { workspace = true }
+futures                    = { workspace = true }
+
+# HTTP client
+reqwest                    = { workspace = true, features = ["json", "stream"] }
+
+# Serialization
+serde                      = { workspace = true }
+serde_json                 = { workspace = true }
+
+# Time / IDs
+chrono                     = { workspace = true }
+uuid                       = { workspace = true }
+
+# Tauri (gated — `cargo test` for the client/commands pure-logic
+# path skips this; the `desktop` feature pulls Tauri in so the
+# two-window builder compiles).
+tauri                      = { version = "2", features = [], optional = true }
+
+[features]
+default   = []
+desktop   = ["dep:tauri"]
+
+[dev-dependencies]
+tokio                      = { workspace = true, features = ["full", "macros"] }
+tempfile                   = { workspace = true }

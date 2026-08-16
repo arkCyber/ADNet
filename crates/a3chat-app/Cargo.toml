@@ -1,0 +1,58 @@
+[package]
+name        = "a3chat-app"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "a3chat business services: ChatService, ContactService, GroupService, SyncService, PresenceService. Sits between a3chat-rpc (RPC layer) and a3chat-core (domain types), backed by a3net-chatstore for persistence and a3chat-crypto for E2E."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal A3Net deps
+a3chat-core                = { workspace = true }
+a3chat-crypto              = { workspace = true }
+a3net-types                = { workspace = true }
+a3net-chatstore            = { workspace = true }
+a3net-roster               = { workspace = true }
+a3net-userstore            = { workspace = true }
+a3net-blobstore            = { workspace = true }
+a3net-moderation           = { workspace = true }
+a3net-reputation           = { workspace = true }
+
+# Async runtime
+tokio                      = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+async-trait                = { workspace = true }
+futures                    = { workspace = true }
+async-stream               = { workspace = true }
+
+# Error handling
+thiserror                  = { workspace = true }
+
+# Serialization
+serde                      = { workspace = true }
+serde_json                 = { workspace = true }
+hex                        = { workspace = true }
+
+# Time / IDs
+chrono                     = { workspace = true }
+uuid                       = { workspace = true }
+
+# Crypto / hashing
+blake3                     = { workspace = true }
+
+# Persistence
+rusqlite                   = { version = "0.32", features = ["bundled"] }
+
+# Encoding for QR / wire payloads
+base64                     = { workspace = true }
+dashmap                    = { workspace = true }
+parking_lot                = { workspace = true }
+
+# Compression for sync payloads
+zstd                       = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tempfile                   = { workspace = true }
+tokio                      = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

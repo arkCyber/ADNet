@@ -1,0 +1,50 @@
+[package]
+name        = "a3chat-crypto"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "a3chat end-to-end encryption: Noise XX handshake, ChaCha20-Poly1305 AEAD session, Sender Keys for groups, Argon2id KEK for cross-device bundle backup."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal A3Net deps
+a3chat-core         = { workspace = true }
+a3net-crypto        = { workspace = true }
+a3net-error         = { workspace = true }
+a3net-types         = { workspace = true }
+
+# Async runtime
+tokio               = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros"] }
+async-trait         = { workspace = true }
+futures             = { workspace = true }
+
+# Error handling
+thiserror           = { workspace = true }
+
+# Serialization
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+hex                 = { workspace = true }
+base64              = { workspace = true }
+bincode             = { workspace = true }
+
+# Crypto primitives
+chacha20poly1305    = { workspace = true }
+snow                = { workspace = true }
+rand                = { workspace = true }
+sha2                = { workspace = true }
+blake3              = { workspace = true }
+argon2              = { workspace = true }
+zeroize             = { workspace = true }
+hkdf                = "0.12"
+
+# Time
+chrono              = { workspace = true }
+
+[dev-dependencies]
+tempfile            = { workspace = true }
+proptest            = { workspace = true }
+tokio               = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
