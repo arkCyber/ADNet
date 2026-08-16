@@ -201,6 +201,41 @@ impl ChatStorage {
         Ok(arc.lock_owned().await)
     }
 
+    /// Run a synchronous SQLite closure on the per-user connection
+    /// pool. The closure receives an `OwnedMutexGuard<Connection>` so
+    /// it can call `transaction()`/`execute()` (`&mut self`
+    /// methods) without the boilerplate of `spawn_blocking` +
+    /// `blocking_lock_owned` + `map_err` repeated at every site.
+    ///
+    /// A panic inside the closure is bubbled up as
+    /// `AppError::Internal` so a panic in one RPC cannot take down
+    /// the dispatcher task.
+    ///
+    /// NOTE: registration-only — the call sites are migrated
+    /// gradually in follow-up patches (H-4b) to keep the diff
+    /// reviewable.
+    #[allow(dead_code)]
+    async fn with_connection<F, R>(
+        &self,
+        user_id: &UserId,
+        f: F,
+    ) -> AppResult<R>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> AppResult<R>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        let conn_arc = self.connection(user_id).await?;
+        let result = tokio::task::spawn_blocking(move || {
+            let mut guard = conn_arc.blocking_lock_owned();
+            f(&mut guard)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))?;
+        result
+    }
+
     /// Save a `MessageEnvelope` from a client. Returns the persisted
     /// `ChatMessage` (with E2E-encrypted body if `enable_e2e` and the
     /// message is not a system announcement).
