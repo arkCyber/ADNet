@@ -166,7 +166,7 @@ impl A3chatApp {
         // [`A3chatApp::with_reputation`] to wire one in.
         let peerfeedback = PeerFeedbackService::new(storage.clone());
         Ok(Self {
-            chat: ChatService::new(storage.clone(), bus.clone()),
+            chat: ChatService::new(storage.clone(), bus.clone()).with_moderation(moderation.clone()),
             contact: ContactService::new(bus.clone()),
             group: GroupService::new(bus.clone()),
             sync: SyncService::new(storage.clone()),
@@ -228,7 +228,7 @@ impl A3chatApp {
         // the returned `A3chatApp`.
         let peerfeedback = PeerFeedbackService::new(storage.clone());
         Self {
-            chat: ChatService::new(storage.clone(), bus.clone()),
+            chat: ChatService::new(storage.clone(), bus.clone()).with_moderation(moderation.clone()),
             contact: ContactService::new(bus.clone()),
             group: GroupService::new(bus.clone()),
             sync: SyncService::new(storage.clone()),

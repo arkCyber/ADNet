@@ -11,6 +11,7 @@ use a3chat_core::message::{ChatMessage, MessageBody, MessageEnvelope};
 use a3chat_core::rpc::A3chatRpcMethod;
 
 use crate::error::{AppError, AppResult};
+use crate::moderation_service::ModerationService;
 use crate::notification_bus::NotificationBus;
 use crate::storage::{ChatStorage, StoredMessage};
 
@@ -19,11 +20,25 @@ use crate::storage::{ChatStorage, StoredMessage};
 pub struct ChatService {
     storage: ChatStorage,
     bus: NotificationBus,
+    moderation: Option<ModerationService>,
 }
 
 impl ChatService {
     pub fn new(storage: ChatStorage, bus: NotificationBus) -> Self {
-        Self { storage, bus }
+        Self {
+            storage,
+            bus,
+            moderation: None,
+        }
+    }
+
+    /// Attach a moderation policy. When attached, every
+    /// `send_message` runs the body through the policy before the
+    /// SQLite write — a denied message is rejected with
+    /// `AppError::Forbidden` and never reaches the bus.
+    pub fn with_moderation(mut self, moderation: ModerationService) -> Self {
+        self.moderation = Some(moderation);
+        self
     }
 
     pub fn storage(&self) -> &ChatStorage {
@@ -58,6 +73,25 @@ impl ChatService {
         envelope: &MessageEnvelope,
     ) -> AppResult<StoredMessage> {
         envelope.validate()?;
+        // Content moderation gate. Only run the policy on
+        // plaintext bodies (`MessageBody::Plain`), since encrypted
+        // bodies are opaque to the moderator (the receiving device
+        // runs the same gate after decryption). System messages
+        // (`MessageType::System`) bypass the gate so server-emitted
+        // moderation cues always reach the user.
+        if let Some(m) = &self.moderation {
+            if !matches!(envelope.message_type, a3chat_core::message::MessageType::System) {
+                if let MessageBody::Plain { content } = &envelope.body {
+                    let decision = m.check_content(owner, content);
+                    if !decision.is_allowed() {
+                        return Err(AppError::Forbidden(format!(
+                            "moderation denied message: {}",
+                            decision.reason
+                        )));
+                    }
+                }
+            }
+        }
         // `save_outbound` is atomic: message insert + conversation
         // meta upsert + sender read-receipt all happen in one
         // SQLite transaction, so a crash mid-flight can no longer
