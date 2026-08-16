@@ -271,7 +271,8 @@ pub async fn dispatch(
             let r = svc
                 .open_conversation(owner, &id)
                 .await
-                .map_err(A3chatError::from)?;
+                .map_err(A3chatError::from)?
+                .ok_or_else(|| A3chatError::NotFound(format!("conversation {id} not found")))?;
             serde_json::to_value(r).map_err(A3chatError::from)
         }
         A3chatRpcMethod::CHAT_MESSAGE_SEND => {

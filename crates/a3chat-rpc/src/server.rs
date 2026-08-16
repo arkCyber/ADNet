@@ -35,8 +35,7 @@ use axum::{Json, Router};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
-use tracing::Instrument;
+use tower_http::trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer};
 
 use a3chat_app::A3chatApp;
 use a3chat_core::event::A3chatEvent;
@@ -165,7 +164,16 @@ impl RpcServer {
             metrics: self.metrics.clone(),
         };
         let cors = self.build_cors_layer();
-        let trace = TraceLayer::new(make_span)
+        // `TraceLayer::new_for_http` wires the default
+        // `MakeSpan`/`OnRequest`/`OnResponse` classifier; we
+        // override `make_span_with` (an `FnMut(&Request<B>) ->
+        // Span` automatically implements `MakeSpan`) so each
+        // request lives inside a span whose `request_id` field
+        // is the `X-A3Chat-Request-Id` header (when present) —
+        // operators stitch client-side and server-side logs by
+        // joining on this field.
+        let trace = TraceLayer::new_for_http()
+            .make_span_with(make_span_with_body)
             .on_request(DefaultOnRequest::new().level(tracing::Level::INFO))
             .on_response(DefaultOnResponse::new().level(tracing::Level::INFO));
 
@@ -196,7 +204,9 @@ impl RpcServer {
         } else {
             let mut layer = CorsLayer::new().allow_methods(Any);
             for o in &self.config.allowed_origins {
-                layer = layer.allow_origin(o.parse().expect("invalid origin"));
+                let header: axum::http::HeaderValue =
+                    o.parse().expect("invalid origin: must be URI scheme://host[:port]");
+                layer = layer.allow_origin(header);
             }
             layer
         }
@@ -263,40 +273,25 @@ fn request_id_from_body(body: &serde_json::Value) -> String {
     }
 }
 
-fn make_span(req: &axum::http::Request<axum::body::Body>) -> tracing::Span {
-    // Pull the request_id out of headers if the client supplied
-    // it — operators can stitch together client-side logs with
-    // server-side logs by joining on this field.
+/// Generic-body span factory used by `TraceLayer::make_span_with`
+/// — it must accept any `Request<B>` because axum composes the
+/// body type lazily. The closed form reads only the headers
+/// (the body isn't streamed until a downstream extractor pulls
+/// it) so `B` is treated opaquely.
+fn make_span_with_body<B>(req: &axum::http::Request<B>) -> tracing::Span {
     let request_id = req
         .headers()
         .get(HEADER_REQUEST_ID)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let method = req.method();
+    let uri = req.uri();
     if request_id.is_empty() {
-        tracing::info_span!(
-            "rpc",
-            request_id = %request_id_from_body_path(req),
-            method = %req.method(),
-            uri = %req.uri(),
-        )
+        tracing::info_span!("rpc", request_id = "<missing>", %method, %uri)
     } else {
-        tracing::info_span!(
-            "rpc",
-            request_id = %request_id,
-            method = %req.method(),
-            uri = %req.uri(),
-        )
+        tracing::info_span!("rpc", %request_id, %method, %uri)
     }
-}
-
-fn request_id_from_body_path(req: &axum::http::Request<axum::body::Body>) -> String {
-    // Body is unavailable on the make-span pass (it has not been
-    // extracted yet). We fall back to "<missing>" and let the
-    // post-extraction handler fill the span via the field set
-    // helper if it has one. For the on-request event we only
-    // need the header-derived id, so this rarely matters.
-    "<missing>".to_string()
 }
 
 async fn rpc_handler(
@@ -304,7 +299,6 @@ async fn rpc_handler(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let started = std::time::Instant::now();
 
     // ── Authentication ────────────────────────────────────────────
     let owner = match owner_from_headers(&headers) {
@@ -316,7 +310,8 @@ async fn rpc_handler(
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
                 Json(RpcResponse::failure(id, e)),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -332,100 +327,122 @@ async fn rpc_handler(
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 Json(RpcResponse::failure(id, err)),
-            );
+            )
+                .into_response();
         }
     };
 
-    // ── Dispatch ──────────────────────────────────────────────────
+// ── Dispatch ──────────────────────────────────────────────────
     let span = tracing::info_span!(
         "rpc_call",
         request_id = %request_id.as_deref().unwrap_or(""),
         wire_id = %wire_id,
         owner = %owner.as_str(),
     );
-    async {
-        match parsed {
-            ParsedEnvelope::Single(req) => {
-                let method_name = req.method.clone();
-                let resp = dispatch_one(
-                    &state,
-                    &owner,
-                    req,
-                    request_id.as_deref(),
-                )
-                .await;
-                // ── Metrics ──────────────────────────────────────
-                let elapsed_us = started.elapsed().as_micros() as u64;
-                if let Some(err) = &resp.error {
-                    let outcome = if err.is_transient() {
-                        RpcOutcome::Transient
-                    } else {
-                        RpcOutcome::Error
-                    };
-                    state.metrics.record(&method_name, outcome, elapsed_us);
+    let span_enter = span;
+    let _enter = span_enter.enter();
+    match parsed {
+        ParsedEnvelope::Single(req) => {
+            let method_name = req.method.clone();
+            let started_single = std::time::Instant::now();
+            let resp = dispatch_one(
+                &state,
+                &owner,
+                req,
+                request_id.as_deref(),
+            )
+            .await;
+            // ── Metrics ──────────────────────────────────────
+            let elapsed_us = started_single.elapsed().as_micros() as u64;
+            if let Some(err) = &resp.error {
+                let outcome = if err.is_transient() {
+                    RpcOutcome::Transient
                 } else {
-                    state.metrics.record(&method_name, RpcOutcome::Success, elapsed_us);
-                }
-                let status = if resp.error.is_some() {
-                    axum::http::StatusCode::BAD_REQUEST
-                } else {
-                    axum::http::StatusCode::OK
+                    RpcOutcome::Error
                 };
-                let mut response = (status, Json(resp)).into_response();
-                if let Some(rid) = &request_id {
-                    if let Ok(v) = axum::http::HeaderValue::from_str(rid) {
-                        response.headers_mut().insert(HEADER_REQUEST_ID_RESP, v);
-                    }
-                }
-                response
+                state.metrics.record(&method_name, outcome, elapsed_us);
+            } else {
+                state.metrics.record(&method_name, RpcOutcome::Success, elapsed_us);
             }
-            ParsedEnvelope::Batch(reqs) => {
-                // Per JSON-RPC 2.0 §6 the server replies with an
-                // array of per-call responses; if every element was
-                // a notification the reply is empty (`204 No
-                // Content`). Either way, route each through the
-                // same accounting layer as a single call.
-                let mut responses = Vec::with_capacity(reqs.len());
-                let mut elapsed_total_us: u64 = 0;
-                for req in reqs {
-                    let method_name = req.method.clone();
-                    let start = std::time::Instant::now();
-                    let resp = dispatch_one(&state, &owner, req, request_id.as_deref()).await;
-                    let elapsed = start.elapsed().as_micros() as u64;
-                    elapsed_total_us = elapsed_total_us.saturating_add(elapsed);
-                    if let Some(err) = &resp.error {
-                        let outcome = if err.is_transient() {
-                            RpcOutcome::Transient
-                        } else {
-                            RpcOutcome::Error
-                        };
-                        state.metrics.record(&method_name, outcome, elapsed);
-                    } else if !resp.id.is_null() {
-                        // Counts as a "reply" — notifications
-                        // don't have a result/error so don't count
-                        // toward the success/error bucket.
-                        state.metrics.record(&method_name, RpcOutcome::Success, elapsed);
-                    }
-                    responses.push(resp);
-                }
-                let replyable: Vec<_> = responses.iter().filter(|r| !r.id.is_null()).collect();
-                if replyable.is_empty() {
-                    // Every element was a notification → 204.
-                    (axum::http::StatusCode::NO_CONTENT, Json(serde_json::json!({}))).into_response()
-                } else if responses.iter().all(|r| r.error.is_some()) {
-                    // Any-error batch: surface as 400 even
-                    // though some elements succeeded (cf.
-                    // `full_stack` tests).
-                    (axum::http::StatusCode::BAD_REQUEST, Json(responses)).into_response()
-                } else {
-                    let _ = elapsed_total_us; // already accounted per-call
-                    (axum::http::StatusCode::OK, Json(responses)).into_response()
+            let status = if resp.error.is_some() {
+                axum::http::StatusCode::BAD_REQUEST
+            } else {
+                axum::http::StatusCode::OK
+            };
+            let mut response = (status, Json(resp)).into_response();
+            if let Some(rid) = &request_id {
+                if let Ok(v) = axum::http::HeaderValue::from_str(rid) {
+                    response.headers_mut().insert(HEADER_REQUEST_ID_RESP, v);
                 }
             }
+            response
+        }
+        ParsedEnvelope::Batch(reqs) => {
+            // Per JSON-RPC 2.0 §6 the server replies with an
+            // array of per-call responses; if every element was
+            // a notification the reply is empty (`204 No
+            // Content`). Either way, route each through the
+            // same accounting layer as a single call.
+            use serde_json::Value as JsonValue;
+            // Two-pass: first compute replies so we know
+            // whether to emit 200/400/204. Holding the
+            // accounting in one place keeps the
+            // notification-vs-reply distinction visible at
+            // audit time.
+            struct AccRow {
+                method: String,
+                response: RpcResponse,
+                elapsed_us: u64,
+                outcome: RpcOutcome,
+            }
+            let mut rows: Vec<AccRow> = Vec::with_capacity(reqs.len());
+            for req in reqs {
+                let method_name = req.method.clone();
+                let start = std::time::Instant::now();
+                let resp = dispatch_one(&state, &owner, req, request_id.as_deref()).await;
+                let elapsed = start.elapsed().as_micros() as u64;
+                let outcome = match &resp.error {
+                    Some(err) if err.is_transient() => RpcOutcome::Transient,
+                    Some(_) => RpcOutcome::Error,
+                    None if !resp.id.is_null() => RpcOutcome::Success,
+                    None => RpcOutcome::Success, // notification: still counts as a "free" call
+                };
+                rows.push(AccRow {
+                    method: method_name,
+                    response: resp,
+                    elapsed_us: elapsed,
+                    outcome,
+                });
+            }
+            // Apply metrics outside the async/spawn tree —
+            // we don't want a long batch to stall other
+            // requests on the lock.
+            for r in &rows {
+                state.metrics.record(&r.method, r.outcome, r.elapsed_us);
+            }
+            let replyable: Vec<bool> = rows
+                .iter()
+                .map(|r| !r.response.id.is_null())
+                .collect();
+            let bodies: Vec<RpcResponse> = rows.into_iter().map(|r| r.response).collect();
+            let all_errors = bodies.iter().all(|r| r.error.is_some());
+            let mut response = if replyable.iter().all(|&x| !x) {
+                // Every element was a notification → 204.
+                (axum::http::StatusCode::NO_CONTENT, Json(JsonValue::Null)).into_response()
+            } else if all_errors {
+                // All replies are errors → batch-level 400.
+                (axum::http::StatusCode::BAD_REQUEST, Json(bodies)).into_response()
+            } else {
+                (axum::http::StatusCode::OK, Json(bodies)).into_response()
+            };
+            if let Some(rid) = &request_id {
+                if let Ok(v) = axum::http::HeaderValue::from_str(rid) {
+                    response.headers_mut().insert(HEADER_REQUEST_ID_RESP, v);
+                }
+            }
+            response
         }
     }
-    .instrument(span)
-    .await
 }
 
 /// One-call dispatch helper used by both the single-call and

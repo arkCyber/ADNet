@@ -165,7 +165,18 @@ impl axum::response::IntoResponse for RpcError {
                 "data": self.data,
             }
         });
-        (axum::http::StatusCode::BAD_REQUEST, axum::Json(body)).into_response()
+        let status = if self.code == ERR_A3CHAT_NOT_AUTHENTICATED
+            || self.code == ERR_A3CHAT_PERMISSION_DENIED
+        {
+            axum::http::StatusCode::UNAUTHORIZED
+        } else if self.code == ERR_METHOD_NOT_FOUND || self.code == ERR_A3CHAT_NOT_FOUND {
+            axum::http::StatusCode::NOT_FOUND
+        } else if self.code == ERR_INVALID_REQUEST || self.code == ERR_INVALID_PARAMS {
+            axum::http::StatusCode::BAD_REQUEST
+        } else {
+            axum::http::StatusCode::BAD_REQUEST
+        };
+        (status, axum::Json(body)).into_response()
     }
 }
 

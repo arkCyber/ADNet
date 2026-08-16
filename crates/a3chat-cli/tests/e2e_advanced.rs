@@ -159,28 +159,30 @@ async fn live_audit_chat_conversation_list_is_implemented() {
     handle.stop().await;
 }
 
-/// Live audit: probe a known stub method
-/// (`a3chat.media.upload_init`). The app dispatcher has no handler
-/// for it, so the daemon responds with an `Internal` error
-/// ("A3chatApp does not handle method …"). Operators should treat
-/// this as a stub marker.
+/// Live audit: probe a non-existent method to verify the daemon
+/// rejects unknown names cleanly (rather than silently treating
+/// them as stubs that return `Ok(Null)`). This guards the
+/// "no silent fallthrough" invariant — any method in our public
+/// surface must be either explicitly implemented or rejected with
+/// a method-not-found error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_audit_stub_method_is_unhandled() {
+async fn live_audit_unknown_method_is_rejected() {
     let (_dir, handle, cfg) = boot_daemon().await;
     let c = build_client(&cfg);
     let r = c
         .call_raw(
-            A3chatRpcMethod::MEDIA_UPLOAD_INIT,
+            // `a3chat.does.not.exist` is *not* in
+            // `A3chatRpcMethod::ALL`, so the dispatcher returns
+            // a method-not-found JSON-RPC error envelope.
+            "a3chat.does.not.exist",
             serde_json::json!({}),
         )
         .await;
     match r {
-        Err(a3chat_cli::error::CliError::Rpc(e)) => {
-            // The dispatcher rejects unknown prefixes with an
-            // `Internal` error; we accept any Rpc error here.
-            assert!(!e.is_retryable(), "stub error must be non-retryable");
+        Err(a3chat_cli::error::CliError::Rpc(_)) => {
+            // Expected: method-not-found error.
         }
-        other => panic!("expected Rpc error for stub, got {other:?}"),
+        other => panic!("expected Rpc method-not-found error, got {other:?}"),
     }
     handle.stop().await;
 }

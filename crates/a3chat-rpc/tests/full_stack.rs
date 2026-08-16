@@ -115,8 +115,8 @@ async fn rpc_call_without_owner_header_returns_400() {
         .expect("post");
     assert_eq!(
         resp.status(),
-        reqwest::StatusCode::BAD_REQUEST,
-        "missing owner must yield 400"
+        reqwest::StatusCode::UNAUTHORIZED,
+        "missing owner must yield 401"
     );
 }
 
