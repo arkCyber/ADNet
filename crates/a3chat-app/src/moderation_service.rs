@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use a3chat_core::error::A3chatError;
 use a3chat_core::id::UserId;
 
-use crate::error::{app_to_domain, AppError, AppResult};
+use crate::error::{AppError, AppResult};
 
 /// RPC method-name constants owned by this module.
 pub const METHODS: &[&str] = &[

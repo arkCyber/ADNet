@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use a3chat_core::error::A3chatError;
 use a3chat_core::id::UserId;
-use a3net_chatstore::{ChatTrustRecord, ChatTrustStore};
+use a3net_chatstore::ChatTrustRecord;
 use a3net_reputation::{
     ReputationReporter, ReportKind, TrustFusion, TrustLevel, TrustSignal,
 };

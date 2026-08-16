@@ -31,7 +31,7 @@ use a3chat_core::id::UserId;use a3net_userstore::model::{
 use a3net_userstore::store::UserStore;
 use a3net_userstore::sqlite::{SqliteUserStore, SqliteUserStoreConfig};
 
-use crate::error::{AppError, AppResult, app_to_domain};
+use crate::error::{AppError, AppResult};
 
 /// RPC method constants — match `a3chat-core/src/rpc.rs`.
 pub const PROFILE_GET: &str = "a3chat.profile.get";

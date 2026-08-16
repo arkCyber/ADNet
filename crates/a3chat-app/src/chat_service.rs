@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use a3chat_core::conversation::{ConversationKind, ConversationMeta, ConversationRecord};
+use a3chat_core::conversation::{ConversationMeta, ConversationRecord};
 use a3chat_core::error::A3chatError;
 use a3chat_core::id::{ConversationId, MessageId, UserId};
 use a3chat_core::message::{ChatMessage, MessageBody, MessageEnvelope};

@@ -76,7 +76,7 @@ async fn get(cfg: &CliConfig, client: &HttpRpcClient, dry_run: bool) -> CliResul
     Ok(())
 }
 
-async fn digit(cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
+async fn digit(_cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
     let method = A3chatRpcMethod::PROFILE_DIGIT_GET;
     let result = client.call_raw(method, serde_json::json!({})).await?;
     let s = result
@@ -94,14 +94,14 @@ async fn digit(cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
     Ok(())
 }
 
-async fn keys(cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
+async fn keys(_cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
     let method = A3chatRpcMethod::PROFILE_PUBLIC_KEY_LIST;
     let result = client.call_raw(method, serde_json::json!({})).await?;
     print(OutputFormat::Plain, &result)?;
     Ok(())
 }
 
-async fn devices(cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
+async fn devices(_cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
     let method = A3chatRpcMethod::PROFILE_DEVICE_LIST;
     let result = client.call_raw(method, serde_json::json!({})).await?;
     print(OutputFormat::Plain, &result)?;
@@ -109,7 +109,7 @@ async fn devices(cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
 }
 
 async fn set_avatar(
-    cfg: &CliConfig,
+    _cfg: &CliConfig,
     client: &HttpRpcClient,
     blob_hash: String,
     mime: String,

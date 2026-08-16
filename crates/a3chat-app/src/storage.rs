@@ -40,7 +40,6 @@ use a3chat_core::error::A3chatError;
 use a3chat_core::id::{ConversationId, MessageId, UserId};
 use a3chat_core::message::{ChatMessage, MessageBody, MessageEnvelope, MessageType};
 use a3chat_core::presence::Presence;
-use a3chat_core::rpc::RpcClient;
 use a3chat_core::validation::MAX_PREVIEW_LEN;
 
 use crate::error::{AppError, AppResult};
@@ -252,7 +251,6 @@ impl ChatStorage {
             ),
         };
         let integrity = integrity_hash(owner, &envelope.receiver_id, envelope);
-        let integrity_str = integrity.clone();
         let message_id = a3chat_core::id::generate_message_id(owner.as_str());
         let sequence = envelope.sequence;
         let timestamp = envelope.timestamp;
@@ -534,7 +532,7 @@ impl ChatStorage {
         let conn_arc = self.connection(owner).await?;
         let conv_str = conversation_id.as_str().to_string();
         let rows: Vec<ChatMessage> = tokio::task::spawn_blocking(move || {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let mut stmt = guard.prepare(
                 "SELECT message_id, conversation_id, sender_id, receiver_id,
                         message_type, body_json, attachments_json, reply_to,
@@ -567,7 +565,7 @@ impl ChatStorage {
         let conn_arc = self.connection(owner).await?;
         let conv_str = conversation_id.as_str().to_string();
         let rows: Vec<ChatMessage> = tokio::task::spawn_blocking(move || {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let mut stmt = guard.prepare(
                 "SELECT message_id, conversation_id, sender_id, receiver_id,
                         message_type, body_json, attachments_json, reply_to,
@@ -599,7 +597,7 @@ impl ChatStorage {
         let conn_arc = self.connection(owner).await?;
         let id_str = message_id.as_str().to_string();
         let got: Option<ChatMessage> = tokio::task::spawn_blocking(move || {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let mut stmt = guard.prepare(
                 "SELECT message_id, conversation_id, sender_id, receiver_id,
                         message_type, body_json, attachments_json, reply_to,
@@ -687,7 +685,7 @@ impl ChatStorage {
         let id_str = message_id.as_str().to_string();
         let owner_str = owner.as_str().to_string();
         let r: AppResult<()> = tokio::task::spawn_blocking(move || -> AppResult<()> {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let now = chrono::Utc::now().to_rfc3339();
             let n = guard.execute(
                 "UPDATE messages SET recalled_at = ?2
@@ -785,7 +783,7 @@ impl ChatStorage {
         let owner_str = owner.as_str().to_string();
         let conn_arc = self.connection(owner).await?;
         let _: AppResult<()> = tokio::task::spawn_blocking(move || -> AppResult<()> {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let n = guard.execute(
                 "UPDATE messages SET body_json = ?2, is_edited = 1, edited_at = ?3
                  WHERE message_id = ?1 AND sender_id = ?4",
@@ -890,7 +888,7 @@ impl ChatStorage {
         let conv_filter = q.conversation_id.map(|c| c.as_str().to_string());
         let has_conv = conv_filter.is_some();
         let hits: Vec<ChatMessage> = tokio::task::spawn_blocking(move || {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             // Build the SQL with exactly the placeholders we plan
             // to pass — rusqlite counts `?` params strictly.
             let mut sql = String::from(
@@ -932,7 +930,7 @@ impl ChatStorage {
         let conn_arc = self.connection(owner).await?;
         let meta = meta.clone();
         let _: AppResult<()> = tokio::task::spawn_blocking(move || -> AppResult<()> {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             guard.execute(
                 "INSERT INTO conversations
                  (conversation_id, kind, title, peer_user_id, last_message_preview,
@@ -1050,7 +1048,7 @@ impl ChatStorage {
     pub async fn list_conversations(&self, owner: &UserId) -> AppResult<Vec<ConversationMeta>> {
         let conn_arc = self.connection(owner).await?;
         let rows: Vec<ConversationMeta> = tokio::task::spawn_blocking(move || {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let mut stmt = guard.prepare(
                 "SELECT conversation_id, kind, title, peer_user_id,
                         last_message_preview, last_activity, message_count,
@@ -1072,7 +1070,7 @@ impl ChatStorage {
     pub async fn unread_total(&self, owner: &UserId) -> AppResult<u32> {
         let conn_arc = self.connection(owner).await?;
         let n: i64 = tokio::task::spawn_blocking(move || -> AppResult<i64> {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let n: i64 = guard
                 .query_row(
                     "SELECT COALESCE(SUM(unread_count), 0) FROM conversations",
@@ -1094,7 +1092,7 @@ impl ChatStorage {
         let conn_arc = self.connection(owner).await?;
         let presence = presence.clone();
         let _: AppResult<()> = tokio::task::spawn_blocking(move || -> AppResult<()> {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             guard.execute(
                 "INSERT INTO presence (user_id, status, status_message, last_changed)
                  VALUES (?1, ?2, ?3, ?4)
@@ -1124,7 +1122,7 @@ impl ChatStorage {
         let conn_arc = self.connection(owner).await?;
         let id_str = user_id.as_str().to_string();
         let got: Option<Presence> = tokio::task::spawn_blocking(move || {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let mut stmt = guard.prepare(
                 "SELECT user_id, status, status_message, last_changed
                  FROM presence WHERE user_id = ?1",
@@ -1150,7 +1148,7 @@ impl ChatStorage {
         let conn_arc = self.connection(owner).await?;
         let id_str = conversation_id.as_str().to_string();
         let got: Option<ConversationMeta> = tokio::task::spawn_blocking(move || {
-            let mut guard = conn_arc.blocking_lock_owned();
+            let guard = conn_arc.blocking_lock_owned();
             let mut stmt = guard.prepare(
                 "SELECT conversation_id, kind, title, peer_user_id,
                         last_message_preview, last_activity, message_count,
