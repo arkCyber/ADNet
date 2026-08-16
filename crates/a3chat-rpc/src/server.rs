@@ -136,6 +136,7 @@ impl RpcServerHandle {
 pub struct ServerState {
     pub app: A3chatApp,
     pub metrics: Arc<Metrics>,
+    pub request_timeout: Duration,
 }
 
 /// The server.
@@ -162,6 +163,7 @@ impl RpcServer {
         let state = ServerState {
             app: self.app.clone(),
             metrics: self.metrics.clone(),
+            request_timeout: self.config.request_timeout,
         };
         let cors = self.build_cors_layer();
         // `TraceLayer::new_for_http` wires the default
@@ -456,11 +458,10 @@ async fn dispatch_one(
     req: crate::dispatch::RpcRequest,
     request_id: Option<&str>,
 ) -> RpcResponse {
-    // Read the timeout back from the metrics handle's parent
-    // server through the `ServerState`. We don't carry the
-    // config through state, so derive a sensible default —
-    // override path is to set `DEFAULT_REQUEST_TIMEOUT`.
-    let timeout = DEFAULT_REQUEST_TIMEOUT;
+    // The per-request budget comes from `RpcServerConfig::request_timeout`
+    // via `ServerState`. This lets operators tune slow RPCs (e.g.
+    // `sync.snapshot`) without rebuilding the constant in code.
+    let timeout = state.request_timeout;
     let dispatch = dispatch_rpc_call(&state.app, owner, req, request_id);
     match tokio::time::timeout(timeout, dispatch).await {
         Ok(resp) => resp,
