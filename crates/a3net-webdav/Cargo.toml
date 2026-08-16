@@ -1,0 +1,53 @@
+[package]
+name        = "a3net-webdav"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "WebDAV gateway exposing a3net-blobstore namespaced filesystems with DO-178C DAL-A safety profile."
+
+[dependencies]
+a3net-types      = { workspace = true }
+a3net-blobstore  = { workspace = true }
+a3net-pairing    = { workspace = true }
+a3net-observability = { workspace = true }
+tokio            = { workspace = true, features = ["full"] }
+futures          = { workspace = true }
+async-trait      = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+hex              = { workspace = true }
+sha2             = { workspace = true }
+base64           = "0.22"
+parking_lot      = "0.12"
+chrono           = { workspace = true }
+bytes            = "1"
+http             = "1"
+tokio-util       = "0.7"
+hyper            = { version = "1", features = ["server", "http1"] }
+hyper-util       = { version = "0.1", features = ["tokio"] }
+http-body-util   = "0.1"
+uuid             = { workspace = true }
+blake3           = { workspace = true }
+md5              = "0.8"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+hyper    = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# DO-178C DAL-A aerospace mode. Enables the `aerospace` module
+# (certification constants) and is the activation switch for the
+# compliance test suite in `tests/dal_a_compliance.rs`. Builds
+# under this feature are pinned to `SAFETY_REVISION` so the
+# certification baseline is reproducible.
+aerospace = []

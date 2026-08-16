@@ -1,0 +1,41 @@
+[package]
+name = "a3net-database"
+description = "Database abstraction layer for A3Net with connection pooling and migrations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "json", "chrono", "uuid"] }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+once_cell = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async trait
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

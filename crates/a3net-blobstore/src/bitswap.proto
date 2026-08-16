@@ -1,0 +1,107 @@
+// ADNet Bitswap Protocol Buffer Definitions
+//
+// This file defines the wire format for the Bitswap protocol.
+// Compatible with IPFS Bitswap 1.2.0 specification.
+
+// Spec: https://github.com/ipfs/specs/blob/main/BITSWAP.md
+
+syntax = "proto2";
+
+package bitswap.pb;
+
+// ─────────────────────────────────────────────────────────────────
+// Top-level Message
+// ─────────────────────────────────────────────────────────────────
+
+message BitswapMessage {
+  // Array of wantlist entries
+  repeated WantlistEntry wantlist = 1;
+
+  // Array of blocks
+  repeated Block payload = 2;
+
+  // Optional: block presence notifications (HAS/DONT_HAVE for want-have queries)
+  repeated BlockPresences block_presences = 3;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Wantlist Entry
+// ─────────────────────────────────────────────────────────────────
+
+message WantlistEntry {
+  // The block CID (multihash)
+  required bytes block = 1;
+
+  // Priority (higher = more urgent)
+  // In IPFS, lower number = higher priority
+  required int32 priority = 2;
+
+  // Cancel this want
+  optional bool cancel = 3;
+
+  // Type of want
+  optional WantType want_type = 4;
+
+  // If true, send DONT_HAVE if we don't have the block
+  optional bool send_dont_have = 5;
+
+  // Transaction ID for tracking
+  optional int32 txi = 6;
+
+  // Reserved for future use
+  reserved 6 to 6;
+}
+
+enum WantType {
+  // Full block wanted
+  Block = 0;
+
+  // Only want to know if peer has the block (lightweight)
+  Have = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Block
+// ─────────────────────────────────────────────────────────────────
+
+message Block {
+  // Bytes representing the CID prefix (contains codec info)
+  optional bytes prefix = 1;
+
+  // Raw block data
+  optional bytes data = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Block Presence (for HAVE/DONT_HAVE)
+// ─────────────────────────────────────────────────────────────────
+
+message BlockPresences {
+  // The CID prefix
+  optional bytes prefix = 1;
+
+  // Type of presence
+  optional PresenceType type = 2;
+}
+
+enum PresenceType {
+  // Peer has the block
+  HAVE = 0;
+
+  // Peer does not have the block
+  DONT_HAVE = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Legacy / Extended Formats (for compatibility)
+// ─────────────────────────────────────────────────────────────────
+
+message Wantlist {
+  repeated WantlistEntry entries = 1;
+  optional bool full = 2;
+}
+
+message BlockBroadcast {
+  optional bytes from = 1;
+  optional Block block = 2;
+}

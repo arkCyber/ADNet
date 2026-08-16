@@ -1,6 +1,6 @@
-# ADNet
+# A3Net
 
-**ADNet** is a Rust workspace that re-implements the iroh-flavoured P2P CDN
+**A3Net** is a Rust workspace that re-implements the iroh-flavoured P2P CDN
 building blocks from `Exodus@src-backup` as a clean, composable crate family,
 then layers a full **AI + Web3** application stack (encrypted chat, agent
 runtime, SSH/SmartHome/Wallet, identity & token, …) on top of the same P2P
@@ -26,7 +26,7 @@ mobile client.
 - [Build](#build)
 - [CLI features](#cli-features)
 - [a3chat: encrypted chat service](#a3chat-encrypted-chat-service)
-- [adnet-agent: AI agent runtime](#adnet-agent-ai-agent-runtime)
+- [a3net-agent: AI agent runtime](#a3net-agent-ai-agent-runtime)
 - [FFI / Mobile / Desktop surfaces](#ffi--mobile--desktop-surfaces)
 - [Aerospace-grade engineering](#aerospace-grade-engineering)
 - [What works today (v0.3 milestone)](#what-works-today-v03-milestone)
@@ -45,72 +45,72 @@ add business / product features.
 ```
 crates/
 ├── ── Core types & errors ───────────────────────────────────────────
-│   ├── adnet-types            # NodeId, NodeAddr, ContentHash, RangeSpec, Ticket, Topic, Announcement, NodeIdentity
-│   ├── adnet-error            # Workspace-wide error taxonomy
-│   ├── adnet-crypto           # AEAD, KDF, key store (used by a3chat)
-│   ├── adnet-identity         # Long-term identity + NodeIdentityCard
-│   ├── adnet-token            # Capability tokens (billing / wallet)
-│   └── adnet-observability    # Tracing + Prometheus + OpenTelemetry
+│   ├── a3net-types            # NodeId, NodeAddr, ContentHash, RangeSpec, Ticket, Topic, Announcement, NodeIdentity
+│   ├── a3net-error            # Workspace-wide error taxonomy
+│   ├── a3net-crypto           # AEAD, KDF, key store (used by a3chat)
+│   ├── a3net-identity         # Long-term identity + NodeIdentityCard
+│   ├── a3net-token            # Capability tokens (billing / wallet)
+│   └── a3net-observability    # Tracing + Prometheus + OpenTelemetry
 │
 ├── ── P2P transport & storage ──────────────────────────────────────
-│   ├── adnet-blobstore        # BLAKE3 chunked blob store (iroh-blobs layout)
-│   ├── adnet-gossip           # Topic-based pub/sub (iroh-gossip parity)
-│   ├── adnet-dht              # Kademlia-style DHT + namespace records
-│   ├── adnet-namespace        # Mutable namespace records on top of DHT
-│   ├── adnet-mesh             # HTTP fallback transport (Range:, parallel chunks)
-│   ├── adnet-mesh-coordinator # Closed-mesh admission + coordination
-│   ├── adnet-mesh-firewall    # Mesh-side policy enforcement
-│   ├── adnet-transport        # QUIC backend (quinn) + iroh adapter (feature)
-│   ├── adnet-relay            # DERP-style relay + session guards
-│   ├── adnet-nat-traversal    # STUN / NAT-PMP / PCP / pkarr discovery
-│   ├── adnet-magicdns         # MagicDNS name resolution
-│   └── adnet-dns-server       # Authoritative DNS + pkarr publish
+│   ├── a3net-blobstore        # BLAKE3 chunked blob store (iroh-blobs layout)
+│   ├── a3net-gossip           # Topic-based pub/sub (iroh-gossip parity)
+│   ├── a3net-dht              # Kademlia-style DHT + namespace records
+│   ├── a3net-namespace        # Mutable namespace records on top of DHT
+│   ├── a3net-mesh             # HTTP fallback transport (Range:, parallel chunks)
+│   ├── a3net-mesh-coordinator # Closed-mesh admission + coordination
+│   ├── a3net-mesh-firewall    # Mesh-side policy enforcement
+│   ├── a3net-transport        # QUIC backend (quinn) + iroh adapter (feature)
+│   ├── a3net-relay            # DERP-style relay + session guards
+│   ├── a3net-nat-traversal    # STUN / NAT-PMP / PCP / pkarr discovery
+│   ├── a3net-magicdns         # MagicDNS name resolution
+│   └── a3net-dns-server       # Authoritative DNS + pkarr publish
 │
 ├── ── Node runtime & IPC ───────────────────────────────────────────
-│   ├── adnet-node             # Node orchestration (store + bus + transport + mesh)
-│   ├── adnet-ipc              # IPC core (irpc + axum)
-│   ├── adnet-ipc-adapter      # IPC bridge (Unix socket, HTTP-RPC, noise)
-│   ├── adnet-rpc              # JSON-RPC dispatcher for adnet-cli
-│   ├── adnet-rpc-irpc         # irpc-style RPC codegen + runtime
-│   ├── adnet-resilience       # Retry / CircuitBreaker / Cancellation / ResourceLimiter
-│   ├── adnet-workspace        # Multi-crate virtual workspace glue
-│   ├── adnet-gateway          # HTTP gateway (CDN edge)
-│   └── adnet-security         # Capability / ACL / audit primitives
+│   ├── a3net-node             # Node orchestration (store + bus + transport + mesh)
+│   ├── a3net-ipc              # IPC core (irpc + axum)
+│   ├── a3net-ipc-adapter      # IPC bridge (Unix socket, HTTP-RPC, noise)
+│   ├── a3net-rpc              # JSON-RPC dispatcher for a3net-cli
+│   ├── a3net-rpc-irpc         # irpc-style RPC codegen + runtime
+│   ├── a3net-resilience       # Retry / CircuitBreaker / Cancellation / ResourceLimiter
+│   ├── a3net-workspace        # Multi-crate virtual workspace glue
+│   ├── a3net-gateway          # HTTP gateway (CDN edge)
+│   └── a3net-security         # Capability / ACL / audit primitives
 │
 ├── ── Application domain crates ─────────────────────────────────────
-│   ├── adnet-roster           # Contact directory management
-│   ├── adnet-chatstore        # iroh-docs backed encrypted message store
-│   ├── adnet-share            # P2P file sharing via tickets
-│   ├── adnet-socialfeed       # Social feed (likes / comments / reactions)
-│   ├── adnet-news             # News feed + subscriptions
-│   ├── adnet-userstore        # User profile store
-│   ├── adnet-mail             # SMTP / IMAP + P2P mail bridge
-│   ├── adnet-pairing          # Device pairing + trusted credentials
-│   ├── adnet-moderation       # Blocklist / takedown / defend-mode
-│   ├── adnet-reputation       # Global peer reputation (PeerScore)
-│   ├── adnet-model-catalog    # Model catalog + provider discovery
-│   ├── adnet-webhook          # Webhook endpoint management
-│   ├── adnet-invite           # Email invitation rendering
-│   ├── adnet-qr               # QR payload handling
-│   ├── adnet-news             # News feed
-│   └── adnet-media            # Media metadata + thumbnails
+│   ├── a3net-roster           # Contact directory management
+│   ├── a3net-chatstore        # iroh-docs backed encrypted message store
+│   ├── a3net-share            # P2P file sharing via tickets
+│   ├── a3net-socialfeed       # Social feed (likes / comments / reactions)
+│   ├── a3net-news             # News feed + subscriptions
+│   ├── a3net-userstore        # User profile store
+│   ├── a3net-mail             # SMTP / IMAP + P2P mail bridge
+│   ├── a3net-pairing          # Device pairing + trusted credentials
+│   ├── a3net-moderation       # Blocklist / takedown / defend-mode
+│   ├── a3net-reputation       # Global peer reputation (PeerScore)
+│   ├── a3net-model-catalog    # Model catalog + provider discovery
+│   ├── a3net-webhook          # Webhook endpoint management
+│   ├── a3net-invite           # Email invitation rendering
+│   ├── a3net-qr               # QR payload handling
+│   ├── a3net-news             # News feed
+│   └── a3net-media            # Media metadata + thumbnails
 │
 ├── ── AI + Web3 product stack ──────────────────────────────────────
-│   ├── adnet-agent            # Agent runtime (chat.v1), providers, tools
-│   ├── adnet-eliza-bridge     # ElizaOS-compatible bridge
-│   ├── adnet-chain            # On-chain state + indexer
-│   ├── adnet-wallet-evm       # EVM wallet (ethers-rs)
-│   └── adnet-token            # Capability / payment tokens
+│   ├── a3net-agent            # Agent runtime (chat.v1), providers, tools
+│   ├── a3net-eliza-bridge     # ElizaOS-compatible bridge
+│   ├── a3net-chain            # On-chain state + indexer
+│   ├── a3net-wallet-evm       # EVM wallet (ethers-rs)
+│   └── a3net-token            # Capability / payment tokens
 │
 ├── ── Networking surfaces ──────────────────────────────────────────
-│   ├── adnet-webrtc           # webrtc-rs P2P transport (SCTP DataChannel)
-│   ├── adnet-webtransport     # HTTP/3 WebTransport (wtransport)
-│   ├── adnet-tun              # TUN device mesh
-│   ├── adnet-exit-node        # Exit-node policy + traffic relay
-│   ├── adnet-ssh              # SSH-over-P2P server / client
-│   ├── adnet-webdav           # WebDAV server over the mesh
-│   ├── adnet-smarthome        # SmartHome HUB + device drivers
-│   └── adnet-vless-client     # VLESS / Xray-compatible client
+│   ├── a3net-webrtc           # webrtc-rs P2P transport (SCTP DataChannel)
+│   ├── a3net-webtransport     # HTTP/3 WebTransport (wtransport)
+│   ├── a3net-tun              # TUN device mesh
+│   ├── a3net-exit-node        # Exit-node policy + traffic relay
+│   ├── a3net-ssh              # SSH-over-P2P server / client
+│   ├── a3net-webdav           # WebDAV server over the mesh
+│   ├── a3net-smarthome        # SmartHome HUB + device drivers
+│   └── a3net-vless-client     # VLESS / Xray-compatible client
 │
 ├── ── Encrypted chat family (a3chat) ───────────────────────────────
 │   ├── a3chat-core            # Domain types + JSON-Schema export
@@ -119,39 +119,39 @@ crates/
 │   └── a3chat-app             # Service layer: chat / contact / group / sync / presence
 │
 ├── ── Frontends & bindings ─────────────────────────────────────────
-│   ├── adnet-cli              # `adnet` command-line daemon
-│   ├── adnet-tui              # Terminal UI (ratatui)
-│   ├── adnet-tauri            # Tauri desktop shell
-│   ├── adnet-ffi              # UniFFI C-ABI surface (Swift / Kotlin / Python)
-│   ├── adnet-ffi-js           # WASM / JS bindings via wasm-bindgen
-│   └── adnet-iroh-interop     # Interop sidecar for iroh-only tools
+│   ├── a3net-cli              # `a3net` command-line daemon
+│   ├── a3net-tui              # Terminal UI (ratatui)
+│   ├── a3net-tauri            # Tauri desktop shell
+│   ├── a3net-ffi              # UniFFI C-ABI surface (Swift / Kotlin / Python)
+│   ├── a3net-ffi-js           # WASM / JS bindings via wasm-bindgen
+│   └── a3net-iroh-interop     # Interop sidecar for iroh-only tools
 │
 └── ── Testing / operations ─────────────────────────────────────────
-    ├── adnet-bench                # Criterion + per-crate benches
-    ├── adnet-simulator            # Network simulator (latency / loss)
-    ├── adnet-fuzz                 # cargo-fuzz harnesses
-    ├── adnet-integration-tests    # Cross-crate integration tests
-    ├── adnet-chaos                # Chaos engineering (failover / partition)
-    ├── adnet-database             # SQLite migrations + connection pool
-    └── adnet-verify               # Invariant / property test exports
+    ├── a3net-bench                # Criterion + per-crate benches
+    ├── a3net-simulator            # Network simulator (latency / loss)
+    ├── a3net-fuzz                 # cargo-fuzz harnesses
+    ├── a3net-integration-tests    # Cross-crate integration tests
+    ├── a3net-chaos                # Chaos engineering (failover / partition)
+    ├── a3net-database             # SQLite migrations + connection pool
+    └── a3net-verify               # Invariant / property test exports
 ```
 
 ---
 
 ## iroh backend (opt-in, `--features iroh`)
 
-ADNet ships two parallel backends for transport / gossip / blob storage:
+A3Net ships two parallel backends for transport / gossip / blob storage:
 
 | Layer       | Default backend                       | `--features iroh` backend                                       |
 |-------------|---------------------------------------|-----------------------------------------------------------------|
 | Transport   | `quinn` + `rustls` (`QuicTransport`)  | `iroh::Endpoint` (`IrohTransport`) — QUIC w/ NAT traversal + DERP relay |
 | Gossip      | In-process broadcast                  | `iroh-gossip` (`IrohGossipTransport`) — HyParView + PlumTree    |
 | Blob store  | Disk-backed directory layout          | `iroh-blobs::store::fs::FsStore` — Bao-verified streams         |
-| Runtime     | `adnet-node::Node`                    | `adnet-node::IrohRuntime` — wires `iroh::Router` (blobs + gossip ALPN) |
+| Runtime     | `a3net-node::Node`                    | `a3net-node::IrohRuntime` — wires `iroh::Router` (blobs + gossip ALPN) |
 
-The `iroh` feature cascades: `adnet-node --features iroh` turns it on
-in `adnet-transport`, `adnet-gossip`, and `adnet-blobstore`. You can
-also enable it on a single crate (e.g. `cargo test -p adnet-transport
+The `iroh` feature cascades: `a3net-node --features iroh` turns it on
+in `a3net-transport`, `a3net-gossip`, and `a3net-blobstore`. You can
+also enable it on a single crate (e.g. `cargo test -p a3net-transport
 --features iroh`).
 
 ### What you gain with `--features iroh`
@@ -181,7 +181,7 @@ match `iroh 1.0.x`. Expect:
   network for crate downloads and toolchain upgrade).
 - **Incremental rebuilds**: a few seconds for trait-only edits, tens
   of seconds for changes inside `iroh.rs` / `iroh_runtime.rs`.
-- **Test compile**: `cargo test --features iroh -p adnet-transport`
+- **Test compile**: `cargo test --features iroh -p a3net-transport`
   pays the full cost on the first run; subsequent runs are cheap.
 
 If you only want the default backend, **don't** pass `--features iroh`
@@ -200,7 +200,7 @@ cargo build --workspace --features iroh
 cargo test  --workspace --features iroh
 
 # Compile-check the iroh-only modules without rebuilding everything
-cargo check -p adnet-node --features iroh
+cargo check -p a3net-node --features iroh
 ```
 
 ---
@@ -208,23 +208,23 @@ cargo check -p adnet-node --features iroh
 ## Crate dependency graph
 
 ```
-adnet-cli ──▶ adnet-node
+a3net-cli ──▶ a3net-node
               │
-              ├─▶ adnet-types              ◀── adnet-identity
-              ├─▶ adnet-blobstore          ◀── a3chat-app
-              ├─▶ adnet-gossip                (encrypted chat store)
-              ├─▶ adnet-mesh               ◀── adnet-crypto
-              ├─▶ adnet-transport             ◀── a3chat-crypto
-              ├─▶ adnet-reputation         ◀── adnet-token
-              ├─▶ adnet-pairing            ◀── adnet-resilience
-              ├─▶ adnet-chatstore          ◀── adnet-observability
-              ├─▶ adnet-moderation
-              ├─▶ adnet-dht
-              ├─▶ adnet-relay
-              ├─▶ adnet-ffi (Swift / Kotlin / Python / JS)
-              └─▶ adnet-agent              ──▶ adnet-eliza-bridge
-                                              ──▶ adnet-chain
-                                              ──▶ adnet-wallet-evm
+              ├─▶ a3net-types              ◀── a3net-identity
+              ├─▶ a3net-blobstore          ◀── a3chat-app
+              ├─▶ a3net-gossip                (encrypted chat store)
+              ├─▶ a3net-mesh               ◀── a3net-crypto
+              ├─▶ a3net-transport             ◀── a3chat-crypto
+              ├─▶ a3net-reputation         ◀── a3net-token
+              ├─▶ a3net-pairing            ◀── a3net-resilience
+              ├─▶ a3net-chatstore          ◀── a3net-observability
+              ├─▶ a3net-moderation
+              ├─▶ a3net-dht
+              ├─▶ a3net-relay
+              ├─▶ a3net-ffi (Swift / Kotlin / Python / JS)
+              └─▶ a3net-agent              ──▶ a3net-eliza-bridge
+                                              ──▶ a3net-chain
+                                              ──▶ a3net-wallet-evm
 ```
 
 Strictly downward — no cycles, no horizontal coupling. Each crate is
@@ -245,12 +245,12 @@ cargo build --workspace --features iroh
 cargo test  --workspace --features iroh
 
 # Single crate examples
-cargo run -p adnet-cli -- --help
-cargo run -p adnet-tui  --example tui_demo
-cargo run -p adnet-agent --example chat_loop
+cargo run -p a3net-cli -- --help
+cargo run -p a3net-tui  --example tui_demo
+cargo run -p a3net-agent --example chat_loop
 
 # Run the iroh-interop sidecar
-cargo run -p adnet-iroh-interop -- sidecar --help
+cargo run -p a3net-iroh-interop -- sidecar --help
 
 # Toolchain
 rustup toolchain install 1.91   # pinned by rust-toolchain.toml
@@ -265,127 +265,127 @@ minute on a modern laptop.
 
 ## CLI features
 
-The `adnet` binary (`adnet-cli`) is the canonical demo of the workspace.
+The `a3net` binary (`a3net-cli`) is the canonical demo of the workspace.
 
 ### Core commands
 
 ```bash
 # Generate a node id and data dir
-adnet --data-dir /tmp/adnet-demo init
+a3net --data-dir /tmp/a3net-demo init
 
 # Start the mesh HTTP server in the foreground
-adnet --data-dir /tmp/adnet-demo serve
+a3net --data-dir /tmp/a3net-demo serve
 
 # Import a local file and announce it into "lobby"
-adnet --data-dir /tmp/adnet-demo announce \
+a3net --data-dir /tmp/a3net-demo announce \
     --room lobby \
     --file ./README.md \
-    --title "ADNet README" \
+    --title "A3Net README" \
     --kind article
 
 # Print the room feed (assets + peer sources)
-adnet --data-dir /tmp/adnet-demo feed --room lobby
+a3net --data-dir /tmp/a3net-demo feed --room lobby
 ```
 
 ### Daemon & control plane
 
 ```bash
-adnet daemon                  # background daemon mode (Unix socket)
-adnet daemon start|stop|status
-adnet doctor                  # health-check the local node
-adnet control <subcommand>     # control-plane operations
+a3net daemon                  # background daemon mode (Unix socket)
+a3net daemon start|stop|status
+a3net doctor                  # health-check the local node
+a3net control <subcommand>     # control-plane operations
 ```
 
 ### MFS (Mutable File System)
 
 ```bash
-adnet files mkdir /my-dir
-adnet files mkdir /my-dir/subdir --parents
-adnet files ls /
-adnet files cp /source/path /dest/path
-adnet files mv /old/path /new/path
-adnet files write /my-dir/hello.txt "Hello World"
-adnet files read /my-dir/hello.txt
-adnet files rm /my-dir/file.txt
-adnet files rm /my-dir --recursive
-adnet files stat /my-dir/hello.txt
+a3net files mkdir /my-dir
+a3net files mkdir /my-dir/subdir --parents
+a3net files ls /
+a3net files cp /source/path /dest/path
+a3net files mv /old/path /new/path
+a3net files write /my-dir/hello.txt "Hello World"
+a3net files read /my-dir/hello.txt
+a3net files rm /my-dir/file.txt
+a3net files rm /my-dir --recursive
+a3net files stat /my-dir/hello.txt
 ```
 
 ### Pubsub (Publish/Subscribe)
 
 ```bash
-adnet pubsub ls
-adnet pubsub peers my-topic
-adnet pubsub sub my-topic
-adnet pubsub pub my-topic "Hello, world!"
+a3net pubsub ls
+a3net pubsub peers my-topic
+a3net pubsub sub my-topic
+a3net pubsub pub my-topic "Hello, world!"
 ```
 
 ### Key management (IPNS)
 
 ```bash
-adnet key gen my-key
-adnet key list
-adnet key rm my-key
-adnet key rename old-name new-name
-adnet key export my-key --output my-key.json
-adnet key import my-key --input my-key.json
-adnet name publish /ipfs/Qm...
-adnet name resolve /ipns/...
-adnet name local
+a3net key gen my-key
+a3net key list
+a3net key rm my-key
+a3net key rename old-name new-name
+a3net key export my-key --output my-key.json
+a3net key import my-key --input my-key.json
+a3net name publish /ipfs/Qm...
+a3net name resolve /ipns/...
+a3net name local
 ```
 
 ### Reputation system
 
 ```bash
-adnet reputation show
-adnet reputation get <peer-id>
-adnet reputation adjust <peer-id> 10.0
-adnet reputation reset <peer-id>
-adnet reputation stats
+a3net reputation show
+a3net reputation get <peer-id>
+a3net reputation adjust <peer-id> 10.0
+a3net reputation reset <peer-id>
+a3net reputation stats
 ```
 
 ### Content moderation
 
 ```bash
-adnet moderation block <cid> --reason copyright
-adnet moderation erase <cid> --reason csam
-adnet moderation list --active
-adnet moderation defend-on
-adnet moderation defend-off
+a3net moderation block <cid> --reason copyright
+a3net moderation erase <cid> --reason csam
+a3net moderation list --active
+a3net moderation defend-on
+a3net moderation defend-off
 ```
 
 ### Device pairing
 
 ```bash
-adnet pair create --wallet-private /path/to/wallet.key
-adnet pair list
-adnet pair revoke <credential-id>
+a3net pair create --wallet-private /path/to/wallet.key
+a3net pair list
+a3net pair revoke <credential-id>
 ```
 
 ### Agent (chat.v1 loop)
 
 ```bash
-adnet agent run --provider hermes --prompt "summarise this room"
-adnet agent tool mail.send --to alice --subject "hi"
-adnet agent audit --last 50
+a3net agent run --provider hermes --prompt "summarise this room"
+a3net agent tool mail.send --to alice --subject "hi"
+a3net agent audit --last 50
 ```
 
 ### Discovery / network
 
 ```bash
-adnet bootstrap ls|add|rm
-adnet discover [--mdns]
-adnet dns publish|resolve
-adnet relay status|reset
-adnet swarm peers|connect|disconnect
+a3net bootstrap ls|add|rm
+a3net discover [--mdns]
+a3net dns publish|resolve
+a3net relay status|reset
+a3net swarm peers|connect|disconnect
 ```
 
 ### Observability
 
 ```bash
-adnet stats                       # Prometheus scrape
-adnet log tail [--filter adnet]
-adnet bench                       # criterion harness launcher
+a3net stats                       # Prometheus scrape
+a3net log tail [--filter a3net]
+a3net bench                       # criterion harness launcher
 ```
 
 ### Additional commands
@@ -422,7 +422,7 @@ adnet bench                       # criterion harness launcher
 
 ## a3chat: encrypted chat service
 
-The `a3chat-*` family is the first **product** built on the ADNet P2P
+The `a3chat-*` family is the first **product** built on the A3Net P2P
 plumbing. Four crates, strictly layered:
 
 ```
@@ -440,7 +440,7 @@ plumbing. Four crates, strictly layered:
 └──────────────────────────────────────────────────────────────┘
               │           │                │
               ▼           ▼                ▼
-       adnet-chatstore  adnet-crypto    adnet-types
+       a3net-chatstore  a3net-crypto    a3net-types
 ```
 
 ### Endpoints (a3chat-rpc)
@@ -476,7 +476,7 @@ internal `NotificationBus` to authenticated owners.
 The same JSON-Schema export drives:
 
 - `crates/a3chat-rpc`           → Rust server (axum)
-- `crates/adnet-tauri`          → Tauri desktop shell
+- `crates/a3net-tauri`          → Tauri desktop shell
 - `mobile/`                     → Flutter mobile client
 
 The protocol is **shape-stable**: `snake_case` fields, `chrono::DateTime<Utc>`
@@ -484,9 +484,9 @@ timestamps, opaque ciphertext blobs (`algorithm + nonce + ciphertext + tag`).
 
 ---
 
-## adnet-agent: AI agent runtime
+## a3net-agent: AI agent runtime
 
-`adnet-agent` is a chat-style agent loop with tool calling, an audit log,
+`a3net-agent` is a chat-style agent loop with tool calling, an audit log,
 and a pluggable provider system.
 
 ### Providers
@@ -498,12 +498,12 @@ and a pluggable provider system.
 
 ### Built-in tools
 
-- `mail.send` / `mail.read` — `adnet-mail` operations
-- `roster.search` — `adnet-roster` lookup
+- `mail.send` / `mail.read` — `a3net-mail` operations
+- `roster.search` — `a3net-roster` lookup
 - `chat.history` — `a3chat-app` query
 - `fs.read` / `fs.write` — sandboxed file access
-- `wallet.balance` — `adnet-wallet-evm` read
-- `chain.read` — `adnet-chain` indexer query
+- `wallet.balance` — `a3net-wallet-evm` read
+- `chain.read` — `a3net-chain` indexer query
 
 ### Loop
 
@@ -523,12 +523,12 @@ tool name, input/output, and timestamps in a tamper-evident log.
 
 | Surface      | Crate                | Targets                                       |
 |--------------|----------------------|-----------------------------------------------|
-| UniFFI C-ABI | `adnet-ffi`          | Swift (iOS / macOS), Kotlin (Android), Python |
-| WASM         | `adnet-ffi-js`       | Browser / Node.js                             |
-| Tauri        | `adnet-tauri`        | Desktop (Windows / macOS / Linux)             |
+| UniFFI C-ABI | `a3net-ffi`          | Swift (iOS / macOS), Kotlin (Android), Python |
+| WASM         | `a3net-ffi-js`       | Browser / Node.js                             |
+| Tauri        | `a3net-tauri`        | Desktop (Windows / macOS / Linux)             |
 | Flutter      | `mobile/`            | iOS / Android (uses `a3chat-core` schema)     |
-| TUI          | `adnet-tui`          | Terminal (ratatui)                            |
-| iroh-interop | `adnet-iroh-interop` | Sidecar for iroh-only toolchains              |
+| TUI          | `a3net-tui`          | Terminal (ratatui)                            |
+| iroh-interop | `a3net-iroh-interop` | Sidecar for iroh-only toolchains              |
 
 All FFI bindings are generated from the same `a3chat-core` JSON
 Schema, so adding a field on the server automatically propagates to
@@ -538,7 +538,7 @@ every client after regeneration.
 
 ## Aerospace-grade engineering
 
-ADNet targets **aerospace-grade** reliability, modelled on DO-178C
+A3Net targets **aerospace-grade** reliability, modelled on DO-178C
 guidance for safety-critical software.
 
 - **DO-178C traceability**: key functions carry traceability markers
@@ -550,14 +550,14 @@ guidance for safety-critical software.
   builders, sum-type state machines).
 - **Error handling**: typed errors via `thiserror`; every public
   function returns `Result<T, TypedError>` with stable variants.
-- **Cancellation scope** (`adnet-resilience::CancellationScope`):
+- **Cancellation scope** (`a3net-resilience::CancellationScope`):
   every long-running background task observes a token, and
   `Node::shutdown()` performs a bounded join + force-abort.
-- **Resource limiter** (`adnet-resilience::ResourceLimiter`):
+- **Resource limiter** (`a3net-resilience::ResourceLimiter`):
   per-peer / per-room / per-tag concurrency caps to keep one bad
   peer from saturating the node.
 
-### Resilience primitives (`adnet-resilience`)
+### Resilience primitives (`a3net-resilience`)
 
 | Primitive        | Purpose                                                    |
 |------------------|------------------------------------------------------------|
@@ -573,8 +573,8 @@ guidance for safety-critical software.
 - **Tracing** via `tracing` + `tracing-subscriber` (env-filter).
 - **OpenTelemetry** OTLP exporter (tonic / http-proto) for
   distributed traces.
-- **Prometheus** scrapable metrics endpoint (`adnet stats`).
-- **Structured panic** handler (`adnet-observability::panic`).
+- **Prometheus** scrapable metrics endpoint (`a3net stats`).
+- **Structured panic** handler (`a3net-observability::panic`).
 
 ---
 
@@ -582,12 +582,12 @@ guidance for safety-critical software.
 
 ### P2P / transport
 
-- **Real native QUIC** in `adnet-transport` (quinn + rustls + rcgen).
+- **Real native QUIC** in `a3net-transport` (quinn + rustls + rcgen).
   Ephemeral self-signed certs, length-prefixed [`Frame`] exchanges
   behind the `Transport` trait.
-- **HTTP `Range:` support** in `adnet-mesh` (single + multi-range,
+- **HTTP `Range:` support** in `a3net-mesh` (single + multi-range,
   multipart/byteranges, parallel chunk fetcher).
-- **Range-aware tickets** in `adnet-types` (`BlobTicket` +
+- **Range-aware tickets** in `a3net-types` (`BlobTicket` +
   `RangeSpec`).
 - **NodeAddr routing** mirrors iroh's printable form
   (`<id> direct=<host:port> relay=<url>`).
@@ -598,22 +598,22 @@ guidance for safety-critical software.
 
 - **BLAKE3 chunked blob store** with range reads + per-blob
   metadata-only `BaoTree`.
-- **iroh-docs backed message sync** for `adnet-chatstore`
+- **iroh-docs backed message sync** for `a3net-chatstore`
   (Phase 5a).
 - **SQLite persistence** for `a3chat-app::ChatStorage`
   (conversations, messages, group state).
 
 ### Security & identity
 
-- **Global peer reputation** (`adnet-reputation`): events from
+- **Global peer reputation** (`a3net-reputation`): events from
   Bitswap / Gossipsub / Pairing / Chat, decay loop, JSONL log,
   Prometheus metrics.
 - **Content moderation**: hash blocklist, takedown service,
   defend mode, audit trail.
 - **Device pairing**: trusted credentials + revocation.
-- **Long-term identity** (`adnet-identity`): `NodeIdentityCard`,
+- **Long-term identity** (`a3net-identity`): `NodeIdentityCard`,
   pkarr publishing.
-- **Capability tokens** (`adnet-token`): billing & authz.
+- **Capability tokens** (`a3net-token`): billing & authz.
 
 ### Application services
 
@@ -648,11 +648,11 @@ guidance for safety-critical software.
 
 | Backup crate                                       | New crate                                       | iroh integration point                                              |
 |----------------------------------------------------|-------------------------------------------------|---------------------------------------------------------------------|
-| `src-tauri/src/p2p_cdn`                            | `adnet-blobstore`, `adnet-mesh`, `adnet-transport` | `iroh-blobs::BlobTicket` is parsed by [`adnet_types::BlobTicket`]    |
-| `src-tauri/src/p2p_cdn/gossip_bridge.rs`           | `adnet-gossip::bridge`                          | Replaced by `iroh-gossip` behind [`adnet_gossip::GossipTransport`]   |
-| `src-tauri/src/microservice/p2p_gossip_service.rs` | `adnet-gossip::InProcessGossip`                 | Future `iroh-net::Gossip` behind the same trait                       |
-| `src-tauri/src/p2p_cdn/iroh_adapter.rs`            | `adnet-transport::iroh::IrohTransport`          | Feature-gated `iroh` backend (see `crates/adnet-transport/src/iroh.rs`) |
-| `src-tauri/src/chatstore`                          | `adnet-chatstore`                               | `iroh-docs` provides the message sync substrate (Phase 5a)             |
+| `src-tauri/src/p2p_cdn`                            | `a3net-blobstore`, `a3net-mesh`, `a3net-transport` | `iroh-blobs::BlobTicket` is parsed by [`a3net_types::BlobTicket`]    |
+| `src-tauri/src/p2p_cdn/gossip_bridge.rs`           | `a3net-gossip::bridge`                          | Replaced by `iroh-gossip` behind [`a3net_gossip::GossipTransport`]   |
+| `src-tauri/src/microservice/p2p_gossip_service.rs` | `a3net-gossip::InProcessGossip`                 | Future `iroh-net::Gossip` behind the same trait                       |
+| `src-tauri/src/p2p_cdn/iroh_adapter.rs`            | `a3net-transport::iroh::IrohTransport`          | Feature-gated `iroh` backend (see `crates/a3net-transport/src/iroh.rs`) |
+| `src-tauri/src/chatstore`                          | `a3net-chatstore`                               | `iroh-docs` provides the message sync substrate (Phase 5a)             |
 
 ---
 
@@ -661,24 +661,24 @@ guidance for safety-critical software.
 `cargo test --workspace` runs **3,500+ tests** across 74 crates:
 
 ```
-adnet-types              unit + property tests
-adnet-blobstore          unit + proptest (bitswap invariants)
-adnet-gossip             unit + chaos tests
-adnet-mesh               unit + integration
-adnet-transport          unit + iroh e2e (feature-gated)
-adnet-node               unit + multi-transport integration
-adnet-dht                unit + aerospace-grade chaos
-adnet-namespace          unit + comprehensive
-adnet-relay              unit + ActiveSessionGuard tests
-adnet-ipc-adapter        unit + integration (noise handshake)
-adnet-resilience         unit (retry / breaker / cancellation / limiter)
-adnet-observability      unit + structured panic
-adnet-agent              unit + provider mock
-adnet-cli                unit + daemon smoke + ipc-client tests
-adnet-roster             unit
-adnet-chatstore          unit + iroh-docs sync
-adnet-reputation         unit + decay loop
-adnet-moderation         unit + integration
+a3net-types              unit + property tests
+a3net-blobstore          unit + proptest (bitswap invariants)
+a3net-gossip             unit + chaos tests
+a3net-mesh               unit + integration
+a3net-transport          unit + iroh e2e (feature-gated)
+a3net-node               unit + multi-transport integration
+a3net-dht                unit + aerospace-grade chaos
+a3net-namespace          unit + comprehensive
+a3net-relay              unit + ActiveSessionGuard tests
+a3net-ipc-adapter        unit + integration (noise handshake)
+a3net-resilience         unit (retry / breaker / cancellation / limiter)
+a3net-observability      unit + structured panic
+a3net-agent              unit + provider mock
+a3net-cli                unit + daemon smoke + ipc-client tests
+a3net-roster             unit
+a3net-chatstore          unit + iroh-docs sync
+a3net-reputation         unit + decay loop
+a3net-moderation         unit + integration
 a3chat-core              unit + JSON-Schema export
 a3chat-crypto            unit + Noise_XX round-trip + Sender-Key chain
 a3chat-rpc               unit + dispatch + SSE
@@ -697,38 +697,38 @@ Every crate ships a runnable example that demonstrates its main
 capability:
 
 ```bash
-# adnet-types — identity / ticket / announcement wire formats
-cargo run -p adnet-types --example node_id_roundtrip
-cargo run -p adnet-types --example blob_ticket_demo
-cargo run -p adnet-types --example announcement_demo
+# a3net-types — identity / ticket / announcement wire formats
+cargo run -p a3net-types --example node_id_roundtrip
+cargo run -p a3net-types --example blob_ticket_demo
+cargo run -p a3net-types --example announcement_demo
 
-# adnet-blobstore — chunked round-trip with range reads
-cargo run -p adnet-blobstore --example round_trip
+# a3net-blobstore — chunked round-trip with range reads
+cargo run -p a3net-blobstore --example round_trip
 
-# adnet-gossip — two-node publish/subscribe over InProcessGossip
-cargo run -p adnet-gossip --example two_node_publish
+# a3net-gossip — two-node publish/subscribe over InProcessGossip
+cargo run -p a3net-gossip --example two_node_publish
 
-# adnet-mesh — HTTP mesh server + client (whole, Range:, multi-range)
-cargo run -p adnet-mesh --example server_and_client
+# a3net-mesh — HTTP mesh server + client (whole, Range:, multi-range)
+cargo run -p a3net-mesh --example server_and_client
 
-# adnet-transport — native QUIC roundtrip with framed messages
-cargo run -p adnet-transport --example quic_roundtrip
+# a3net-transport — native QUIC roundtrip with framed messages
+cargo run -p a3net-transport --example quic_roundtrip
 
-# adnet-node — multi-node blob sharing / gossip echo
-cargo run -p adnet-node --example blob_share
-cargo run -p adnet-node --example two_node_echo
+# a3net-node — multi-node blob sharing / gossip echo
+cargo run -p a3net-node --example blob_share
+cargo run -p a3net-node --example two_node_echo
 
-# adnet-cli — CLI parser and all commands
-cargo run -p adnet-cli --example cli_parser
+# a3net-cli — CLI parser and all commands
+cargo run -p a3net-cli --example cli_parser
 
 # a3chat — end-to-end encrypted DM round-trip
 cargo run -p a3chat-app --example dm_roundtrip
 
-# adnet-agent — provider + tool call
-cargo run -p adnet-agent --example chat_loop
+# a3net-agent — provider + tool call
+cargo run -p a3net-agent --example chat_loop
 
-# adnet-tui — terminal UI demo
-cargo run -p adnet-tui --example tui_demo
+# a3net-tui — terminal UI demo
+cargo run -p a3net-tui --example tui_demo
 ```
 
 ---

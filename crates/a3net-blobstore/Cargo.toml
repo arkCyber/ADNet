@@ -1,0 +1,66 @@
+[package]
+name        = "a3net-blobstore"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Disk-backed BLAKE3 chunked content store (iroh-blobs layout parity)."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types         = { workspace = true }
+a3net-observability = { workspace = true }
+a3net-crypto        = { workspace = true }
+tokio        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+blake3       = { workspace = true }
+hex          = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+once_cell    = { workspace = true }
+parking_lot  = { workspace = true }
+rand         = { workspace = true, features = ["small_rng"] }
+chrono       = { workspace = true }
+# Encrypted blob store support: AEAD (XChaCha20-Poly1305) for chunk
+# encryption + Argon2id for passphrase-derived keys are now defined in
+# the dedicated `a3net-crypto` crate so other surfaces (FFI, agent
+# chat history, …) can share the same primitives.
+chacha20poly1305 = { workspace = true }
+argon2           = { workspace = true }
+zeroize          = { workspace = true }
+
+# iroh-backed blob store adapter. When the `iroh` feature is on,
+# callers can build an `IrohBlobStore` next to a regular `BlobStore`
+# and route reads/writes through iroh-blobs' Bao-verified QUIC
+# protocol. The on-disk layout is a separate redb database under
+# `<data_dir>/iroh-blobs/` so the legacy directory-per-hash layout
+# is preserved.
+iroh-blobs = { version = "=0.103.0", optional = true, default-features = false, features = ["fs-store"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true }
+proptest = "1.4"
+rand = { workspace = true }
+
+[features]
+# Default: only the legacy `BlobStore` is available. The `iroh`
+# feature adds `IrohBlobStore` (in `iroh_store`) backed by iroh-blobs'
+# Bao-verified fs store.
+default = []
+iroh = ["dep:iroh-blobs"]
+scope = []
+bitswap = []
+car = []
+# GraphSync DAG-sync support: re-exports the wire envelope,
+# `GraphSyncClient` / `GraphSyncServer` / `MockGraphSyncTransport` /
+# `MemDagStore` from the `graphsync` module so callers can drive the
+# protocol against the on-disk `BlobStore` (or an in-memory store).
+# The QUIC bridge / dispatcher wiring lives in `a3net-node` under
+# the same feature gate.
+graphsync = []

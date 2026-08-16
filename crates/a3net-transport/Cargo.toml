@@ -1,0 +1,100 @@
+[package]
+name        = "a3net-transport"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "QUIC transport adapter (native quinn) with iroh-net integration trait."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types     = { workspace = true }
+a3net-blobstore = { workspace = true }
+tokio           = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+async-trait     = { workspace = true }
+futures         = { workspace = true }
+tracing         = { workspace = true }
+quinn           = { workspace = true }
+rustls          = { workspace = true }
+rand            = { workspace = true }
+rcgen           = { workspace = true }
+x509-parser     = "0.16"
+blake3          = { workspace = true }
+hex             = { workspace = true }
+base64         = "0.22"
+time           = { version = "0.3", features = ["std"] }
+a3net-observability = { workspace = true }
+zeroize        = "1.7"
+parking_lot    = { workspace = true }
+once_cell      = { workspace = true }
+
+# iroh feature uses anyhow for ergonomic error mapping at the iroh
+# adapter boundary. The default build never touches this.
+anyhow         = { workspace = true, optional = true }
+# a3net-agent types for the `agent-v1` feature.
+a3net-agent    = { workspace = true, optional = true }
+uuid          = { workspace = true, optional = true }
+
+# iroh-backed transport — opt-in. Pulls in NAT traversal, DERP relay,
+# Pkarr address discovery, Bao-verified blob streaming, and the
+# HyParView+PlumTree gossip protocol.
+#
+# Versioning note: iroh 1.0.3 is the umbrella release, but the
+# sub-crates (`iroh-blobs`, `iroh-gossip`, `iroh-docs`) are still on
+# their 0.x lines and follow the iroh main package. We pin to the
+# minimum versions that are declared compatible with `iroh = 1.0.x`
+# (see iroh's own Cargo.toml). Bump these together.
+iroh          = { version = "=1.0.3", optional = true, default-features = false, features = ["tls-ring"] }
+iroh-base     = { version = "=1.0.3", optional = true, default-features = false, features = ["key", "relay"] }
+iroh-blobs    = { version = "=0.103.0", optional = true, default-features = false, features = ["fs-store"] }
+iroh-gossip   = { version = "=0.101.0", optional = true, default-features = false, features = ["net"] }
+iroh-relay    = { version = "=1.0.3", optional = true, default-features = false, features = ["tls-ring"] }
+iroh-docs     = { version = "=0.101.0", optional = true, default-features = false, features = ["fs-store"] }
+pkarr         = { version = "=8.0.0",  optional = true, default-features = false, features = ["relays"] }
+iroh-mdns-address-lookup = { version = "0.4", optional = true }
+url = { version = "2.5", optional = true }
+rustls-pemfile = { version = "2.2", optional = true }
+n0-future = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true }
+hex     = { workspace = true }
+
+[features]
+# Default: native QUIC (quinn) path. No iroh dependency pulled in,
+# zero effect on cold-build time, identical behaviour to today.
+default = []
+# Opt in to the iroh-backed transport. Enables `IrohTransport` in
+# `a3net_transport::iroh` and pulls in iroh + iroh-base + iroh-blobs
+# + iroh-gossip + iroh-relay + iroh-docs + pkarr as transitive deps.
+# Build with `cargo build -p a3net-transport --features iroh`.
+iroh = [
+    "dep:iroh",
+    "dep:iroh-base",
+    "dep:iroh-blobs",
+    "dep:iroh-gossip",
+    "dep:iroh-relay",
+    "dep:iroh-docs",
+    "dep:pkarr",
+    "dep:anyhow",
+    "dep:url",
+    "dep:rustls-pemfile",
+    "dep:n0-future",
+]
+# mDNS LAN discovery — layered on top of `iroh`. Enables the
+# `MdnsAddressLookup` wrapper around `iroh-mdns-address-lookup`
+# so nodes on the same LAN can discover each other without
+# a relay or DHT. Build with `cargo build -p a3net-transport
+# --features iroh,mdns`.
+mdns = ["dep:iroh-mdns-address-lookup", "dep:n0-future", "iroh"]
+# Opt in to the agent.v1 protocol framing (typed payloads over the
+# transport).  Enables the `a3net_agent` dependency so that
+# `AgentV1Chat` / `AgentV1ChatResponse` types can carry
+# `a3net_agent::ChatRequest` / `ChatResponse` inner payloads.
+agent-v1 = ["dep:a3net-agent", "dep:uuid"]

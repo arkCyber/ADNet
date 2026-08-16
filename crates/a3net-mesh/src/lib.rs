@@ -1,0 +1,28 @@
+//! `a3net-mesh` — HTTP mesh transport for A3Net blobs.
+//!
+//! Two pieces:
+//!
+//! - [`server`]: a tiny `tokio` HTTP server that serves a [`BlobStore`] at
+//!   `GET /health`, `GET /blobs/{hash}/meta`, `GET /blobs/{hash}/chunks/{i}`.
+//! - [`client`]: parallel chunk-aware fetcher that talks to a [`MeshServer`].
+//!
+//! The mesh layer is the fallback transport. Higher-performance QUIC / iroh
+//! transports live behind the [`Transport`](a3net_transport) trait in
+//! `a3net-transport` and are preferred when available.
+
+#![forbid(unsafe_code)]
+#![deny(unused_must_use)]
+
+pub mod client;
+pub mod server;
+
+pub use client::{MeshFetchResult, fetch_from_mesh};
+pub use server::{MeshServer, MeshServerHandle};
+
+/// Stub configuration for the mesh server.
+/// Controls bind address and other mesh-level settings.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MeshConfig {
+    /// Bind address for the mesh HTTP server.
+    pub bind_addr: Option<String>,
+}

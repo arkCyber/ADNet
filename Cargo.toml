@@ -1,64 +1,85 @@
 [workspace]
 resolver = "2"
+# `/mobile` is a Flutter (Dart) app. Cargo's workspace discovery walks the
+# whole tree by default; exclude it explicitly so `cargo metadata`, IDE
+# indexing, and `cargo build` never see Flutter artifacts (build/, .dart_tool/,
+# ios/, android/, web/, linux/, macos/, windows/) and never mistakenly try to
+# parse `pubspec.yaml` as a Cargo manifest.
+exclude = [
+    "mobile",
+    "mobile/**",
+    "target",
+    "**/target",
+    "**/node_modules",
+]
 members = [
-    "crates/adnet-types",
-    "crates/adnet-error",
-    "crates/adnet-observability",
-    "crates/adnet-blobstore",
-    "crates/adnet-gossip",
-    "crates/adnet-dht",
-    "crates/adnet-namespace",
-    "crates/adnet-mesh",
-    "crates/adnet-resilience",
-    "crates/adnet-transport",
-    "crates/adnet-ipc",
-    "crates/adnet-relay",
-    "crates/adnet-workspace",
-    "crates/adnet-gateway",
-    "crates/adnet-chatstore",
-    "crates/adnet-node",
-    "crates/adnet-cli",
-    "crates/adnet-ipc-adapter",
-    "crates/adnet-identity",
-    "crates/adnet-token",
-    "crates/adnet-roster",
-    "crates/adnet-share",
-    "crates/adnet-socialfeed",
-    "crates/adnet-news",
-    "crates/adnet-userstore",
-    "crates/adnet-bench",
-    "crates/adnet-simulator",
-    "crates/adnet-fuzz",
-    "crates/adnet-integration-tests",
-    "crates/adnet-tui",
-    "crates/adnet-security",
-    "crates/adnet-database",
-    "crates/adnet-nat-traversal",
-    "crates/adnet-verify",
-    "crates/adnet-chaos",
-    "crates/adnet-mail",
-    "crates/adnet-ssh",
-    "crates/adnet-webdav",
-    "crates/adnet-smarthome",
-    "crates/adnet-magicdns",
-    "crates/adnet-pairing",
-    "crates/adnet-invite",
-    "crates/adnet-qr",
-    "crates/adnet-agent",
-    "crates/adnet-tun",
-    "crates/adnet-dns-server",
-    "crates/adnet-chain",
-    "crates/adnet-model-catalog",
-    "crates/adnet-media",
-    "crates/adnet-ffi",
-    "crates/adnet-reputation",
-    "crates/adnet-mesh-coordinator",
-    "crates/adnet-mesh-firewall",
-    "crates/adnet-rpc",
-    "crates/adnet-webhook",
-    "crates/adnet-backup",
-    "crates/adnet-webrtc",
-    "crates/adnet-webtransport",
+    "crates/a3net-types",
+    "crates/a3net-error",
+    "crates/a3net-observability",
+    "crates/a3net-blobstore",
+    "crates/a3net-crypto",
+    "crates/a3net-gossip",
+    "crates/a3net-dht",
+    "crates/a3net-namespace",
+    "crates/a3net-mesh",
+    "crates/a3net-resilience",
+    "crates/a3net-transport",
+    "crates/a3net-ipc",
+    "crates/a3net-relay",
+    "crates/a3net-workspace",
+    "crates/a3net-gateway",
+    "crates/a3net-chatstore",
+    "crates/a3net-node",
+    "crates/a3net-cli",
+    "crates/a3net-ipc-adapter",
+    "crates/a3net-identity",
+    "crates/a3net-token",
+    "crates/a3net-roster",
+    "crates/a3net-share",
+    "crates/a3net-socialfeed",
+    "crates/a3net-news",
+    "crates/a3net-userstore",
+    "crates/a3net-bench",
+    "crates/a3net-simulator",
+    "crates/a3net-fuzz",
+    "crates/a3net-integration-tests",
+    "crates/a3net-tui",
+    "crates/a3net-security",
+    "crates/a3net-database",
+    "crates/a3net-nat-traversal",
+    "crates/a3net-hole-punch",
+    "crates/a3net-verify",
+    "crates/a3net-chaos",
+    "crates/a3net-mail",
+    "crates/a3net-ssh",
+    "crates/a3net-webdav",
+    "crates/a3net-smarthome",
+    "crates/a3net-magicdns",
+    "crates/a3net-pairing",
+    "crates/a3net-invite",
+    "crates/a3net-qr",
+    "crates/a3net-agent",
+    "crates/a3net-tun",
+    "crates/a3net-dns-server",
+    "crates/a3net-chain",
+    "crates/a3net-model-catalog",
+    "crates/a3net-media",
+    "crates/a3net-ffi",
+    "crates/a3net-reputation",
+    "crates/a3net-mesh-coordinator",
+    "crates/a3net-mesh-firewall",
+    "crates/a3net-rpc",
+    "crates/a3net-webhook",
+    "crates/a3net-backup",
+    "crates/a3net-webrtc",
+    "crates/a3net-webtransport",
+    "crates/a3net-wallet-evm",
+    "crates/a3chat-core",
+    "crates/a3chat-crypto",
+    "crates/a3chat-app",
+    "crates/a3chat-rpc",
+    "crates/a3chat-tauri",
+    "crates/a3chat-cli",
 ]
 
 # Shared metadata used by every workspace member via `{ workspace = true }`.
@@ -67,14 +88,14 @@ version     = "0.1.0"
 # iroh 1.0 requires Rust 1.91 + edition 2024. We need both in order to
 # link `iroh`, `iroh-blobs`, `iroh-gossip`, `iroh-relay`, `iroh-base`,
 # `iroh-docs` as workspace dependencies. The `iroh` feature on
-# `adnet-transport` is the canonical gate: when enabled, callers get
+# `a3net-transport` is the canonical gate: when enabled, callers get
 # NAT-traversal / DERP relay / Pkarr / Bao verification; when disabled,
 # the existing quinn-based QUIC path is preserved.
 edition     = "2024"
 rust-version = "1.91"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/arksong/adnet"
-authors     = ["ADNet Contributors"]
+repository  = "https://github.com/arksong/a3net"
+authors     = ["A3Net Contributors"]
 
 [workspace.dependencies]
 # --- Async runtime / utilities ----------------------------------------------
@@ -151,11 +172,11 @@ rcgen   = "0.13"
 # --- WebRTC / WebTransport ---------------------------------------------------
 # `webrtc` (webrtc-rs) is the Pion port; it implements SDP, ICE, DTLS, SCTP and
 # DataChannel entirely in pure Rust. The default build never pulls it in; opt-in
-# via `adnet-webrtc`'s `webrtc` feature flag.
+# via `a3net-webrtc`'s `webrtc` feature flag.
 webrtc      = { version = "0.13", default-features = false }
 # `snow` provides the Noise_XX handshake primitives used by the WebRTC and
-# WebTransport paths. We re-use the same primitives already used by adnet-dht
-# (see `adnet-dht::noise::NoiseHandshake`) so the handshake shape stays
+# WebTransport paths. We re-use the same primitives already used by a3net-dht
+# (see `a3net-dht::noise::NoiseHandshake`) so the handshake shape stays
 # uniform across transports.
 snow        = { version = "0.9", default-features = false, features = ["default-resolver"] }
 # `wtransport` is the pure-Rust WebTransport (HTTP/3) server + client. It also
@@ -179,64 +200,73 @@ proptest  = "1.4"
 # ---------------------------------------------------------------------------
 # Internal workspace member shorthands
 # ---------------------------------------------------------------------------
-adnet-types             = { path = "crates/adnet-types" }
-adnet-error             = { path = "crates/adnet-error" }
-adnet-observability     = { path = "crates/adnet-observability" }
-adnet-blobstore         = { path = "crates/adnet-blobstore" }
-adnet-gossip            = { path = "crates/adnet-gossip" }
-adnet-dht               = { path = "crates/adnet-dht" }
-adnet-namespace         = { path = "crates/adnet-namespace" }
-adnet-mesh              = { path = "crates/adnet-mesh" }
-adnet-resilience        = { path = "crates/adnet-resilience" }
-adnet-transport         = { path = "crates/adnet-transport" }
-adnet-ipc               = { path = "crates/adnet-ipc" }
-adnet-relay             = { path = "crates/adnet-relay" }
-adnet-workspace         = { path = "crates/adnet-workspace" }
-adnet-gateway           = { path = "crates/adnet-gateway" }
-adnet-node              = { path = "crates/adnet-node" }
-adnet-identity          = { path = "crates/adnet-identity" }
-adnet-token             = { path = "crates/adnet-token" }
-adnet-chatstore         = { path = "crates/adnet-chatstore" }
-adnet-ipc-adapter       = { path = "crates/adnet-ipc-adapter" }
-adnet-roster            = { path = "crates/adnet-roster" }
-adnet-share             = { path = "crates/adnet-share" }
-adnet-socialfeed        = { path = "crates/adnet-socialfeed" }
-adnet-news              = { path = "crates/adnet-news" }
-adnet-userstore         = { path = "crates/adnet-userstore" }
-adnet-pairing           = { path = "crates/adnet-pairing" }
-adnet-invite            = { path = "crates/adnet-invite" }
-adnet-qr                = { path = "crates/adnet-qr" }
-adnet-agent             = { path = "crates/adnet-agent" }
-adnet-ssh               = { path = "crates/adnet-ssh" }
-adnet-webdav            = { path = "crates/adnet-webdav" }
-adnet-tun               = { path = "crates/adnet-tun" }
-adnet-exit-node         = { path = "crates/adnet-exit-node" }
-adnet-magicdns          = { path = "crates/adnet-magicdns" }
-adnet-dns-server        = { path = "crates/adnet-dns-server" }
-adnet-mail              = { path = "crates/adnet-mail" }
-adnet-smarthome         = { path = "crates/adnet-smarthome" }
-adnet-chain             = { path = "crates/adnet-chain" }
-adnet-model-catalog     = { path = "crates/adnet-model-catalog" }
-adnet-media             = { path = "crates/adnet-media" }
-adnet-ffi               = { path = "crates/adnet-ffi" }
-adnet-reputation        = { path = "crates/adnet-reputation" }
-adnet-mesh-coordinator  = { path = "crates/adnet-mesh-coordinator" }
-adnet-mesh-firewall     = { path = "crates/adnet-mesh-firewall" }
-adnet-rpc               = { path = "crates/adnet-rpc" }
-adnet-webhook            = { path = "crates/adnet-webhook" }
-adnet-backup             = { path = "crates/adnet-backup" }
-adnet-webrtc             = { path = "crates/adnet-webrtc" }
-adnet-webtransport       = { path = "crates/adnet-webtransport" }
-adnet-bench             = { path = "crates/adnet-bench" }
-adnet-simulator         = { path = "crates/adnet-simulator" }
-adnet-fuzz             = { path = "crates/adnet-fuzz" }
-adnet-integration-tests = { path = "crates/adnet-integration-tests" }
-adnet-tui              = { path = "crates/adnet-tui" }
-adnet-security         = { path = "crates/adnet-security" }
-adnet-database         = { path = "crates/adnet-database" }
-adnet-nat-traversal    = { path = "crates/adnet-nat-traversal" }
-adnet-verify           = { path = "crates/adnet-verify" }
-adnet-chaos           = { path = "crates/adnet-chaos" }
+a3net-types             = { path = "crates/a3net-types" }
+a3net-error             = { path = "crates/a3net-error" }
+a3net-observability     = { path = "crates/a3net-observability" }
+a3net-blobstore         = { path = "crates/a3net-blobstore" }
+a3net-crypto            = { path = "crates/a3net-crypto" }
+a3net-gossip            = { path = "crates/a3net-gossip" }
+a3net-dht               = { path = "crates/a3net-dht" }
+a3net-namespace         = { path = "crates/a3net-namespace" }
+a3net-mesh              = { path = "crates/a3net-mesh" }
+a3net-resilience        = { path = "crates/a3net-resilience" }
+a3net-transport         = { path = "crates/a3net-transport" }
+a3net-ipc               = { path = "crates/a3net-ipc" }
+a3net-relay             = { path = "crates/a3net-relay" }
+a3net-workspace         = { path = "crates/a3net-workspace" }
+a3net-gateway           = { path = "crates/a3net-gateway" }
+a3net-node              = { path = "crates/a3net-node" }
+a3net-identity          = { path = "crates/a3net-identity" }
+a3net-token             = { path = "crates/a3net-token" }
+a3net-chatstore         = { path = "crates/a3net-chatstore" }
+a3net-ipc-adapter       = { path = "crates/a3net-ipc-adapter" }
+a3net-roster            = { path = "crates/a3net-roster" }
+a3net-share             = { path = "crates/a3net-share" }
+a3net-socialfeed        = { path = "crates/a3net-socialfeed" }
+a3net-news              = { path = "crates/a3net-news" }
+a3net-userstore         = { path = "crates/a3net-userstore" }
+a3net-pairing           = { path = "crates/a3net-pairing" }
+a3net-invite            = { path = "crates/a3net-invite" }
+a3net-qr                = { path = "crates/a3net-qr" }
+a3net-agent             = { path = "crates/a3net-agent" }
+a3net-ssh               = { path = "crates/a3net-ssh" }
+a3net-webdav            = { path = "crates/a3net-webdav" }
+a3net-tun               = { path = "crates/a3net-tun" }
+a3net-exit-node         = { path = "crates/a3net-exit-node" }
+a3net-magicdns          = { path = "crates/a3net-magicdns" }
+a3net-dns-server        = { path = "crates/a3net-dns-server" }
+a3net-mail              = { path = "crates/a3net-mail" }
+a3net-smarthome         = { path = "crates/a3net-smarthome" }
+a3net-chain             = { path = "crates/a3net-chain" }
+a3net-model-catalog     = { path = "crates/a3net-model-catalog" }
+a3net-media             = { path = "crates/a3net-media" }
+a3net-ffi               = { path = "crates/a3net-ffi" }
+a3net-reputation        = { path = "crates/a3net-reputation" }
+a3net-moderation        = { path = "crates/a3net-moderation" }
+a3net-mesh-coordinator  = { path = "crates/a3net-mesh-coordinator" }
+a3net-mesh-firewall     = { path = "crates/a3net-mesh-firewall" }
+a3net-rpc               = { path = "crates/a3net-rpc" }
+a3net-webhook           = { path = "crates/a3net-webhook" }
+a3net-backup            = { path = "crates/a3net-backup" }
+a3net-webrtc            = { path = "crates/a3net-webrtc" }
+a3net-webtransport      = { path = "crates/a3net-webtransport" }
+a3net-wallet-evm        = { path = "crates/a3net-wallet-evm" }
+a3chat-core               = { path = "crates/a3chat-core" }
+a3chat-crypto             = { path = "crates/a3chat-crypto" }
+a3chat-app                = { path = "crates/a3chat-app" }
+a3chat-rpc                = { path = "crates/a3chat-rpc" }
+a3chat-tauri              = { path = "crates/a3chat-tauri" }
+a3net-bench             = { path = "crates/a3net-bench" }
+a3net-simulator         = { path = "crates/a3net-simulator" }
+a3net-fuzz             = { path = "crates/a3net-fuzz" }
+a3net-integration-tests = { path = "crates/a3net-integration-tests" }
+a3net-tui              = { path = "crates/a3net-tui" }
+a3net-security         = { path = "crates/a3net-security" }
+a3net-database         = { path = "crates/a3net-database" }
+a3net-nat-traversal    = { path = "crates/a3net-nat-traversal" }
+a3net-hole-punch       = { path = "crates/a3net-hole-punch" }
+a3net-verify           = { path = "crates/a3net-verify" }
+a3net-chaos           = { path = "crates/a3net-chaos" }
 
 # ---------------------------------------------------------------------------
 # Profile / lints applied workspace-wide
@@ -257,12 +287,12 @@ unused_must_use = "deny"
 all = { level = "warn", priority = -1 }
 
 # ---------------------------------------------------------------------------
-# Build-time opt-in flags consumed by adnet-node (and any other future
-# embedder of adnet-relay). Setting these in `[package.metadata]` lets a
+# Build-time opt-in flags consumed by a3net-node (and any other future
+# embedder of a3net-relay). Setting these in `[package.metadata]` lets a
 # downstream Cargo build opt-in to billing without touching the
-# `adnet-node` source: `cargo build -p adnet-node --features
+# `a3net-node` source: `cargo build -p a3net-node --features
 # workspace-billing`. Member crates then forward the flag to their
-# own feature gates (see `adnet-relay/billing` and `adnet-node/billing`).
+# own feature gates (see `a3net-relay/billing` and `a3net-node/billing`).
 # ---------------------------------------------------------------------------
-[workspace.metadata.adnet]
+[workspace.metadata.a3net]
 billing_supported = true

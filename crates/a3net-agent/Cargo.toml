@@ -1,0 +1,46 @@
+[package]
+name        = "a3net-agent"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "AI-agent integration seams for A3Net. Defines LLM-provider-agnostic traits (ChatModel, Tool, ToolRegistry, Agent) so the LLM/tool stack can be plugged in by the host application without A3Net itself depending on any specific provider SDK."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types     = { workspace = true }
+async-trait     = { workspace = true }
+futures         = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+tokio           = { workspace = true }
+tracing         = { workspace = true }
+chrono          = { workspace = true }
+uuid            = { workspace = true }
+parking_lot     = "0.12"
+http            = "1"
+reqwest         = { version = "0.12", default-features = false, features = ["json"] }
+a3net-observability = { workspace = true, optional = true }
+a3net-mail      = { workspace = true, optional = true }
+once_cell      = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[features]
+default = []
+# Audit logging: emits structured JSON log events via `tracing` and
+# Prometheus metrics (counters + histogram) for every agent invocation.
+# Requires `a3net-observability` so the metrics can register with the
+# global `Registry`. Without this feature the `audit` module is compiled
+# out entirely (zero cost).
+audit = ["dep:a3net-observability"]
+# Email integration: exposes `MailTool` so an AI agent can read its
+# inbox, send new emails, and reply to existing ones. Requires
+# `a3net-mail` for the IMAP/SMTP/MIME transport stack. Without this
+# feature the `mail_tool` module is compiled out entirely.
+mail = ["dep:a3net-mail"]

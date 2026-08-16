@@ -1,0 +1,53 @@
+[package]
+name = "a3net-smarthome"
+version = "0.1.0"
+edition = "2021"
+description = "Smart Home Hub for A3Net NAS - supports Xiaomi MIoT, Matter, mDNS discovery, and automation"
+
+[dependencies]
+tokio = { version = "1.41", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+anyhow = "1.0"
+
+# HTTP client (MIoT cloud API)
+reqwest = { version = "0.12", features = ["json", "cookies"] }
+
+# Cryptography for MIoT signatures
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+rand = "0.8"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# mDNS device discovery
+mdns-sd = "0.11"
+
+# URL parsing (QR login flow)
+url = "2.5"
+
+# HTTP server (REST API)
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+hex = "0.4"
+
+# Matter protocol — commissioning and device control.
+# This pulls in the full matter-* stack (matter-transport, matter-codec,
+# matter-cert, matter-crypto, matter-clusters, etc.) as transitive deps.
+matter-controller = "0.4"
+
+# TLV codec re-exported for Tag type used in describe_node().
+matter-codec = "0.2"
+
+# MQTT protocol support
+rumqttc = "0.24"
+hostname = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"

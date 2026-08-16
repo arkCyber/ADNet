@@ -1,0 +1,83 @@
+[package]
+name        = "a3net-ffi"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "A3Net C-ABI surface for mobile (iOS / Android) and WASM embedders."
+
+# FFI boundary requires `unsafe extern "C"` and `unsafe impl Send`;
+# the workspace lints table would otherwise `forbid(unsafe_code)`.
+# All other unsafe uses in this crate are reviewed by hand.
+[lints.rust]
+unsafe_code     = { level = "allow", priority = -1 }
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+a3net-types     = { workspace = true }
+a3net-node      = { workspace = true }
+a3net-transport = { workspace = true }
+a3net-roster    = { workspace = true }
+a3net-userstore = { workspace = true }
+a3net-news      = { workspace = true, optional = true }
+
+# JSON output for FFI consumers (Swift / Kotlin / JS).
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# Error mapping; the FFI returns JSON-encoded error objects rather
+# than a typed `enum` because C-ABIs don't carry rich errors.
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+# C header generator. Used by the `a3net-ffi-cbindgen` binary.
+cbindgen   = "0.29"
+
+# Bytes buffers crossing the FFI boundary.
+bytes = "1"
+
+# Time helpers for nonce generation in publish flows.
+chrono = { workspace = true }
+
+# Tokio runtime per FFI handle so mobile callers can drive
+# async node code without an external runtime.
+tokio  = { workspace = true }
+
+# Run the async roster / userstore methods without an external
+# runtime; each FFI call is a single SQLite statement so the
+# executor overhead is negligible.
+futures = "0.3"
+
+[features]
+# Default: iroh-feature OFF, native QUIC only. Mobile builds
+# typically want iroh ON; configure via the downstream build.
+default = []
+iroh = [
+    "a3net-transport/iroh",
+    "a3net-node/iroh",
+]
+# `uniffi` UDL-driven bindings (Swift / Kotlin / Python). Off by
+# default so the default-build C ABI stays the only surface. When
+# enabled, `a3net_ffi_uniffi_*` symbols are exported in addition
+# to the C ABI, and `cargo run -p a3net-ffi --features uniffi --
+# uniffi generate` produces a `a3net.swift` / `a3net.kt` /
+# `a3net.py` file.
+uniffi = ["dep:uniffi"]
+
+# Expose the news + announcements pub/sub surface over FFI:
+# `a3net_news_publish` / `a3net_news_timeline` /
+# `a3net_news_subscribe` / `a3net_news_mark_read`. Forwarded
+# onto the `news` feature of `a3net-node` and pulls in
+# `a3net-news`.
+news = ["a3net-node/news", "dep:a3net-news"]
+[dependencies.uniffi]
+version  = "0.27"
+optional = true
+
+[dev-dependencies]
+# Ephemeral on-disk directories used by FFI news end-to-end
+# tests. Lives in `dev-dependencies` so it never inflates the
+# library build for downstream consumers.
+tempfile = "3"

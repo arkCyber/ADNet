@@ -1,0 +1,48 @@
+[package]
+name = "a3net-eliza-bridge"
+description = "Eliza OS adapters for A3Net: ChatClient and FeedAdapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# A3Net core
+a3net-chatstore = { path = "../a3net-chatstore" }
+a3net-gossip = { path = "../a3net-gossip" }
+a3net-news = { path = "../a3net-news" }
+a3net-roster = { path = "../a3net-roster" }
+a3net-node = { path = "../a3net-node" }
+a3net-types = { path = "../a3net-types" }
+a3net-identity = { path = "../a3net-identity" }
+a3net-agent = { path = "../a3net-agent" }
+a3net-blobstore = { path = "../a3net-blobstore" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+# iroh for P2P transport (features inherited from transitive dependencies)
+iroh = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+tokio-test = "0.4"

@@ -1,0 +1,141 @@
+[package]
+name        = "a3net-node"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "A3Net node — orchestrates blobstore, gossip, transport and mesh into a single runtime."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types     = { workspace = true }
+a3net-blobstore = { workspace = true, features = ["bitswap"] }
+a3net-gossip    = { workspace = true }
+a3net-ipc       = { workspace = true }
+a3net-mesh      = { workspace = true }
+a3net-resilience = { workspace = true }
+a3net-transport = { workspace = true }
+a3net-relay      = { workspace = true }
+a3net-workspace  = { workspace = true }
+a3net-observability = { workspace = true }
+a3net-chatstore  = { workspace = true, optional = true }
+a3net-news       = { workspace = true, optional = true }
+tokio            = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+async-trait     = { workspace = true }
+futures         = { workspace = true }
+tracing         = { workspace = true }
+chrono          = { workspace = true }
+reqwest         = { workspace = true }
+anyhow          = { workspace = true }
+parking_lot    = { workspace = true }
+once_cell       = { workspace = true }
+blake3          = { workspace = true }
+
+# iroh-backed runtime. When the `iroh` feature is on, callers can pass
+# an `iroh::Endpoint` (already constructed and bound) to
+# `NodeBuilder::with_iroh_endpoint` and the node will spawn an iroh
+# `Router` that hosts `BlobsProtocol` + `Gossip` on top of the
+# endpoint. The A3Net gossip transport and blob store are wired in
+# behind the same `iroh` feature on the corresponding crates.
+iroh            = { version = "=1.0.3", optional = true, default-features = false, features = ["tls-ring"] }
+iroh-blobs      = { version = "=0.103.0", optional = true, default-features = false, features = ["fs-store"] }
+iroh-gossip     = { version = "=0.101.0", optional = true, default-features = false, features = ["net"] }
+iroh-docs       = { version = "=0.101.0", optional = true, default-features = false, features = ["fs-store"] }
+
+# Opt-in identity/token dependencies.
+a3net-identity = { workspace = true, optional = true }
+a3net-token    = { workspace = true, optional = true }
+
+# AI-agent bridge (LLM/tool orchestration). When the `agent` feature
+# is on, `NodeBuilder::with_agent_bridge` and `Node::register_agent`
+# / `register_tool` / `agent_endpoint` become available. The host
+# application (e.g. the A3Net CLI) can plug in any LLM SDK
+# (OpenAI, Anthropic, Hermes-Rust, Ollama, …) by implementing the
+# `a3net_agent::ChatModel` / `Tool` traits.
+a3net-agent = { workspace = true, optional = true }
+uuid        = { workspace = true, optional = true }
+
+# DHT + IPNS layer.
+a3net-dht       = { workspace = true, optional = true }
+a3net-namespace = { workspace = true, optional = true }
+
+[features]
+# Default: pure forward-proxy node, no crypto deps for billing.
+default = []
+# Enable Bitswap content exchange (requires a3net-blobstore/bitswap).
+bitswap = ["a3net-blobstore/bitswap"]
+# Enable GraphSync DAG-sync content exchange (IPFS-style GraphSync on
+# top of the QUIC bridge). Pulls in the node-side graphsync module
+# (ALPN handshake + QUIC bridge + dispatcher service + `NodeBuilder
+# ::with_graphsync` wiring) and the `a3net-blobstore` graphsync
+# support that backs it. Activating this feature gates every
+# graphsync-related symbol under `cfg(feature = "graphsync")` so a
+# default build does not pay the cost.
+graphsync = ["a3net-blobstore/graphsync"]
+# Internal feature forwarded to `iroh-docs` so the
+# `iroh_runtime::spawn` persistent-mode branch is compiled. Not
+# intended to be enabled directly — opt into `iroh` instead.
+fs-store = ["iroh-docs/fs-store"]
+# Opt in to the relay's billing endpoints (and the helpers needed to
+# sign announcements / manage a treasury). When on, `a3net-relay`'s
+# own `billing` feature is also enabled.
+billing = [
+    "dep:a3net-identity",
+    "dep:a3net-token",
+    "a3net-relay/billing",
+]
+# Opt in to the iroh-backed runtime. Pulls in `iroh`, `iroh-blobs`,
+# `iroh-gossip`, `iroh-docs`, and forwards the `fs-store` feature
+# so `iroh-runtime::spawn` actually uses the persistent docs
+# backend.
+iroh = [
+    "dep:iroh",
+    "dep:iroh-blobs",
+    "dep:iroh-gossip",
+    "dep:iroh-docs",
+    "dep:a3net-chatstore",
+    "a3net-blobstore/iroh",
+    "a3net-gossip/iroh",
+    "a3net-transport/iroh",
+    "a3net-chatstore/iroh",
+    "fs-store",
+]
+# Opt in to the DHT + IPNS layer. Pulls in `a3net-dht` and
+# `a3net-namespace` and wires `DhtHandle` + `IpnHandle` into
+# `Node`. Enables the CLI's `a3net dht {provide,find,peers,stats}`
+# and `a3net ipfs name {publish,resolve}` commands.
+dht = [
+    "dep:a3net-dht",
+    "dep:a3net-namespace",
+    "a3net-namespace/dht",
+]
+# Opt in to the news/announcements pub/sub surface. Pulls in
+# `a3net-news`; consumers (e.g. the FFI `news` feature) can
+# forward this directly.
+news = ["dep:a3net-news"]
+# Opt in to the AI-agent bridge. Pulls in `a3net-agent` and exposes
+# `NodeBuilder::with_agent_bridge` / `Node::register_agent` /
+# `Node::register_tool` / `Node::agent_endpoint`. Default off so
+# the default build does not pay the `reqwest` cost until a host
+# explicitly opts in.
+agent = ["dep:a3net-agent", "dep:uuid", "a3net-agent/audit"]
+# Opt in to the peer-to-peer AI-agent protocol (`agent.v1`). When on,
+# the node can receive `AgentV1Chat` requests from remote peers and
+# dispatch them to the registered `ChatModel`. Implies `agent`.
+agent-v1 = ["a3net-transport/agent-v1", "agent"]
+# Opt in to structured audit logging for agent calls (metrics + tracing).
+# Implies `agent` since audit records are emitted from agent operations.
+audit = ["agent"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+a3net-identity = { workspace = true }
+proptest = { workspace = true }

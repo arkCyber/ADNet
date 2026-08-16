@@ -1,0 +1,76 @@
+[package]
+# `a3net-ffi-js` — Rust-side napi-rs binding for the
+# A3Net FFI surface. Mirrors iroh-ffi's `iroh-js/` member
+# crate.
+#
+# Why napi-rs and not a CD-loaded JS uniffi binding?
+# ----------------------------------------------------
+# The uniffi scaffolding's JS output is a low-level
+# callback-wrapper that requires Node.js users to
+# hand-write `dlopen` + `Buffer` plumbing. napi-rs gives
+# idiomatic Node.js async bindings (Promise-returning
+# `async fn`, JS `Object` for `Record` types, etc.) with
+# zero hand-written glue.
+#
+# The CLI binaries are produced by `napi build --release`
+# and distributed via the `@arksong/a3net` npm package
+# (see `package.json`). The `napi` target attribute below
+# is the canonical napi-rs manifest shape — it lets
+# `napi build` pick up the right cdylib name and target
+# triples without a separate `binding.gyp`.
+
+name         = "a3net-ffi-js"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "A3Net FFI for Node.js — napi-rs bindings."
+
+[features]
+# Enable `panic_now()` — an intentional-process-crash helper used
+# exclusively by JS integration tests. Not exposed in production builds.
+test-helpers = []
+
+[lints.rust]
+unsafe_code = "allow"      # the FFI boundary requires `unsafe extern "C"`
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[lib]
+# `cdylib` — napi-rs produces a single `.node` file per
+# (target_triple, node_api_version) combination. The npm
+# `optionalDependencies` table in `package.json` enumerates
+# the supported triples.
+crate-type = ["cdylib"]
+
+[dependencies]
+# ─── A3Net crates ──────────────────────────────────────────
+a3net-types     = { workspace = true }
+a3net-node      = { workspace = true }
+a3net-transport = { workspace = true }
+a3net-roster    = { workspace = true }
+a3net-userstore = { workspace = true }
+a3net-ffi       = { workspace = true }
+
+# ─── napi-rs ───────────────────────────────────────────────
+napi        = { version = "3", default-features = false, features = ["napi8", "error_anyhow", "async"] }
+napi-derive = "3"
+
+# ─── Async runtime ─────────────────────────────────────────
+tokio = { workspace = true }
+
+# ─── Serialization ─────────────────────────────────────────
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+
+# ─── Time helpers ──────────────────────────────────────────
+chrono = { workspace = true }
+
+[build-dependencies]
+# napi-build — wires up the `napi.h` include path so the
+# generated `napi` macros find the right ABI.
+napi-build = "2"

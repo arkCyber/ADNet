@@ -77,16 +77,16 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          printf '%s' "$INVENTORY_B64" | base64 --decode > /tmp/adnet-network-inventory.json
-          python3 -m json.tool /tmp/adnet-network-inventory.json >/dev/null
+          printf '%s' "$INVENTORY_B64" | base64 --decode > /tmp/a3net-network-inventory.json
+          python3 -m json.tool /tmp/a3net-network-inventory.json >/dev/null
 
       - name: Build acceptance probe
-        run: cargo build --locked --release -p adnet-node --features iroh --example network_acceptance
+        run: cargo build --locked --release -p a3net-node --features iroh --example network_acceptance
 
       - name: Run real-network acceptance matrix
         run: |
           python3 scripts/real-network-acceptance.py \
-            --inventory /tmp/adnet-network-inventory.json \
+            --inventory /tmp/a3net-network-inventory.json \
             --binary target/release/examples/network_acceptance \
             --output-dir artifacts/real-network
 
@@ -111,4 +111,4 @@ jobs:
       - name: Remove ephemeral credentials
         if: always()
         run: |
-          rm -f ~/.ssh/id_ed25519 /tmp/adnet-network-inventory.json
+          rm -f ~/.ssh/id_ed25519 /tmp/a3net-network-inventory.json

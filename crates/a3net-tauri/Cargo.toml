@@ -1,0 +1,45 @@
+[package]
+name = "a3net-tauri"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A3Net Desktop UI powered by Tauri"
+license = "MIT OR Apache-2.0"
+authors = ["A3Net Team"]
+
+[lib]
+name = "a3net_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "a3net-tauri"
+path = "src-tauri/src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# A3Net core
+a3net-ipc-adapter = { path = "../a3net-ipc-adapter", features = ["http-server"] }
+a3net-node = { path = "../a3net-node", features = ["bitswap"] }
+a3net-types = { path = "../a3net-types" }
+a3net-cli = { path = "../a3net-cli" }
+
+# Tauri
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

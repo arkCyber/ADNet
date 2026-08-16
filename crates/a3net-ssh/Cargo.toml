@@ -1,0 +1,73 @@
+[package]
+name        = "a3net-ssh"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "A3Net SSH-over-iroh — vendored port of iroh-ssh (https://github.com/rustonbsd/iroh-ssh). Provides an iroh endpoint that tunnels SSH connections so that any A3Net node can be reached as `user@<endpoint-id>` without exposing ports, traversing NAT, or relying on a public IP. The crate reuses A3Net's persistent identity (`<data-dir>/iroh_secret_key`) and the iroh 1.0.3 stack, and is wired into the existing `a3net-cli` REPL as `/ssh server`, `/ssh info`, and `/ssh connect` slash commands."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace members ───────────────────────────────────────────────
+a3net-types     = { workspace = true }
+a3net-transport = { workspace = true }
+a3net-observability = { workspace = true }
+
+# Async runtime / utilities ───────────────────────────────────────
+tokio       = { workspace = true }
+futures     = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+
+# Error / tracing ─────────────────────────────────────────────────
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+
+# Observability supports the a3net_observability::registry::GLOBAL
+# registry. Re-exported for the metrics module so we don't pull
+# in another copy of once_cell from a different version.
+once_cell   = "1"
+
+# iroh 1.0.3 (same line as a3net-transport) — gated on the `iroh`
+# feature so the default build remains free of the iroh dep tree.
+iroh        = { version = "=1.0.3", optional = true, default-features = false, features = ["tls-ring"] }
+iroh-base   = { version = "=1.0.3", optional = true, default-features = false, features = ["key", "relay"] }
+# `iroh::protocol::Router` lives in the umbrella crate; we keep an
+# explicit dep on `iroh-base` for the `SecretKey` / `EndpointId`
+# re-exports we use throughout the public API.
+
+# CLI / shell helpers — used by the `connect` (ProxyCommand) path.
+# `whoami` exposes the current shell user for the
+# `a3net-ssh alice@<endpoint>` invitation string.
+whoami      = { version = "1.5", optional = true, default-features = false }
+# Used by `keys.rs` to decode authorized_keys blobs.
+base64      = { version = "0.22", optional = true, default-features = false }
+# Regex-based tokenizer for authorized_keys parsing.
+regex      = { version = "1", optional = true, default-features = false, features = ["unicode-perl"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true }
+
+[features]
+# Default: identity + key-management types are available, but the
+# iroh runtime is NOT compiled in. Useful for build pipelines that
+# want to compile `a3net-ssh` against a non-iroh target (e.g. docs
+# builds, no_std-flavoured linting).
+default = []
+# Opt in to the iroh-backed server / client. Enables the
+# `IrohSsh` builder, the `server::Server` long-running service,
+# and the `client::proxy` ProxyCommand implementation. Pulls in
+# the iroh feature on `a3net-transport` transitively so the
+# re-exported `IrohIdentity` / `IROH_SECRET_KEY_FILE` are visible.
+iroh = [
+    "dep:iroh",
+    "dep:iroh-base",
+    "dep:whoami",
+    "dep:base64",
+    "dep:regex",
+    "a3net-transport/iroh",
+]

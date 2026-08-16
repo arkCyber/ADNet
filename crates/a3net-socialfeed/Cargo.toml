@@ -1,0 +1,62 @@
+[package]
+name        = "a3net-socialfeed"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Social-feed / 朋友圈 (moments) runtime for A3Net — typed wire records, SQLite persistence, gossip fan-out, JSON-RPC IPC and CLI surface. Ported from Exodus@src-backup/src-tauri/src/microservice/social_feed_service.rs and social_feed_commands.rs."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace members --------------------------------------------------------
+a3net-types          = { workspace = true }
+a3net-gossip         = { workspace = true }
+a3net-ipc            = { workspace = true }
+a3net-blobstore      = { workspace = true }
+a3net-observability  = { workspace = true }
+
+# Async runtime / utilities -----------------------------------------------
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+async-trait = { workspace = true }
+futures     = { workspace = true }
+
+# Serialization ------------------------------------------------------------
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+bincode     = { workspace = true }
+
+# Time / IDs ---------------------------------------------------------------
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+rand        = { workspace = true }
+
+# SQLite — bundled, matches `a3net-chatstore` -----------------------------
+rusqlite    = { version = "0.32", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+tempfile  = { workspace = true }
+tokio     = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+proptest  = { workspace = true }
+serde_json = { workspace = true }
+anyhow    = { workspace = true }
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "property_tests"
+path = "tests/property_tests.rs"
+
+[[test]]
+name = "perf_throughput"
+path = "tests/perf_throughput.rs"
+
+[[example]]
+name = "two_users_moments"
+path = "examples/two_users_moments.rs"

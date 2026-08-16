@@ -2,11 +2,11 @@ name: aerospace
 
 # DO-178C DAL-B CI gate.
 #
-# Runs the aerospace-grade compliance test suite (`adnet-blobstore`
+# Runs the aerospace-grade compliance test suite (`a3net-blobstore`
 # built with `--features aerospace`) plus the rest of the
 # workspace. The aerospace tests live in:
-#   - crates/adnet-blobstore/tests/aerospace_compliance.rs
-#   - crates/adnet-blobstore/tests/distributed_storage_aerospace.rs
+#   - crates/a3net-blobstore/tests/aerospace_compliance.rs
+#   - crates/a3net-blobstore/tests/distributed_storage_aerospace.rs
 #
 # They are gated behind the `aerospace` feature flag so the
 # certifier can rebuild from a tagged commit and get the same
@@ -68,25 +68,25 @@ jobs:
             aerospace-${{ matrix.os }}-${{ matrix.toolchain }}-
 
       - name: Build (aerospace)
-        run: cargo build -p adnet-blobstore --features aerospace --all-targets
+        run: cargo build -p a3net-blobstore --features aerospace --all-targets
 
       - name: Lint (aerospace)
-        run: cargo clippy -p adnet-blobstore --features aerospace --all-targets -- -D warnings
+        run: cargo clippy -p a3net-blobstore --features aerospace --all-targets -- -D warnings
 
       - name: Compliance suite
         run: |
-          cargo test -p adnet-blobstore --features aerospace  --tests --workspace \
+          cargo test -p a3net-blobstore --features aerospace  --tests --workspace \
             -- --test-threads=1
 
       - name: Distributed-storage aerospace suite
         run: |
-          cargo test -p adnet-blobstore --features aerospace \
+          cargo test -p a3net-blobstore --features aerospace \
             --test distributed_storage_aerospace \
             -- --test-threads=1
 
       - name: Document safety-revision pin
         run: |
-          grep -q "$ADNET_SAFETY_REVISION" crates/adnet-blobstore/src/lib.rs \
+          grep -q "$ADNET_SAFETY_REVISION" crates/a3net-blobstore/src/lib.rs \
             || (echo "SAFETY_REVISION mismatched:" && exit 1)
 
       - name: Coverage (cargo-llvm-cov)
@@ -99,7 +99,7 @@ jobs:
         run: |
           cargo install cargo-llvm-cov --locked || true
           cargo llvm-cov --workspace \
-            --features adnet-blobstore/aerospace \
+            --features a3net-blobstore/aerospace \
             --lcov --output-path coverage.lcov || true
           echo "Coverage report at coverage.lcov (informational only)"
 

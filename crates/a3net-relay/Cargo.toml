@@ -1,0 +1,48 @@
+[package]
+name        = "a3net-relay"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "WAN relay HTTP proxy for A3Net mesh traffic across NAT boundaries."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+axum        = { version = "0.7" }
+reqwest     = { workspace = true }
+tracing     = { workspace = true }
+chrono      = { workspace = true }
+url         = "2"
+hex         = { workspace = true }
+bytes       = "1"
+futures     = "0.3"
+a3net-resilience = { workspace = true }
+a3net-types = { workspace = true }
+a3net-observability = { workspace = true }
+once_cell   = "1"
+
+# Optional billing: when the relay operator enables the `billing` feature,
+# pledge/receipt verification happens locally on this crate without
+# contacting any chain. Settlement is out-of-band (see a3net-token docs).
+a3net-token    = { workspace = true, optional = true }
+a3net-identity = { workspace = true, optional = true }
+
+[features]
+# Default feature set keeps the relay *purely* a forward proxy. Operators
+# who want to accept signed pledges opt in explicitly.
+default = []
+billing = ["dep:a3net-token", "dep:a3net-identity"]
+
+[dev-dependencies]
+tokio     = { workspace = true }
+tempfile  = { workspace = true }
+
+[[example]]
+name = "relay_local_demo"
+path = "examples/relay_local_demo.rs"

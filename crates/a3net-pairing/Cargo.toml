@@ -1,0 +1,36 @@
+[package]
+name        = "a3net-pairing"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "A3Net secure device-pairing protocol: challenge-response, capability grants, trusted-device persistence, revocation."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types    = { workspace = true }
+a3net-identity = { workspace = true }
+a3net-reputation = { workspace = true, optional = true }
+
+ed25519-dalek  = { version = "2.1", features = ["rand_core"] }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+blake3     = { workspace = true }
+hex        = { workspace = true }
+chrono     = { workspace = true }
+rand       = { workspace = true }
+log        = "0.4"
+parking_lot = { version = "0.12", default-features = false }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+# Wire the pairing store into the global reputation table. Every
+# successful pairing ceremony bumps the peer's PeerScore by a strong
+# positive amount; every revocation bumps a strong negative amount.
+# Opt-in to keep the default pairing crate dependency-free.
+reputation = ["dep:a3net-reputation"]

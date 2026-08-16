@@ -1,0 +1,23 @@
+[package]
+name        = "a3net-resilience"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Cross-cutting resilience: retry with backoff, circuit breaker, resilient HTTP."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio       = { workspace = true }
+reqwest     = { workspace = true }
+thiserror   = { workspace = true }
+rand        = { workspace = true }
+tracing     = { workspace = true }
+async-trait = { workspace = true }
+serde       = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,85 @@
+[package]
+name        = "a3net-wallet-evm"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+authors     = { workspace = true }
+description = "Read-only EVM JSON-RPC client built on alloy, for A3Net node wallets"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace-internal: A3Net's protocol-level wallet address (the only
+# type we share with the rest of A3Net for now; `a3net-identity::Wallet`
+# will join in Phase 2 once we wire signing).
+a3net-types = { workspace = true }
+
+# Phase 2: identity is now wired in for transaction signing. The
+# `Wallet` type's `Zeroizing<[u8; 32]>` + EIP-191 signatures pair
+# cleanly with alloy's `TransactionBuilder`.
+a3net-identity = { workspace = true }
+
+# Alloy 2.1.x (MSRV 1.91, reqwest 0.13). We deliberately use the `hyper`
+# feature only — alloy's default `reqwest` feature would force the whole
+# workspace to bump `reqwest` from 0.12 to 0.13, which touches 30+ call
+# sites. By going `hyper`, alloy re-uses the `hyper-util` already pulled
+# in by `a3net-gateway` and we keep `reqwest = "0.12"` intact.
+#
+# `alloy` here is the meta-crate with the `transport-http` /
+# `providers` / `rpc-types` features exposed. We also depend on the
+# sub-crates directly so the `use` paths stay unambiguous.
+alloy                = { version = "=2.1.1", default-features = false, features = [
+    "transport-http",
+    "providers",
+    "rpc-types",
+] }
+alloy-provider       = { version = "=2.1.1", default-features = false, features = ["hyper"] }
+alloy-rpc-client     = { version = "=2.1.1", default-features = false }
+alloy-primitives     = { version = "=1.6.0", default-features = false, features = ["serde"] }
+alloy-rpc-types-eth  = { version = "=2.1.1", default-features = false, features = ["serde"] }
+alloy-sol-types      = { version = "=1.6.0", default-features = false }
+# `alloy-sol-macro` is the proc-macro crate backing `alloy_sol_types::sol!`.
+# It is *not* optional: even though we only call `sol!` once in the
+# crate, the `alloy_sol_types::sol!` re-export references the proc-macro
+# at compile time so we must declare the dependency explicitly.
+alloy-sol-macro      = { version = "=1.6.0", default-features = false }
+alloy-network        = { version = "=2.1.1", default-features = false }
+alloy-transport      = { version = "=2.1.1", default-features = false }
+alloy-transport-http = { version = "=2.1.1", default-features = false, features = ["hyper"] }
+alloy-json-rpc       = { version = "=2.1.1", default-features = false }
+alloy-consensus      = { version = "=1.6", default-features = false, features = ["serde"] }
+alloy-signer         = { version = "=1.6", default-features = false }
+
+# `url` is not in workspace's [workspace.dependencies]; we depend on the
+# crates.io version with the same MSRV.
+url = "2.5"
+
+# Async runtime / utilities — match workspace style
+tokio       = { workspace = true, features = ["full"] }
+futures     = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization / encoding
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+
+# Errors
+thiserror   = { workspace = true }
+
+# Logging
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util", "macros"] }
+# For the integration tests we want to spin up a tiny in-process
+# JSON-RPC stub. `axum` is already in the workspace via `a3net-relay`
+# and `a3net-gateway`; we re-declare it here as a dev-dep so the test
+# builds without a feature-flag roundtrip.
+axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
+hex  = { workspace = true }
+alloy-primitives = { version = "=1.6.0", default-features = false, features = ["serde"] }
+alloy-sol-types  = { version = "=1.6.0", default-features = false }
+alloy-sol-macro  = { version = "=1.6.0", default-features = false }

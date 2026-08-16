@@ -1,0 +1,33 @@
+[package]
+name        = "a3net-ipc"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "JSON-RPC over Unix sockets — IPC layer for A3Net microservices."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio          = { workspace = true }
+futures        = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+thiserror      = { workspace = true }
+async-trait    = { workspace = true }
+tracing        = { workspace = true }
+base64         = "0.22"
+chrono         = { workspace = true }
+blake3         = { workspace = true }
+uuid           = { workspace = true }
+a3net-types    = { workspace = true }
+a3net-blobstore = { workspace = true }
+
+[dev-dependencies]
+tokio     = { workspace = true }
+tempfile  = { workspace = true }
+
+[[example]]
+name = "ipc_roundtrip"
+path = "examples/ipc_roundtrip.rs"

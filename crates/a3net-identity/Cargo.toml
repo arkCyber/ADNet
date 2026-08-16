@@ -1,0 +1,56 @@
+[package]
+name        = "a3net-identity"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+authors     = { workspace = true }
+description = "A3Net identity: EVM-style wallets, signatures, and static end-to-end encryption envelopes."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace-internal
+a3net-types = { workspace = true }
+
+# Crypto primitives — kept narrow to avoid pulling in alloy/ethers.
+secp256k1 = { version = "0.29", features = ["global-context", "rand", "recovery", "serde"] }
+sha3      = "0.10"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+aes-gcm   = "0.10"
+hkdf      = "0.12"
+sha2      = { workspace = true }
+blake3    = { workspace = true }
+rand      = { workspace = true }
+
+# Memory hygiene — `Zeroizing<T>` wipes on drop; derives enforce the
+# contract at compile time (used by `Wallet` / `X25519SecretKey` /
+# `Treasury` to wipe secrets on drop).
+zeroize   = { version = "1.7", features = ["zeroize_derive"] }
+
+# BIP-32 HD derivation. Default feature `secp256k1` exposes the
+# `XPrv` / `XPub` aliases for secp256k1 HD wallets.
+bip32     = { version = "0.5" }
+
+# BIP-39 mnemonics (12/15/18/21/24-word phrases).
+bip39     = { version = "2.0", features = ["rand"] }
+
+# Argon2id — password-based KDF used by the on-disk encrypted keystore.
+argon2   = { version = "0.5" }
+constant_time_eq = "0.3"
+
+# Serialization / encoding
+serde      = { workspace = true }
+serde_json = { workspace = true }
+hex        = { workspace = true }
+
+# Errors
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

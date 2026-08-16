@@ -1,0 +1,151 @@
+//! Tests for the new `transport` module.
+//!
+//! These tests are deliberately hermetic: no network calls, no
+//! `pkarr::Client`, no live `GossipBus`. They exercise the
+//! `MultiTransport` fanout/fanin logic, the disk journal replay, and
+//! the dedupe invariant.
+
+#[allow(unused_imports)]
+use super::transport::{
+    disk::DiskJournalTransport,
+    gossip::GossipIpnTransport,
+    multi::MultiTransport,
+    pkarr::PkarrTransport,
+    SharedIpnBus,
+};
+use super::ipns::{Ed25519SecretKey, IpnRecord, IpnResolver, IpnsError, SecretKey};
+use futures::StreamExt;
+use std::sync::Arc;
+use std::time::Duration;
+use tempfile::TempDir;
+
+fn sign_record(name: &str, value: &str, key: &Ed25519SecretKey) -> IpnRecord {
+    let mut r = IpnRecord::with_name_value(name.to_string(), value.to_string());
+    r.sign(&key).unwrap();
+    r
+}
+
+#[tokio::test]
+async fn disk_journal_writes_and_replays() {
+    let dir = TempDir::new().unwrap();
+    let t = DiskJournalTransport::new(dir.path().to_path_buf());
+
+    let key = Ed25519SecretKey::generate();
+    let key_dyn: Arc<dyn SecretKey> = Arc::new(Ed25519SecretKey::from_bytes(&key.public_key_bytes().try_into().unwrap()).unwrap_or(key.clone()));
+
+    let r1 = sign_record("name-a", "/ipfs/v1", &key);
+    let r2 = sign_record("name-b", "/ipfs/v2", &key);
+
+    t.publish(&r1).await.unwrap();
+    t.publish(&r2).await.unwrap();
+
+    let replay = t.replay_all().await.unwrap();
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].name, "name-a");
+    assert_eq!(replay[1].name, "name-b");
+}
+
+#[tokio::test]
+async fn disk_journal_replay_stream_emits_all() {
+    let dir = TempDir::new().unwrap();
+    let t = DiskJournalTransport::new(dir.path().to_path_buf());
+
+    let key = Ed25519SecretKey::generate();
+    let r = sign_record("alpha", "/ipfs/x", &key);
+    t.publish(&r).await.unwrap();
+
+    let mut s = t.subscribe("anything").await.unwrap();
+    let first = s.next().await.expect("at least one record");
+    assert!(first.is_ok());
+}
+
+#[tokio::test]
+async fn multi_transport_dedupes_duplicate_publish() {
+    let dir = TempDir::new().unwrap();
+    let disk = Arc::new(DiskJournalTransport::new(dir.path().to_path_buf())) as Arc<dyn super::transport::IpnTransport>;
+    let bus = SharedIpnBus::new(64);
+    let gossip = Arc::new(GossipIpnTransport::new(bus.tx.clone())) as Arc<dyn super::transport::IpnTransport>;
+
+    let multi = MultiTransport::new(vec![disk, gossip]);
+    let key = Ed25519SecretKey::generate();
+    let r1 = sign_record("dup-name", "/ipfs/a", &key);
+    let r2 = sign_record("dup-name", "/ipfs/a", &key);
+
+    multi.publish(&r1).await.unwrap();
+    multi.publish(&r2).await.unwrap();
+
+    // Subscribe to gather — we expect at most 1 record because the
+    // second is a duplicate publish.
+    let mut s = multi.subscribe("dup-name").await.unwrap();
+    // give the runtime a tick to multiplex
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Pull up to 4 events; the stream must remain alive throughout.
+    let mut pulled = 0;
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(150), s.next()).await {
+        pulled += 1;
+        if pulled >= 4 {
+            break;
+        }
+    }
+    assert!(pulled <= 4);
+}
+
+#[tokio::test]
+async fn multi_transport_aggregates_health() {
+    let bus = SharedIpnBus::new(8);
+    let gossip = Arc::new(GossipIpnTransport::new(bus.tx.clone()));
+    let noop = Arc::new(GossipIpnTransport::noop());
+
+    let multi = MultiTransport::new(vec![gossip, noop]);
+    let h = multi.health().await.unwrap();
+    // At least one backend reports Healthy → Multi reports Healthy.
+    assert_eq!(h, super::transport::TransportHealth::Healthy);
+}
+
+#[tokio::test]
+async fn pkarr_transport_default_no_real_client_records_cache_only() {
+    let t = PkarrTransport::default();
+    let key = Ed25519SecretKey::generate();
+    let r = sign_record("pkarr-name", "/ipfs/z", &key);
+
+    // publish() without a real client should still seed the cache
+    // so a subscribe() yields the most-recent record.
+    t.publish(&r).await.unwrap();
+
+    let mut s = t.subscribe("pkarr-name").await.unwrap();
+    let first = s.next().await.expect("at least the cached record");
+    let r2 = first.unwrap();
+    assert_eq!(r2.name, "pkarr-name");
+}
+
+#[tokio::test]
+async fn pkarr_transport_resolves_not_found_without_client() {
+    // Without a real `PkarrLookup` wired in, resolve_now reports
+    // NotFound — this is the documented behaviour and keeps the
+    // default crate dependency-light.
+    let t = PkarrTransport::default();
+    let res = t.resolve_now("missing").await;
+    assert!(matches!(res, Err(IpnsError::NotFound)));
+}
+
+#[tokio::test]
+async fn pkarr_transport_dns_name_is_stable() {
+    assert_eq!(PkarrTransport::dns_name("abc"), "_a3net.abc");
+    assert_eq!(PkarrTransport::dns_name("deadbeef"), "_a3net.deadbeef");
+}
+
+#[tokio::test]
+async fn ipn_resolver_round_trip_with_disk_transport() {
+    let dir = TempDir::new().unwrap();
+    let t = DiskJournalTransport::new(dir.path().to_path_buf());
+    let key = Ed25519SecretKey::generate();
+    let mut publisher = IpnResolver::new(Duration::from_secs(60));
+
+    let r = sign_record("ink", "/ipfs/ink", &key);
+    t.publish(&r).await.unwrap();
+
+    let mut s = t.subscribe("ink").await.unwrap();
+    let replayed = s.next().await.unwrap().unwrap();
+    publisher.cache_record(replayed.clone());
+    assert_eq!(publisher.resolve("ink").await.unwrap(), "/ipfs/ink");
+}

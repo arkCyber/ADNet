@@ -1,0 +1,64 @@
+[package]
+name        = "a3net-tun"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Cross-platform TUN device abstraction for the A3Net mesh VPN. Carries IP packets between the kernel and the userspace mesh stack (smoltcp-style loopback in the default build; native tun on macOS/Linux/Windows with the matching backend feature)."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types       = { workspace = true }
+tokio             = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "io-util"] }
+futures           = { workspace = true }
+async-trait       = { workspace = true }
+thiserror         = { workspace = true }
+tracing           = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+bytes             = "1.7"
+
+# `tun` crate wraps the platform-specific TUN ioctl:
+#   - macOS / iOS: `utun` socket (no kernel module needed)
+#   - Linux: `/dev/net/tun`
+#   - Windows: wintun.dll (downloaded by `tun` if missing)
+# We keep this dependency feature-gated so the default build
+# stays free of native FFI and cross-compiles cleanly to any
+# target. Enabling it requires the matching platform support.
+tun = { version = "0.7", optional = true, default-features = false }
+
+# parking_lot is used for the small synchronous mutexes inside
+# the userspace TUN's lifecycle state. We can't use the std
+# mutex inside `take()`-then-await patterns because the guard
+# must be released across `await`.
+parking_lot = { version = "0.12", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+
+# End-to-end integration with the rest of the mesh stack
+# (firewall → magic-dns → coordinator → exit-node) is
+# exercised in `tests/end_to_end.rs`.
+a3net-mesh-firewall  = { workspace = true }
+a3net-magicdns       = { workspace = true }
+a3net-mesh-coordinator = { workspace = true }
+a3net-exit-node      = { workspace = true }
+
+[features]
+# Default: pure userspace loopback. Useful for tests, integration
+# smoke tests on machines where opening a TUN device is not
+# possible (CI containers, sandboxed environments), and as the
+# "concept-layer" the rest of the mesh stack binds to.
+default = []
+# Native TUN device via the `tun` crate (macOS utun, Linux
+# /dev/net/tun, Windows wintun). Requires the platform support
+# library for the target — see the README.
+native = ["dep:tun"]
+
+[[example]]
+name = "userspace_roundtrip"
+path = "examples/userspace_roundtrip.rs"

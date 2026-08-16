@@ -1,0 +1,43 @@
+[package]
+name        = "a3net-types"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "A3Net core types: NodeId, ContentHash, Ticket, Topic, announcement payloads."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-error = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_cbor = "0.11"
+thiserror  = { workspace = true }
+blake3     = { workspace = true }
+sha2       = { workspace = true }
+hex        = { workspace = true }
+rand       = { workspace = true }
+chrono     = { workspace = true }
+uuid       = { workspace = true }
+bincode    = { workspace = true }
+num-bigint = "0.4"
+num-integer = "0.1"
+tokio       = { workspace = true, features = ["sync", "rt"] }
+bs58 = "0.1"
+base32 = "0.4"
+lazy_static = "1.4"
+serde_bytes = "0.11"
+prost = { version = "0.12", optional = true }
+prost-build = { version = "0.12", optional = true }
+serde_ipld_dagcbor = "0.7"
+ipld-core = "0.4"
+cid = "0.11"
+
+[features]
+default = []
+protobuf = ["dep:prost", "dep:prost-build"]
+
+[dev-dependencies]
+proptest = { workspace = true }

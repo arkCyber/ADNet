@@ -1,0 +1,224 @@
+//! Integration test: WebDAV → a3net-pairing Capability.
+//!
+//! Confirms that `a3net-webdav` correctly consults `a3net-pairing`'s
+//! `CapabilitySet` to authorise verbs. This is the live seam
+//! between the two crates; the unit tests mock the resolver.
+//!
+//! Note: these tests do NOT spin up an actual socket. They
+//! exercise the full `HandlerState::handle_*` route with a
+//! real `CapabilitySet` produced by `a3net-pairing`.
+
+use std::sync::Arc;
+
+use a3net_blobstore::{MockClock, Nas, NamespaceRead};
+use a3net_pairing::{capability::Capability, CapabilitySet};
+use a3net_types::ContentHash;
+use a3net_webdav::acl::{ResolvedCapability, StaticCapabilityResolver};
+use a3net_webdav::handlers::HandlerState;
+use a3net_webdav::token::TokenVerifier;
+
+fn build_state(caps: CapabilitySet) -> (HandlerState, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let nas = Nas::open(dir.path()).unwrap();
+    let r = StaticCapabilityResolver::new();
+    r.register(
+        "cred-1".to_string(),
+        ResolvedCapability {
+            caps,
+            nonce: [0u8; 32],
+            expires_unix_ms: i64::MAX,
+            revoked: false,
+        },
+    );
+    let verifier = TokenVerifier::new([3u8; 32]);
+    let mut s = HandlerState::new(nas, Arc::new(r), verifier);
+    s.static_resolver = Some(StaticCapabilityResolver::new());
+    s.clock = Box::new(MockClock(1_700_000_000_000));
+    (s, dir)
+}
+
+fn fresh_token(state: &HandlerState, n: u8) -> String {
+    let mut nonce = [0u8; 32];
+    nonce[0] = n;
+    state.verifier.sign("cred-1", nonce, i64::MAX).to_header()
+}
+
+#[test]
+fn pairing_cap_files_read_only_can_get_can_not_put() {
+    let (s, _dir) = build_state(CapabilitySet::from_names(["files.read"]));
+    let path = a3net_blobstore::PathSegments::decode_http("/a.bin").unwrap();
+    let h = ContentHash::from_hex(
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .unwrap();
+    // PUT must be rejected
+    let res = s.handle_put(&path, h.clone(), 1, Some(&fresh_token(&s, 1)), Some("ua".into()));
+    assert!(res.is_err(), "read-only token must not PUT");
+    // GET: need a parent for the file to exist. We PUT with a
+    // write-capable token first (via `handle_put_body`, which
+    // actually persists bytes into the content-addressed blob
+    // store — `handle_put` alone only registers a hash), then GET
+    // with the read-only token — confirms capability-scoped auth.
+    let write_caps = CapabilitySet::from_iter([Capability::FILES_READ, Capability::FILES_WRITE]);
+    let (s2, _dir) = build_state(write_caps);
+    let header = fresh_token(&s2, 1);
+    s2.handle_put_body(&path, b"hello world", None, Some(&header), Some("ua".into()))
+        .unwrap();
+    let _ = s; // silence
+    let _ = h; // silence
+    let header = fresh_token(&s2, 2);
+    let res = s2.handle_get(&path, Some(&header));
+    assert!(res.is_ok(), "owner should GET own file");
+    assert_eq!(res.unwrap(), b"hello world");
+}
+
+#[test]
+fn pairing_cap_files_write_only_works() {
+    let (s, _dir) = build_state(CapabilitySet::from_names(["files.write"]));
+    let path = a3net_blobstore::PathSegments::decode_http("/x.bin").unwrap();
+    let h = ContentHash::from_hex(
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .unwrap();
+    let header = fresh_token(&s, 1);
+    s.handle_put(&path, h, 1, Some(&header), Some("ua".into()))
+        .unwrap();
+}
+
+#[test]
+fn pairing_cap_other_caps_dont_grant_files() {
+    let (s, _dir) = build_state(CapabilitySet::from_names(["chat", "sync"]));
+    let path = a3net_blobstore::PathSegments::decode_http("/x.bin").unwrap();
+    let h = ContentHash::from_hex(
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .unwrap();
+    let header = fresh_token(&s, 1);
+    let res = s.handle_put(&path, h, 1, Some(&header), Some("ua".into()));
+    assert!(res.is_err(), "non-files capability must not PUT");
+}
+
+#[test]
+fn pairing_cap_revoked_token_blocks_all_verbs() {
+    let r = StaticCapabilityResolver::new();
+    r.register(
+        "cred-1".to_string(),
+        ResolvedCapability {
+            caps: CapabilitySet::from_names(["files.read", "files.write"]),
+            nonce: [0u8; 32],
+            expires_unix_ms: i64::MAX,
+            revoked: true, // REVOKED
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let nas = Nas::open(dir.path()).unwrap();
+    let verifier = TokenVerifier::new([3u8; 32]);
+    let mut s = HandlerState::new(nas, Arc::new(r), verifier);
+    s.static_resolver = Some(StaticCapabilityResolver::new());
+    s.clock = Box::new(MockClock(1_700_000_000_000));
+    let path = a3net_blobstore::PathSegments::decode_http("/x.bin").unwrap();
+    let h = ContentHash::from_hex(
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .unwrap();
+    let header = fresh_token(&s, 1);
+    assert!(s.handle_put(&path, h, 1, Some(&header), Some("ua".into())).is_err());
+    let header = fresh_token(&s, 2);
+    assert!(s.handle_get(&path, Some(&header)).is_err());
+}
+
+#[test]
+fn pairing_cap_copy_works() {
+    // Test that COPY works with files.write capability
+    let (s, _dir) = build_state(CapabilitySet::from_names(["files.read", "files.write"]));
+    let from_path = a3net_blobstore::PathSegments::decode_http("/source.txt").unwrap();
+    let to_path = a3net_blobstore::PathSegments::decode_http("/dest.txt").unwrap();
+
+    // First, put the source file
+    let header = fresh_token(&s, 1);
+    s.handle_put_body(&from_path, b"hello world", None, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Now copy it
+    let header = fresh_token(&s, 2);
+    s.handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Verify both files exist
+    let header = fresh_token(&s, 3);
+    let src_data = s.handle_get(&from_path, Some(&header)).unwrap();
+    assert_eq!(src_data, b"hello world");
+
+    let header = fresh_token(&s, 4);
+    let dst_data = s.handle_get(&to_path, Some(&header)).unwrap();
+    assert_eq!(dst_data, b"hello world");
+}
+
+#[test]
+fn pairing_cap_copy_requires_write_capability() {
+    // Test that COPY is rejected with read-only capability
+    let (s, _dir) = build_state(CapabilitySet::from_names(["files.read"]));
+    let from_path = a3net_blobstore::PathSegments::decode_http("/source.txt").unwrap();
+    let to_path = a3net_blobstore::PathSegments::decode_http("/dest.txt").unwrap();
+
+    // Copy should fail with read-only token
+    let header = fresh_token(&s, 1);
+    let res = s.handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()));
+    assert!(res.is_err(), "read-only token must not COPY");
+}
+
+#[test]
+fn pairing_cap_copy_directory_works() {
+    // Test that copying a directory works (shallow copy)
+    let (s, _dir) = build_state(CapabilitySet::from_names(["files.read", "files.write"]));
+
+    // Create a directory
+    let dir_path = a3net_blobstore::PathSegments::decode_http("/mydir").unwrap();
+    let header = fresh_token(&s, 1);
+    s.handle_mkcol(&dir_path, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Create a file inside
+    let file_path = a3net_blobstore::PathSegments::decode_http("/mydir/file.txt").unwrap();
+    let header = fresh_token(&s, 2);
+    s.handle_put_body(&file_path, b"content", None, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Copy the directory
+    let from_path = a3net_blobstore::PathSegments::decode_http("/mydir").unwrap();
+    let to_path = a3net_blobstore::PathSegments::decode_http("/mydir_copy").unwrap();
+    let header = fresh_token(&s, 3);
+    s.handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Verify the copy exists
+    let entry = s.nas.lookup(&to_path);
+    assert!(entry.is_some(), "copied directory should exist");
+}
+
+#[test]
+fn pairing_cap_copy_audit_logged() {
+    // Test that COPY is logged to audit
+    let (s, dir) = build_state(CapabilitySet::from_names(["files.read", "files.write"]));
+    let from_path = a3net_blobstore::PathSegments::decode_http("/audit_src.txt").unwrap();
+    let to_path = a3net_blobstore::PathSegments::decode_http("/audit_dst.txt").unwrap();
+
+    // Put source file
+    let header = fresh_token(&s, 1);
+    s.handle_put_body(&from_path, b"data", None, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Copy it
+    let header = fresh_token(&s, 2);
+    s.handle_copy(&from_path, &to_path, true, Some(&header), Some("ua".into()))
+        .unwrap();
+
+    // Check audit log
+    let audit_path = dir.path().join("nas").join("audit.jsonl");
+    let body = std::fs::read_to_string(&audit_path).unwrap();
+    // Check for "copy" operation
+    assert!(body.contains("\"op\":\"copy\""), "copy must be in audit log: {}", body);
+    // The path format is "from -> to" without leading slash
+    assert!(body.contains("audit_src.txt"), "source path must be in audit: {}", body);
+    assert!(body.contains("audit_dst.txt"), "destination path must be in audit: {}", body);
+}

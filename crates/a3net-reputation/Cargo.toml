@@ -1,0 +1,59 @@
+[package]
+name        = "a3net-reputation"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "A3Net global PeerScore, reputation events, trust fusion, and decay. Provides a cross-subsystem reputation abstraction for bitswap, gossip, relay, chat, and pairing layers."
+
+[lints]
+workspace = true
+
+[features]
+default = ["metrics"]
+# Wire up Prometheus metrics (Counter, Gauge). Disable to reduce dependencies.
+metrics  = ["dep:a3net-observability"]
+# Enable pairing integration (requires a3net-pairing). The gossip
+# integration is **not** listed here because that would create a
+# cycle (gossip depends on reputation); instead callers wire the
+# bus up via `GossipBus::with_reputation` on the gossip side.
+
+[dependencies]
+# Workspace members
+a3net-types       = { workspace = true }
+a3net-error      = { workspace = true }
+
+# Observability (metrics + tracing)
+a3net-observability = { workspace = true, optional = true }
+tracing          = { workspace = true }
+thiserror        = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+postcard   = { workspace = true }
+
+# Crypto / hashing
+blake3 = { workspace = true }
+hex    = { workspace = true }
+
+# Concurrency utilities
+parking_lot = { version = "0.12", default-features = false }
+dashmap     = "5"
+indexmap    = "2"
+
+# Time
+chrono = { workspace = true }
+
+# NOTE: a3net-gossip and a3net-chatstore deliberately do NOT depend on
+# this crate (it would create a workspace-level cycle). The integration
+# is one-way: gossip / chatstore take a dependency on a3net-reputation,
+# the reputation crate only owns its own types and adapters.
+
+[dev-dependencies]
+tokio   = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
+proptest = { workspace = true }
+tempfile = { workspace = true }

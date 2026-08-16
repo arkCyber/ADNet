@@ -1,0 +1,44 @@
+[package]
+name        = "a3net-roster"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Contact roster, contact groups, friend-request settings, IoT device bindings and 12-digit <-> NodeId mappings. Ported from Exodus@src-backup microservice/contact_directory_service.rs and exposed as a workspace-friendly trait with a SQLite-backed default."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace members --------------------------------------------------------
+a3net-types = { workspace = true }
+
+# Async runtime / utilities -----------------------------------------------
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+anyhow      = { workspace = true }
+
+# Serialization ------------------------------------------------------------
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+bincode     = { workspace = true }
+
+# Time / IDs ---------------------------------------------------------------
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+
+# Crypto / content addressing --------------------------------------------
+blake3      = { workspace = true }
+sha2        = { workspace = true }
+hex         = { workspace = true }
+rand        = { workspace = true }
+
+# SQLite — bundled, no system dependency -----------------------------------
+rusqlite    = { version = "0.32", default-features = false, features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt", "time"] }
+proptest = { workspace = true }

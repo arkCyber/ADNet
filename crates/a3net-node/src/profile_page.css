@@ -1,0 +1,142 @@
+/* ADNet profile page styles. Inline; intentionally minimal. */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+               Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: #fafafa;
+  color: #1c1c1c;
+  line-height: 1.5;
+}
+.profile-header {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 2rem;
+  background: linear-gradient(135deg, #eef2ff, #f0fdfa);
+  border-bottom: 1px solid #e5e7eb;
+}
+.profile-avatar img,
+.profile-avatar-placeholder {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #cbd5e1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  color: #475569;
+}
+.profile-name {
+  margin: 0;
+  font-size: 1.875rem;
+  font-weight: 700;
+}
+.profile-dns {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: #4338ca;
+  font-size: 0.95rem;
+  margin-top: 0.25rem;
+}
+.profile-email {
+  margin-top: 0.25rem;
+  color: #475569;
+}
+.profile-description {
+  padding: 1rem 2rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+.profile-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  padding: 1rem 2rem;
+}
+.profile-card {
+  padding: 1rem 1.25rem;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  margin: 1rem 2rem;
+}
+.profile-card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #334155;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.profile-wallet,
+.profile-node-id {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.85rem;
+  word-break: break-all;
+  background: #f8fafc;
+  padding: 0.5rem;
+  border-radius: 0.25rem;
+  display: block;
+}
+.profile-kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+.profile-kv dt {
+  color: #64748b;
+  font-weight: 500;
+}
+.profile-tags {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.profile-tag {
+  background: #eef2ff;
+  color: #4338ca;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.85rem;
+}
+.reputation-buckets {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.5rem;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.25rem;
+}
+.reputation-buckets li {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.25rem 0.5rem;
+  background: #f8fafc;
+  border-radius: 0.25rem;
+}
+.tier-highly-trusted { color: #047857; }
+.tier-trusted { color: #0369a1; }
+.tier-neutral { color: #475569; }
+.tier-untrusted { color: #b91c1c; }
+.bucket-count {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.reputation-avg {
+  margin: 0.5rem 0 0;
+  color: #475569;
+  font-size: 0.95rem;
+}
+.profile-footer {
+  padding: 1rem 2rem;
+  border-top: 1px solid #e5e7eb;
+  color: #64748b;
+  text-align: center;
+}
+@media (max-width: 600px) {
+  .profile-grid { grid-template-columns: 1fr; }
+  .profile-header { flex-direction: column; text-align: center; }
+}

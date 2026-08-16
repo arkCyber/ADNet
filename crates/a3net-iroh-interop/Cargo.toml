@@ -1,0 +1,75 @@
+[package]
+name        = "a3net-iroh-interop"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "A3Net ↔ iroh-go / iroh-net cross-language interop harness. Speaks a small HTTP/JSON wire protocol to a sidecar process (Go / Python / anything) that hosts an iroh endpoint, then exercises the shared `iroh` wire protocol (ALPNs, BLAKE3 verified stream, gossip) end-to-end."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Async runtime
+tokio      = { workspace = true, features = ["full", "test-util", "macros", "rt-multi-thread", "process"] }
+futures    = { workspace = true }
+async-trait = { workspace = true }
+
+# Errors
+anyhow     = { workspace = true }
+thiserror  = { workspace = true }
+
+# HTTP client (talks to sidecar)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# HTTP server (so a Go sidecar can dial back into us)
+axum    = { version = "0.7", default-features = false, features = ["json", "http1", "tokio"] }
+tower   = "0.4"
+hyper   = { version = "1", features = ["server", "http1"] }
+
+# Serialization
+serde      = { workspace = true }
+serde_json = { workspace = true }
+base64     = "0.22"
+hex        = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Hashing for sidecar round-trip checks
+blake3 = { workspace = true }
+
+# Tracing
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# A3Net
+a3net-types     = { workspace = true }
+a3net-node      = { workspace = true, features = ["iroh"] }
+a3net-transport = { workspace = true, features = ["iroh"] }
+a3net-blobstore = { workspace = true }
+a3net-gossip    = { workspace = true }
+
+[features]
+# `iroh` — gates the real iroh 1.0 ticket-bridge implementation in
+# `ticket_bridge::imp`. Without it, the bridge compiles to a
+# sentinel-returning stub that emits a `tracing::error!` so misuse is
+# loud (no panics — see `ENGINEERING_STANDARDS.md` R-002). The driver
+# scenarios that actually need iroh (`Scenario::AdnetPutSidecarFetch`)
+# are also `#[cfg(feature = "iroh")]`-gated, so a default build fails
+# cleanly with a compile error instead of silently producing wrong
+# data.
+#
+# Off by default so the harness crate stays light to build when only
+# the HTTP/JSON control plane is needed.
+default = []
+iroh = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["full", "test-util", "macros", "process"] }
+uuid     = { workspace = true }
+
+[[example]]
+name = "smoke"
+path = "examples/smoke.rs"

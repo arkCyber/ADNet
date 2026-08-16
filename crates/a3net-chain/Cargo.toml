@@ -1,0 +1,23 @@
+[package]
+name        = "a3net-chain"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Framework for a NAS node to optionally participate as a Web3 public blockchain node (chain client, ledger sync, consensus relay). Currently a scaffold: types + traits are stable, concrete backends land in a future iteration."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+chrono      = { workspace = true }
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

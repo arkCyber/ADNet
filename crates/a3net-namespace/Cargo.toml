@@ -1,0 +1,62 @@
+[package]
+name = "a3net-namespace"
+version = "0.1.0"
+edition = "2021"
+authors = ["A3Net Team"]
+description = "IPNS (mutable naming) for A3Net"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/arksong/a3net"
+homepage = "https://github.com/arksong/a3net"
+keywords = ["p2p", "ipns", "naming", "distributed-systems"]
+categories = ["network-programming"]
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["sync", "rt", "fs", "macros", "time"] }
+futures = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+url = { workspace = true }
+
+# Cryptography
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+blake3 = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Internal dependencies
+a3net-types = { workspace = true }
+a3net-gossip = { workspace = true, optional = true }
+a3net-dht   = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util", "macros"] }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+a3net-gossip = { workspace = true }
+a3net-dht   = { workspace = true }
+
+[features]
+default = ["pubsub"]
+pkarr = []   # reserved for future pkarr crate integration
+# Enable IPNS-over-PubSub (gossip) integration. Pulls in
+# `a3net-gossip` so the resolver can subscribe to a gossip topic.
+# Without it, `a3net-namespace` still works as a standalone crate
+# for IPNS record format / resolver caching.
+pubsub = ["dep:a3net-gossip"]
+# Enable IPNS-over-DHT. Pulls in `a3net-dht` and exposes
+# `transport::dht::DhtIpnTransport` which publishes IPNS records
+# via the DHT `PutValue`/`GetValue` keys derived from the record
+# name. Without it, the namespace crate still works for record
+# signing, gossip, and Pkarr transports.
+dht = ["dep:a3net-dht"]

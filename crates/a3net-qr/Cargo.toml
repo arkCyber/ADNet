@@ -1,0 +1,44 @@
+[package]
+name        = "a3net-qr"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = "MPL-2.0"
+repository  = { workspace = true }
+authors     = { workspace = true }
+description = "A3Net QR payloads, chatmail-compatible provisioning parsers, and SVG rendering."
+
+[lints]
+workspace = true
+
+[features]
+default = ["a3net-types", "a3net-token", "pairing"]
+# Enable conversion of DCLOGIN payloads into a3net-mail::Account values.
+mail = ["dep:a3net-mail"]
+# Recognise `a3net-pairing://…` URLs as a typed payload carrying a
+# `PairingInvitation`. Pulled in by default so chat / pairing flows
+# can render or scan a pairing QR without an extra feature flag.
+pairing = ["dep:a3net-pairing"]
+
+[dependencies]
+# A3Net protocol integrations are optional so the generic QR renderer/parser
+# can also be embedded by small clients (e.g. an installer that only needs
+# to render a `qrcodegen` SVG without pulling in a3net-types).
+a3net-types   = { workspace = true, optional = true }
+a3net-token   = { workspace = true, optional = true }
+a3net-mail    = { workspace = true, optional = true }
+a3net-pairing = { workspace = true, optional = true }
+
+base64           = { version = "0.22", default-features = false, features = ["std"] }
+percent-encoding = "2.3"
+qrcodegen        = "1.8"
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+thiserror        = { workspace = true }
+url              = "2.5"
+
+[dev-dependencies]
+# Used by the pairing roundtrip tests to mint wallets and to read
+# the local wall-clock for expiry comparisons.
+a3net-identity = { workspace = true }
+chrono         = "0.4"

@@ -1,0 +1,23 @@
+[package]
+name        = "a3net-workspace"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Shared per-node workspace for P2P file exchange — manifest, shared/inbox/outbox folders."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[example]]
+name = "workspace_demo"
+path = "examples/workspace_demo.rs"

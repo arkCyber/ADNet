@@ -1,0 +1,33 @@
+[package]
+name        = "a3net-exit-node"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Exit-node gateway — lets a mesh member offer its Internet connectivity to the rest of the mesh (gateway mode) and lets a mesh member route all its outbound traffic through a chosen gateway (client mode). Pure routing decision logic; the actual IP packet forwarding is performed by `a3net-tun`."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types             = { workspace = true }
+a3net-mesh-coordinator  = { workspace = true }
+a3net-tun               = { workspace = true }
+a3net-mesh-firewall     = { workspace = true }
+tokio                   = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+async-trait             = { workspace = true }
+thiserror               = { workspace = true }
+serde                   = { workspace = true }
+serde_json              = { workspace = true }
+tracing                 = { workspace = true }
+parking_lot             = { version = "0.12", default-features = false }
+chrono                  = { workspace = true }
+uuid = { version = "1.6", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+a3net-tun = { workspace = true }
+
+[[example]]
+name = "exit_node_demo"
+path = "examples/exit_node_demo.rs"

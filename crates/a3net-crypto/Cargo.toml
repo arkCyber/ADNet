@@ -1,0 +1,36 @@
+[package]
+name        = "a3net-crypto"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Unified cryptographic primitives for A3Net. Provides AEAD (XChaCha20-Poly1305), KDF (Argon2id), persistent key store, and zeroize-backed key types. No I/O dependencies on the rest of the workspace, so any other crate can depend on this layer without forming cycles."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Error / serde plumbing
+thiserror = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+
+# Crypto primitives
+chacha20poly1305 = { workspace = true }
+argon2           = { workspace = true }
+aes-gcm          = "0.10"
+hkdf             = "0.12"
+sha2             = { workspace = true }
+zeroize          = { workspace = true }
+rand             = { workspace = true }
+blake3           = { workspace = true }
+
+# Misc
+hex        = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []

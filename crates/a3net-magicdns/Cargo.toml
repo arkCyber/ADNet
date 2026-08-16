@@ -1,0 +1,28 @@
+[package]
+name        = "a3net-magicdns"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Magic DNS — name resolution for the A3Net mesh VPN. Maps `<hostname>.<network>` (e.g. `alice.gaming.ray`) to the deterministic mesh virtual IP of the member owning that hostname. Pure-data resolver; the actual UDP listener is a separate concern."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types   = { workspace = true }
+a3net-tun     = { workspace = true }
+tokio         = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+parking_lot   = { version = "0.12", default-features = false }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+chrono        = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[[example]]
+name = "magicdns_demo"
+path = "examples/magicdns_demo.rs"

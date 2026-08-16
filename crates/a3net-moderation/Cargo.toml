@@ -1,0 +1,31 @@
+[package]
+name        = "a3net-moderation"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+authors     = { workspace = true }
+description = "Content moderation: blocklist, takedown policy, gateway enforcement, reputation bridge."
+
+[dependencies]
+a3net-types         = { workspace = true }
+a3net-error         = { workspace = true }
+a3net-reputation    = { workspace = true }
+a3net-blobstore     = { workspace = true, features = ["scope"] }
+a3net-security      = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+thiserror           = { workspace = true }
+tracing             = { workspace = true }
+chrono              = { workspace = true }
+parking_lot         = { workspace = true }
+indexmap            = { workspace = true }
+uuid                = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest  = { workspace = true }
+
+[lints]
+workspace = true

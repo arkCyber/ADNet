@@ -1,0 +1,38 @@
+[package]
+name        = "iroh-rs-sidecar"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Reference sidecar for A3Net's iroh interop harness. Speaks the wire protocol in `crates/a3net-iroh-interop/sidecar/PROTOCOL.md` and uses the same iroh 1.0 crates A3Net's transport does, so PR smoke can run without an iroh-go toolchain. Nightly CI swaps this for the iroh-go sidecar (see `sidecar/iroh-go-sidecar/`)."
+
+[dependencies]
+# Match the iroh feature pins from the workspace so this sidecar
+# talks to the *same* wire protocol the A3Net transport uses.
+iroh          = { version = "=1.0.3", default-features = false, features = ["tls-ring"] }
+iroh-blobs    = { version = "=0.103.0", default-features = false, features = ["fs-store"] }
+iroh-gossip   = { version = "=0.101.0", default-features = false, features = ["net"] }
+
+# Async runtime + HTTP server.
+tokio   = { workspace = true, features = ["full"] }
+axum    = { version = "0.7", default-features = false, features = ["json", "http1", "tokio"] }
+tower   = "0.4"
+hyper   = { version = "1", features = ["server", "http1"] }
+
+# Wire protocol types (re-used from the harness crate so the two
+# stay in lockstep).
+a3net-iroh-interop = { path = "../.." }
+
+# Misc
+serde      = { workspace = true }
+serde_json = { workspace = true }
+base64     = "0.22"
+hex        = { workspace = true }
+parking_lot = { workspace = true }
+rand       = { workspace = true }
+uuid       = { workspace = true }
+chrono     = { workspace = true }
+blake3     = { workspace = true }
+tracing    = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow     = { workspace = true }

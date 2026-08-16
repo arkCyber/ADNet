@@ -1,0 +1,63 @@
+[package]
+name        = "a3net-mail"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "A3Net SMTP / IMAP / MIME send-and-receive crate. Clean-room port of chatmail@core (Delta Chat) smtp.rs / imap.rs / mimefactory.rs / mimeparser.rs / login_param.rs to a self-contained, no-E2EE, tokio-only design."
+
+[lints]
+workspace = true
+
+[dependencies]
+# --- Workspace members ----------------------------------------------------
+a3net-types    = { workspace = true }
+a3net-identity = { workspace = true }
+a3net-userstore = { workspace = true }
+
+# --- Async runtime / utilities -------------------------------------------
+tokio        = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures      = { workspace = true }
+async-trait  = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+anyhow       = { workspace = true }
+clap         = { workspace = true }
+dirs         = { workspace = true }
+parking_lot  = { workspace = true }
+
+# --- Serialization --------------------------------------------------------
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+bincode      = { workspace = true }
+hex          = { workspace = true }
+
+# --- Time / IDs -----------------------------------------------------------
+chrono       = { workspace = true }
+uuid         = { workspace = true }
+
+# --- Email transport (same upstream crates Delta Chat uses) --------------
+# NOTE: these crates intentionally share `async-runtime-tokio` features so
+# they don't drag in their own runtimes. We pin them to the same minor
+# versions that chatmail@core (Delta Chat 2.58-dev) uses so behaviour
+# parity is easy to audit.
+async-imap   = { version = "0.11", default-features = false, features = ["runtime-tokio", "compress"] }
+async-smtp   = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
+
+# --- MIME -----------------------------------------------------------------
+mailparse    = { workspace = true }
+base64       = { version = "0.22", default-features = false, features = ["std"] }
+pin-project  = "1"
+mime_guess   = "2"
+
+# --- TLS / DNS ------------------------------------------------------------
+rustls       = { workspace = true }
+webpki-roots = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "brotli"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "io-util", "net"] }
+proptest = { workspace = true }
+pretty_assertions = "1"

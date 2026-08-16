@@ -1,0 +1,36 @@
+[package]
+name        = "a3net-token"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+repository  = { workspace = true }
+authors     = { workspace = true }
+description = "A3Net relay-billing tokens: signed, self-contained payment pledges for relay services."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-identity = { workspace = true }
+a3net-types    = { workspace = true }
+
+# Crypto / integrity
+blake3 = { workspace = true }
+sha2   = { workspace = true }
+
+# Serialization / encoding
+serde      = { workspace = true }
+serde_json = { workspace = true }
+hex        = { workspace = true }
+
+# Time / IDs
+chrono = { workspace = true }
+uuid   = { workspace = true }
+
+# Errors
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+serde_json = { workspace = true }

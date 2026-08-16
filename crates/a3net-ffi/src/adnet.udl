@@ -1,0 +1,94 @@
+// `adnet.udl` — uniffi interface definition for `adnet-ffi`.
+//
+// Run `uniffi-bindgen` against this file:
+//
+//     cargo run -p adnet-ffi --features uniffi -- uniffi \
+//         generate src/adnet.udl --language swift \
+//         --out-dir bindings/swift
+//
+// to emit Swift / Kotlin / Python bindings. The
+// `uniffi::Record` / `uniffi::Error` / `uniffi::Object`
+// derives on the Rust types in `uniffi_surface.rs` are
+// read by uniffi-bindgen and become the language-native
+// types below.
+
+namespace adnet {
+    // Typed error enum — maps to Swift `Error` /
+    // Kotlin `Throwable`. Variants mirror the Rust enum.
+    [Error]
+    enum AdnetError {
+        "InvalidArgument",
+        "InvalidUtf8",
+        "InvalidJson",
+        "Node",
+        "Runtime",
+        "Feature",
+        "Io",
+        "NotFound",
+        "Profile",
+    };
+
+    // Result record types.
+    record BlobPutInfo {
+        string hash;
+        string ticket;
+        u64 size;
+    };
+    record BlobFetchInfo {
+        string hash;
+        u64 size;
+    };
+    record IpnsPublishInfo {
+        string name;
+    };
+    record IpnsResolveInfo {
+        string name;
+        string value;
+    };
+    record NodeInfo {
+        string node_id;
+        u64 uptime_secs;
+    };
+    record NodeMetricsInfo {
+        u32 peer_count;
+        u32 blob_count;
+        u32 gossip_topics;
+        u64 uptime_secs;
+    };
+
+    // Opaque object — the Swift / Kotlin binding gets a
+    // strongly-typed `AdnetHandle` class.
+    [Throws=AdnetError]
+    interface AdnetHandle {
+        // Constructor.
+        [Constructor]
+        constructor(string data_dir);
+
+        // Eagerly boot the inner node, returning its hex id.
+        string ensure_booted();
+
+        // Fetch the local node id without booting first
+        // (returns an error if the node isn't ready).
+        string node_id();
+
+        // Bundle (node_id, uptime_secs) for an "About" tab.
+        NodeInfo info();
+
+        // Blob ops.
+        BlobPutInfo put_bytes([ByRef] bytes data);
+        BlobFetchInfo fetch_ticket(string ticket);
+
+        // IPNS ops.
+        IpnsPublishInfo ipns_publish(string name, string value);
+        IpnsResolveInfo ipns_resolve(string name);
+
+        // Cheap metrics snapshot for a "Network" tab.
+        NodeMetricsInfo metrics();
+
+        // Tear down the node.
+        void destroy();
+    };
+
+    // Library version (mirrors ADNET_FFI_VERSION).
+    u32 adnet_version();
+};

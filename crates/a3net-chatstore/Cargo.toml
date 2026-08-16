@@ -1,0 +1,77 @@
+[package]
+name        = "a3net-chatstore"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "SQLite-backed persistence for group / direct chat messages, friends, sequences and read receipts. Ported from Exodus@src-backup chat_storage.rs and exodus-hub-server/src/manager.rs."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace members --------------------------------------------------------
+a3net-types       = { workspace = true }
+a3net-reputation  = { workspace = true }
+
+# Async runtime / utilities -----------------------------------------------
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+futures     = { workspace = true }
+anyhow      = { version = "1", optional = true }
+
+# Phase 5a: iroh-docs bridge.
+a3net-blobstore = { workspace = true, optional = true }
+
+# Serialization ------------------------------------------------------------
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+bincode     = { workspace = true }
+
+# Time / IDs ---------------------------------------------------------------
+chrono      = { workspace = true }
+uuid        = { workspace = true }
+rand        = { workspace = true }
+
+# Crypto / integrity -------------------------------------------------------
+sha2        = { workspace = true }
+blake3      = { workspace = true }
+
+# Compression (sync API — same as the original exodus-hub-server) ----------
+zstd        = "0.13"
+
+# SQLite — bundled so the crate has no system dependency -------------------
+rusqlite   = { version = "0.32", default-features = false, features = ["bundled"] }
+
+# iroh-backed message sync (opt-in, Phase 5a). When enabled, the bridge in
+# `src/docs_bridge.rs` replaces the `messages` table + custom
+# `SyncRequest`/`SyncResponse` protocol with an `iroh-docs::Doc` per
+# conversation. Friendships, group membership, user accounts, pending
+# messages, and read receipts continue to use SQLite.
+#
+# Versioning note: see a3net-transport/Cargo.toml — iroh-docs is still on
+# 0.x and pinned to the version iroh 1.0.x declares compatible.
+iroh-docs   = { version = "=0.101.0", optional = true, default-features = false, features = ["fs-store"] }
+iroh        = { version = "=1.0.3",   optional = true, default-features = false, features = ["tls-ring"] }
+iroh-blobs  = { version = "=0.103.0", optional = true, default-features = false, features = ["fs-store"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt", "time"] }
+iroh     = { version = "=1.0.3",   default-features = false, features = ["tls-ring"] }
+iroh-blobs = { version = "=0.103.0", default-features = false }
+iroh-gossip = { version = "=0.101.0", default-features = false, features = ["net"] }
+iroh-docs = { version = "=0.101.0", default-features = false }
+
+[features]
+default = []
+# Phase 5a: replace messages-table sync with iroh-docs::Doc.
+iroh = [
+    "dep:iroh-docs",
+    "dep:iroh",
+    "dep:iroh-blobs",
+    "dep:anyhow",
+    "dep:a3net-blobstore",
+    "a3net-blobstore/iroh",
+]

@@ -1,6 +1,6 @@
-# ADNet Performance Testing Configuration
+# A3Net Performance Testing Configuration
 #
-# This file defines the performance testing strategy for ADNet.
+# This file defines the performance testing strategy for A3Net.
 #
 # Performance Testing Philosophy:
 # 1. Measure, don't guess - all optimizations backed by benchmarks

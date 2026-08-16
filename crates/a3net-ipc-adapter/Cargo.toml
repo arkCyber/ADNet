@@ -1,0 +1,46 @@
+[package]
+name        = "a3net-ipc-adapter"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "JSON-RPC adapter that exposes an a3net-node::Node over Unix socket — bridges `Node` API methods to JSON-RPC and `subscribe_room` events to notifications."
+
+[lints]
+workspace = true
+
+[features]
+# Forward the `agent-v1` feature to `a3net-node` so the IPC adapter
+# can expose `agent.ask` RPC endpoints.
+    # Forward the `agent-v1` feature to `a3net-node`. Both `agent` and `agent-v1`
+    # must be enabled since `pub mod agent` is gated by `agent` while the
+    # `handle_v1_chat` method requires `agent-v1`.
+    agent-v1 = ["a3net-node/agent-v1", "a3net-node/agent", "a3net-transport/agent-v1"]
+# Forward the `audit` feature to `a3net-node` so the IPC handler can
+# emit agent audit metrics and structured log events.
+audit = ["a3net-node/audit", "a3net-node/agent-v1"]
+
+[dependencies]
+a3net-node      = { workspace = true }
+a3net-agent     = { workspace = true }
+a3net-transport = { workspace = true }
+a3net-ipc       = { workspace = true }
+a3net-types     = { workspace = true }
+tokio           = { workspace = true }
+async-trait     = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+anyhow          = { workspace = true }
+tracing         = { workspace = true }
+chrono          = { workspace = true }
+
+[dev-dependencies]
+tempfile  = { workspace = true }
+futures   = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Examples are intentionally not declared here. The `examples/`
+# directory is empty and the [[example]] blocks that previously
+# referenced `daemon.rs` / `tui_smoke.rs` were removed when those
+# files were deleted; re-add [[example]] entries when those
+# example programs are reintroduced.

@@ -1,0 +1,62 @@
+[package]
+name = "a3net-dht"
+version = "0.1.0"
+edition = "2021"
+authors = ["A3Net Team"]
+description = "Kademlia-style DHT routing for A3Net"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/arksong/a3net"
+homepage = "https://github.com/arksong/a3net"
+keywords = ["p2p", "dht", "kademlia", "distributed-systems"]
+categories = ["network-programming"]
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Cryptography
+ed25519-dalek = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Async trait
+async-trait = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+rand = { workspace = true }
+rocksdb = { version = "0.22", optional = true }
+blake3 = { workspace = true }
+
+# Sync mutex for low-contention internal hand-off (e.g. the optional
+# `DhtProtocolHandler` slot on `DhtNode`).
+parking_lot = "0.12"
+
+# Internal dependencies
+a3net-types = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+proptest = { workspace = true }
+parking_lot = "0.12"
+async-trait = { workspace = true }
+a3net-transport = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+default = []
+rocksdb = ["dep:rocksdb"]

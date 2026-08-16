@@ -1,0 +1,28 @@
+[package]
+name        = "a3net-mesh"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "HTTP mesh fallback transport for A3Net blobs (serving + parallel fetch)."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types     = { workspace = true }
+a3net-blobstore = { workspace = true }
+tokio           = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+async-trait     = { workspace = true }
+futures         = { workspace = true }
+tracing         = { workspace = true }
+chrono          = { workspace = true }
+reqwest         = { workspace = true }
+rand            = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true }

@@ -1,0 +1,49 @@
+[package]
+name        = "a3net-vless-client"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "VLESS/V2Ray-style VPN client for A3Net. Wraps an external xray-core (or sing-box) subprocess over an IPC channel and exposes a local SOCKS5/HTTP proxy that forwards traffic through the VLESS tunnel. Used to give an A3Net mesh client the same VPN egress capabilities as a v2ray/xray client, while still being able to ride on top of A3Net's own transport stack."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates -------------------------------------------------------
+a3net-types  = { workspace = true }
+a3net-error  = { workspace = true }
+
+# Async runtime ---------------------------------------------------------
+tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
+futures     = { workspace = true }
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+
+# Errors / tracing / serde ---------------------------------------------
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+
+# Networking ------------------------------------------------------------
+# Local SOCKS5 server we expose to apps on the host. We re-use the
+# `tokio` runtime we already have so we don't pull in another.
+bytes       = { workspace = true }
+
+# URI parsing for `vless://…` share-links. The `url` crate is
+# unsuitable for the VLESS shape: when the URI carries a
+# userinfo (the UUID), `url` strips the port from the authority
+# string and returns `None` from `port()` even when the source
+# clearly carries one. We hand-parse the small surface we need
+# instead.
+percent-encoding = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }
+
+[[example]]
+name = "vless_proxy_demo"
+path = "examples/vless_proxy_demo.rs"

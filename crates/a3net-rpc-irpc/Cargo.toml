@@ -1,0 +1,98 @@
+[package]
+name        = "a3net-rpc-irpc"
+version     = "0.1.0"
+edition     = "2021"
+rust-version = "1.91"
+license     = "Apache-2.0 OR MIT"
+description = "EXPERIMENTAL: irpc-based draft interface mirroring a3net-rpc commands. Not wired into the A3Net workspace."
+publish     = false
+links       = "irpc"
+
+[lib]
+# Keep the crate boundary tiny: a single rlib plus a binary embedded
+# by the `echo` example. No cdylib, no proc-macro dependency.
+crate-type = ["rlib"]
+
+# ────────────────────────────────────────────────────────────────────
+# Why this crate is *not* in the A3Net workspace
+# --------------------------------------------------------------------
+# Goal set by the author: "isolated, git-tag-locked iroh dependency,
+# do not pollute root Cargo.toml". Adding this crate to
+# `[workspace] members` in /Users/arksong/A3Net/Cargo.toml would force
+# `cargo metadata` / `cargo check` over the entire workspace to resolve
+# the irpc dependency graph (tokio sync, postcard, n0-future, n0-error,
+# etc.) — which contradicts the isolation goal.
+#
+# Instead, this crate is a *sibling* of `crates/a3net-rpc` and is built
+# deliberately out-of-band:
+#
+#     cd crates/a3net-rpc-irpc
+#     cargo check --no-default-features --features local
+#
+# If you ever change your mind and *do* want to add it to the workspace,
+# audit the following first:
+#   1. `Cargo.lock` will gain ~30 transitive deps from irpc + n0-* + postcard;
+#   2. The `default = ["local"]` feature below must remain the only
+#      one pulled in transitively, so explicitly set
+#      `default-features = false` on `irpc` if you wire it through
+#      an `a3net-transport` feature.
+# ────────────────────────────────────────────────────────────────────
+
+[features]
+# `local` keeps the crate purely in-process: no QUIC, no noq, no iroh.
+# This is the only feature that mirrors the A3Net workspace's guarantee
+# of "zero behaviour change at workspace boundary".
+default = ["local"]
+# `local` removes every transport dependency (noq, tracing, postcard).
+local  = []
+# `remote` would re-enable postcard + tracing + noq + irpc-derive.
+# Intentionally *not* the default — see README.md "Tracking checklist".
+remote = ["dep:irpc/rpc", "dep:irpc/derive", "dep:irpc/spans"]
+
+[dependencies]
+# Pinned to the same minor that the irpc main README references
+# (0.17.0 is the latest at the time of writing, 2026-08-13).
+# Updating requires `cargo update -p irpc` and reading the irpc
+# CHANGELOG — the crate is pre-1.0 and breaks often.
+irpc = { version = "=0.17.0", default-features = false }
+
+# Only used for the local channel glue (tokio mpsc); irpc already
+# pulls tokio internally but we want an explicit, pinned-in-place
+# reference so the example is reproducible without depending on
+# irpc's exact tokio version surface.
+tokio = { version = "1.44", default-features = false, features = ["sync", "macros", "rt"] }
+
+# serde is required by irpc even in non-rpc mode (it is in
+# `irpc`'s mandatory dependencies block). Pin to >=1 because
+# the RPC derive macros require it for the generated encoders.
+serde = { version = "1", features = ["derive"] }
+
+# --- Tracking notes (removed at irpc 1.0) -----------------------------
+# When `irpc` reaches 1.0:
+#   * Drop the `=0.17.0` pin and switch to `^1`.
+#   * Re-evaluate the `local`/`remote` split: 1.0 likely defaults to
+#     `rpc`+`derive` and consolidates the transport surface.
+#   * Re-test against iroh `^1` (workspace `iroh` versions are at
+#     1.0.x as of late 2026; irpc's `Cargo.toml` references
+#     `iroh = { version = "1" }` at workspace level).
+# ---------------------------------------------------------------------
+
+[[example]]
+name = "echo"
+# The example uses the `local` feature because it never opens a QUIC
+# connection — it only demonstrates the derive macro's `rpc` (oneshot),
+# `tx_streaming`, `rx_streaming` and `bidi_streaming` interaction
+# patterns on a tokio mpsc.
+required-features = ["local"]
+
+[dev-dependencies]
+# `tokio::test` and the `echo` example both need the multi-thread
+# runtime plus time for timeouts.
+tokio = { version = "1.44", features = ["full"] }
+
+[lints.rust]
+unused_must_use = "deny"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

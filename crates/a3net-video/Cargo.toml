@@ -1,0 +1,89 @@
+[package]
+name        = "a3net-video"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Aerospace-grade real-time video streaming: capture, encode, stream, decode, and render."
+
+[lints]
+workspace = true
+
+[dependencies]
+a3net-types     = { workspace = true }
+a3net-identity  = { workspace = true }
+a3net-webrtc    = { workspace = true, features = ["webrtc"] }
+tokio           = { workspace = true, features = ["sync", "time", "rt-multi-thread"] }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+serde_bytes     = { workspace = true }
+bincode         = { workspace = true }
+thiserror       = { workspace = true }
+tracing         = { workspace = true }
+blake3          = { workspace = true }
+hex             = { workspace = true }
+sha2            = { workspace = true }
+chrono          = { workspace = true }
+async-trait     = { workspace = true }
+futures         = { workspace = true }
+parking_lot     = "0.12"
+once_cell       = { workspace = true }
+bytes           = { workspace = true }
+base64          = { workspace = true }
+
+# Frame/image processing
+image = { workspace = true, optional = true }
+
+# H.264 video codec (pure Rust)
+h264-reader = { workspace = true, optional = true }
+
+# VP8/VP9 codec support via the `vpx` crate is currently a STUB.
+# The `vpx = "0.3"` crate depends on a nightly-only
+# `core::c_str::cstr_to_str` feature, so we don't pull it in on stable.
+# See `src/vpx.rs` for the stub. To wire the real crate in, install
+# `rustup toolchain install nightly` and re-enable:
+#     vpx = { workspace = true, optional = true }
+# and add `dep:vpx` to the `vpx` feature below.
+
+# Synchronization primitives for real-time
+crossbeam-channel = { workspace = true, optional = true }
+
+# Statistics and metrics
+indexmap = { workspace = true, optional = true }
+
+# UUID for WebAssembly stream identification
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile          = { workspace = true }
+tokio             = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing-subscriber = { workspace = true }
+proptest          = { workspace = true }
+rand              = { workspace = true }
+
+[features]
+# DO-178C DAL-B aerospace mode. Enables the `aerospace` module
+# (certification constants) and activates the compliance test suite.
+# Builds under this feature are pinned to `SAFETY_REVISION` so the
+# certification baseline is reproducible.
+default = []
+aerospace = []
+
+# Enable software H.264 encoder/decoder
+h264 = ["dep:h264-reader"]
+
+# Enable VP8/VP9 codec support (currently a stub; the real `vpx`
+# crate needs nightly — see the dep comment above).
+vpx = []
+
+# Enable image processing utilities
+image-processing = ["dep:image"]
+
+# Enable crossbeam channels for low-latency frame passing
+crossbeam = ["dep:crossbeam-channel"]
+
+# Enable statistics and metrics collection
+metrics = ["dep:indexmap"]
+
+# Cross-platform capture support
+capture = ["dep:uuid"]

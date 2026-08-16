@@ -1,6 +1,6 @@
-# ADNet CI/CD Configuration
+# A3Net CI/CD Configuration
 #
-# This file defines the continuous integration pipeline for ADNet.
+# This file defines the continuous integration pipeline for A3Net.
 #
 # Services used:
 # - GitHub Actions (primary CI)
@@ -123,11 +123,73 @@ jobs:
           path: target
           key: ${{ runner.os }}-integration-${{ hashFiles('**/Cargo.lock') }}
       - name: Run network integration tests
-        run: cargo test -p adnet-integration-tests --test network --no-fail-fast
+        run: cargo test -p a3net-integration-tests --test network --no-fail-fast
       - name: Run storage integration tests
-        run: cargo test -p adnet-integration-tests --test storage --no-fail-fast
+        run: cargo test -p a3net-integration-tests --test storage --no-fail-fast
       - name: Run chaos tests
-        run: cargo test -p adnet-integration-tests --test chaos --no-fail-fast
+        run: cargo test -p a3net-integration-tests --test chaos --no-fail-fast
+      # P1-3: CancellationScope unit + integration coverage.
+      # `a3net-resilience` provides the cancellation primitive; the
+      # `a3net-node` integration tests exercise the end-to-end
+      # `Node::shutdown` -> `CancellationScope::cancel` -> tracked
+      # task drains contract.  Runs sequentially with `--test-threads=1`
+      # because the node tests spawn their own ephemeral transports.
+      - name: Verify CancellationScope primitive (P1-3 unit)
+        run: |
+          cargo test -p a3net-resilience --lib cancellation \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee target/cancellation_unit.log
+      - name: Run CancellationScope node integration (P1-3 e2e)
+        run: |
+          cargo test -p a3net-node --test cancellation_integration \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee target/cancellation_e2e.log
+      - name: Upload CancellationScope logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cancellation-${{ github.run_id }}
+          path: |
+            target/cancellation_unit.log
+            target/cancellation_e2e.log
+          retention-days: 7
+          if-no-files-found: ignore
+      # P1-5: ResourceLimiter unit + integration coverage.
+      # `a3net-resilience` provides the concurrency primitive (global
+      # semaphore + per-key bucketing); the `a3net-node` integration
+      # tests confirm the three limiters (peer / room / tag) are
+      # wired with sane defaults and respect the per-key cap.
+      - name: Verify ResourceLimiter primitive (P1-5 unit)
+        run: |
+          cargo test -p a3net-resilience --lib resource \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee target/resource_unit.log
+      - name: Run ResourceLimiter node integration (P1-5 e2e)
+        run: |
+          cargo test -p a3net-node --test resource_limiter_integration \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee target/resource_e2e.log
+      - name: Run ResourceLimiter PoC stress (P1-5 substrate)
+        # Substrate-only PoC: floods a small ResourceLimiter with
+        # 1000 concurrent acquires across 200 distinct keys to
+        # verify no semaphore / HashMap leak under realistic load.
+        # Lives in a3net-resilience (no Node dep) so it stays
+        # runnable even when upstream crates are mid-refactor.
+        run: |
+          cargo test -p a3net-resilience --test resource_limiter_poc \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee target/resource_poc.log
+      - name: Upload ResourceLimiter logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-limiter-${{ github.run_id }}
+          path: |
+            target/resource_unit.log
+            target/resource_e2e.log
+            target/resource_poc.log
+          retention-days: 7
+          if-no-files-found: ignore
 
   # ──────────────────────────────────────────────────────────────────────────
   # Performance Benchmarks
@@ -147,7 +209,7 @@ jobs:
           key: ${{ runner.os }}-perf-${{ hashFiles('**/Cargo.lock') }}
       - name: Run benchmarks
         run: |
-          cargo bench -p adnet-bench -- --noplot --save-baseline main
+          cargo bench -p a3net-bench -- --noplot --save-baseline main
         env:
           CARGO_BENCH_INCREMENTAL: false
       - name: Upload benchmark results
@@ -175,7 +237,7 @@ jobs:
           path: target/criterion/
       - name: Run benchmarks and compare
         run: |
-          cargo bench -p adnet-bench -- --noplot --load-baseline main --save-baseline current
+          cargo bench -p a3net-bench -- --noplot --load-baseline main --save-baseline current
         env:
           CARGO_BENCH_INCREMENTAL: false
       - name: Report regressions
