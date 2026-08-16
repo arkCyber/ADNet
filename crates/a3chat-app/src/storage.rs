@@ -785,13 +785,20 @@ impl ChatStorage {
             ));
         }
         // Re-seal if the original body was encrypted.
+        //
+        // AD contract (see `a3chat-crypto::session::seal`): the
+        // AEAD is keyed off `sender | receiver | conversation_id |
+        // sequence | timestamp`. The `MessageEnvelope` we hand to
+        // `encrypt_body` MUST carry the same `sequence` and
+        // `timestamp` the original message was sealed with,
+        // otherwise a receiver that re-validates the AD against
+        // the stored envelope will fail with `AeadTagMismatch`.
+        // Earlier revisions stamped `Utc::now()` here, which made
+        // every edit un-decryptable on the receiver side.
         let new_body = if updated.body.is_encrypted() {
             self.encrypt_body(
                 owner,
                 &updated.receiver_id,
-                // We don't have the envelope handy; build a minimal
-                // one with the *new* sequence / timestamp so the AD
-                // matches the envelope contract.
                 &MessageEnvelope {
                     conversation_id: updated.conversation_id.clone(),
                     receiver_id: updated.receiver_id.clone(),
@@ -800,7 +807,11 @@ impl ChatStorage {
                     attachments: updated.attachments.clone(),
                     reply_to: updated.reply_to.clone(),
                     sequence: updated.sequence,
-                    timestamp: chrono::Utc::now().timestamp(),
+                    // Reuse the original envelope's timestamp so the
+                    // AD is byte-identical to the row we are
+                    // superseding. Pure transcripts (the common
+                    // case) ship the original timestamp anyway.
+                    timestamp: updated.timestamp,
                 },
                 new_body,
             )
