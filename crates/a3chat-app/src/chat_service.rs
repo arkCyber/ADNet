@@ -10,10 +10,16 @@ use a3chat_core::id::{ConversationId, MessageId, UserId};
 use a3chat_core::message::{ChatMessage, MessageBody, MessageEnvelope};
 use a3chat_core::rpc::A3chatRpcMethod;
 
+#[cfg(feature = "iroh")]
+use tokio::sync::RwLock;
+
 use crate::error::{AppError, AppResult};
 use crate::moderation_service::ModerationService;
 use crate::notification_bus::NotificationBus;
 use crate::storage::{ChatStorage, StoredMessage};
+
+#[cfg(feature = "iroh")]
+use a3net_chatstore::IrohDocsChat;
 
 /// The chat service. Cloning is cheap (`Arc`-wrapped state).
 #[derive(Clone)]
@@ -21,6 +27,11 @@ pub struct ChatService {
     storage: ChatStorage,
     bus: NotificationBus,
     moderation: Option<ModerationService>,
+    /// Phase 5b/5c: optional iroh-docs bridge for dual-write.
+    /// Stored behind an `RwLock` so it can be injected after
+    /// construction via [`ChatService::with_iroh_docs_chat`].
+    #[cfg(feature = "iroh")]
+    iroh_docs_chat: Arc<RwLock<Option<Arc<IrohDocsChat>>>>,
 }
 
 impl ChatService {
@@ -29,6 +40,8 @@ impl ChatService {
             storage,
             bus,
             moderation: None,
+            #[cfg(feature = "iroh")]
+            iroh_docs_chat: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -39,6 +52,13 @@ impl ChatService {
     pub fn with_moderation(mut self, moderation: ModerationService) -> Self {
         self.moderation = Some(moderation);
         self
+    }
+
+    /// Phase 5c: attach an `IrohDocsChat` for dual-write.
+    /// Call this after construction (typically from `A3chatApp::new`).
+    #[cfg(feature = "iroh")]
+    pub async fn with_iroh_docs_chat(&self, chat: Arc<IrohDocsChat>) {
+        self.iroh_docs_chat.write().await.replace(chat);
     }
 
     pub fn storage(&self) -> &ChatStorage {
@@ -98,6 +118,20 @@ impl ChatService {
         // leave a stranded message row whose conversation was never
         // updated.
         let stored = self.storage.save_outbound(owner, envelope).await?;
+
+        // Phase 5b dual-write: mirror the message to iroh-docs.
+        // This is best-effort — SQLite is the authoritative store and
+        // we do not fail the RPC if iroh is slow or unavailable.
+        #[cfg(feature = "iroh")]
+        if let Some(docs_chat) = self.iroh_docs_chat.read().await.as_ref() {
+            let im_msg = crate::storage::im_message_from_chat_message(&stored);
+            let conv_id = envelope.conversation_id.as_str().to_string();
+            let author = docs_chat.default_author();
+            if let Err(e) = docs_chat.append_message_as(author, &conv_id, im_msg).await {
+                tracing::warn!(conv = %conv_id, "iroh-docs dual-write failed: {e}");
+            }
+        }
+
         self.bus
             .publish(a3chat_core::event::A3chatEvent::ChatMessageReceived {
                 user_id: envelope.receiver_id.clone(),

@@ -14,9 +14,10 @@
 //! When `--enable-iroh` is set (and the binary was compiled with the
 //! `enable-iroh` feature), the daemon also boots an `IrohDocsChat`
 //! bridge backed by an `iroh-docs::Doc` engine and the iroh-blobs
-//! `FsStore`. The bridge is constructed but not (yet) wired into the
-//! chat write path — that integration is a follow-up. This is the
-//! first step: prove the iroh engine runs under the daemon at all.
+//! `FsStore`. The bridge is constructed and injected into
+//! `A3chatApp::with_iroh_docs_chat` before the RPC server starts,
+//! so every outbound message is dual-written: SQLite first
+//! (authoritative), then iroh-docs (best-effort fan-out).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -104,6 +105,22 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Phase 5c: if `--enable-iroh`, construct the bridge and inject it
+    // into ChatService *before* we hand the app off to the RPC server.
+    if enable_iroh {
+        match try_enable_iroh(&storage_dir).await {
+            Ok(bridge) => {
+                let author = bridge.default_author().to_string();
+                app.with_iroh_docs_chat(std::sync::Arc::new(bridge)).await;
+                eprintln!("a3chatd: iroh-docs bridge ready (default author {author})");
+            }
+            Err(e) => {
+                eprintln!("a3chatd: --enable-iroh failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let mut cfg = RpcServerConfig::new(bind);
     cfg.log_requests = log_requests;
     if let Some(ms) = request_timeout_ms {
@@ -147,24 +164,6 @@ async fn main() {
         storage_dir.display()
     );
     eprintln!("a3chatd: lock file {}", lock_path.display());
-
-    if enable_iroh {
-        match try_enable_iroh(&storage_dir).await {
-            Ok(author) => {
-                eprintln!("a3chatd: iroh-docs bridge ready (default author {author})");
-            }
-            Err(e) => {
-                eprintln!("a3chatd: --enable-iroh failed: {e}");
-                handle.stop().await;
-                if let Err(e) = lockfile::release_lock(&lock_path, std::process::id()) {
-                    eprintln!("a3chatd: lock release warning: {e}");
-                }
-                std::process::exit(1);
-            }
-        }
-    } else {
-        eprintln!("a3chatd: iroh-docs bridge disabled (pass --enable-iroh to enable)");
-    }
 
     eprintln!("a3chatd: ready");
 
@@ -228,7 +227,9 @@ OPTIONS:\n  \
 /// "enable-iroh")]` so the lean default build (no iroh, no
 /// iroh-blobs) still compiles.
 #[cfg_attr(not(feature = "enable-iroh"), allow(unused_variables))]
-async fn try_enable_iroh(storage_dir: &std::path::Path) -> anyhow::Result<String> {
+async fn try_enable_iroh(
+    storage_dir: &std::path::Path,
+) -> anyhow::Result<a3net_chatstore::IrohDocsChat> {
     #[cfg(feature = "enable-iroh")]
     {
         use a3net_blobstore::IrohBlobStore;
@@ -238,12 +239,6 @@ async fn try_enable_iroh(storage_dir: &std::path::Path) -> anyhow::Result<String
         use iroh_docs::protocol::Docs;
         use iroh_gossip::net::Gossip;
 
-        // Build the engine the same way the in-tree iroh_docs_chat
-        // smoke test does: a bound Endpoint + Gossip + an in-memory
-        // docs replica on top of the FsStore-backed blobs. The
-        // FsStore lives under `<storage_dir>/iroh-blobs/` so it
-        // shares the same root as the SQLite stores — same backup /
-        // cleanup story.
         let blob_store = IrohBlobStore::open(storage_dir).await?;
         let endpoint = iroh::Endpoint::bind(N0).await?;
         let gossip = Gossip::builder().spawn(endpoint.clone());
@@ -252,14 +247,10 @@ async fn try_enable_iroh(storage_dir: &std::path::Path) -> anyhow::Result<String
             .spawn(endpoint.clone(), fs, gossip)
             .await?;
         let api: DocsApi = docs.api().clone();
-        // Touching the bridge is enough — proves the engine
-        // constructs end-to-end and the default author is
-        // mints. We hold no reference intentionally; the bridge's
-        // `Drop` impl aborts the subscription tasks, and the docs
-        // engine lives until process exit. Wiring it into the chat
-        // write path is the next step (see A3chatApp).
+        // Phase 5c: return the bridge so the caller can inject it into
+        // `A3chatApp` for dual-write.
         let bridge = IrohDocsChat::new(std::sync::Arc::new(api), blob_store).await?;
-        Ok(bridge.default_author().to_string())
+        Ok(bridge)
     }
     #[cfg(not(feature = "enable-iroh"))]
     {

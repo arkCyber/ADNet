@@ -78,6 +78,7 @@ enable-iroh = [
     "a3net-blobstore",
     "a3net-chatstore/iroh",
     "a3net-chatstore",
+    "a3chat-app/iroh",
     "dep:iroh",
     "dep:iroh-blobs",
     "dep:iroh-docs",

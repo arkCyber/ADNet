@@ -30,6 +30,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -152,6 +153,39 @@ impl ChatStorage {
     pub async fn trust_store(&self, user_id: &UserId) -> AppResult<a3net_chatstore::ChatTrustStore> {
         let conn = self.connection(user_id).await?;
         Ok(a3net_chatstore::ChatTrustStore::new(conn))
+    }
+
+    /// Open (or reuse) the per-user link-bookmark store. The bookmarks
+    /// live in the same SQLite file as the chat tables (one file per
+    /// user) so the WAL checkpoints and backup cycle are shared.
+    ///
+    /// `LinkBookmarkStore` is synchronous (it owns a
+    /// `std::sync::Mutex<Connection>` and uses `spawn_blocking`
+    /// internally). To avoid double-locking through the existing
+    /// `tokio::sync::Mutex` wrapper we open a fresh `rusqlite::Connection`
+    /// per call and let `LinkBookmarkStore::open` apply the chatstore
+    /// schema (which is idempotent for the `link_bookmarks` table).
+    pub async fn link_bookmark_store(
+        &self,
+        user_id: &UserId,
+    ) -> AppResult<a3net_chatstore::LinkBookmarkStore> {
+        let path = self.inner.config.path_for(user_id);
+        let store_path = path.clone();
+        let store = tokio::task::spawn_blocking(move || {
+            a3net_chatstore::LinkBookmarkStore::open(
+                a3net_chatstore::LinkBookmarkStoreConfig {
+                    storage_dir: store_path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_default(),
+                },
+            )
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("link_bookmark_store join: {e}")))?
+        .map_err(|e| AppError::Internal(format!("link_bookmark_store open: {e}")))?;
+        let _ = user_id;
+        Ok(store)
     }
 
     /// Initialise the per-user schema. Idempotent.
@@ -433,6 +467,12 @@ impl ChatStorage {
         })
         .await
         .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))??;
+
+        // Phase 5b dual-write: mirror the message to iroh-docs.
+        // Done at the ChatService level (not here) so the `IrohDocsChat`
+        // can be stored on `ChatService` alongside `ChatStorage`.
+        // See `ChatService::send_message` for the actual fan-out call.
+
         Ok(StoredMessage {
             message: stored_msg,
             was_encrypted_at_write: should_encrypt,
@@ -1524,6 +1564,36 @@ impl BlockingLockOwned for tokio::sync::Mutex<rusqlite::Connection> {
             }
         };
         h.block_on(async move { self.lock_owned().await })
+    }
+}
+
+/// Phase 5b adapter: convert an app-level `StoredMessage` (backed by
+/// `ChatMessage` with rich domain types) into the hub-canonical
+/// `im::Message` that `IrohDocsChat` expects.
+///
+/// The conversion is lossy — we drop `attachments`, `read_at`,
+/// `edited_at`, `recalled_at`, and `was_encrypted_at_write`. These
+/// fields live only in SQLite; iroh-docs stores the message body
+/// stream for distributed sync, not for UI state.
+#[cfg(feature = "iroh")]
+pub(crate) fn im_message_from_chat_message(stored: &StoredMessage) -> a3net_chatstore::Message {
+    let m = &stored.message;
+    a3net_chatstore::Message {
+        id: m.message_id.as_str().to_string(),
+        conversation_id: m.conversation_id.as_str().to_string(),
+        sender_id: m.sender_id.as_str().to_string(),
+        receiver_id: Some(m.receiver_id.as_str().to_string()),
+        content: serde_json::to_string(&m.body).unwrap_or_else(|_| String::new()),
+        timestamp: chrono::DateTime::from_naive_utc_and_offset(
+            chrono::NaiveDateTime::from_timestamp_opt(m.timestamp, 0)
+                .unwrap_or_else(|| chrono::Utc::now().naive_utc()),
+            chrono::Utc,
+        ),
+        sequence: m.sequence.into(),
+        reply_to: m.reply_to.as_ref().map(|r| r.as_str().to_string()),
+        integrity_hash: m.integrity_hash.clone(),
+        is_edited: m.is_edited,
+        edited_at: m.edited_at.as_ref().map(|t| t.to_rfc3339()),
     }
 }
 

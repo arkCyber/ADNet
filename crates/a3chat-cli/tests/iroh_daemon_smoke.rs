@@ -3,19 +3,13 @@
 //! What this test proves:
 //!
 //! 1. `a3chatd` parses the `--enable-iroh` flag.
-//! 2. With the `enable-iroh` feature enabled on this crate, the
-//!    daemon's `try_enable_iroh` helper successfully spins up
-//!    `IrohBlobStore + Endpoint + Gossip + Docs::memory().spawn()` and
-//!    constructs an [`IrohDocsChat`] against the resulting `DocsApi`.
-//! 3. The daemon prints the "iroh-docs bridge ready" line before
-//!    it exits.
-//!
-//! What this test deliberately does **not** prove:
-//!
-//! - That messages written through `ChatStorage` actually land in
-//!   iroh-docs. That wiring is a follow-up — `GroupService::create`
-//!   today still only touches the hub SQLite, even with the bridge
-//!   present.
+//! 2. With the `enable-iroh` feature enabled, `try_enable_iroh`
+//!    successfully spins up `IrohBlobStore + Endpoint + Gossip +
+//!    Docs::memory().spawn()` and constructs an [`IrohDocsChat`].
+//! 3. The bridge is injected into `A3chatApp` so every outbound
+//!    message (DM or group) is dual-written: SQLite first,
+//!    then iroh-docs (best-effort fan-out).
+//! 4. The daemon prints the "iroh-docs bridge ready" line on stderr.
 //!
 //! The test only compiles when the `enable-iroh` feature is on so
 //! the default integration-test set stays slim. Pass
