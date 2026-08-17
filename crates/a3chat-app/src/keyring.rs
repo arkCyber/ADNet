@@ -22,7 +22,14 @@ use a3chat_crypto::session::{DmSession, SessionKeys};
 /// out-of-the-box without requiring both sides to be online). The
 /// real handshake integration lands when the P2P transport is wired
 /// in P2.
-#[derive(Default)]
+/// Cached E2E state for one peer.
+///
+/// Holds a real [`DmSession`] once a Noise_XX handshake has
+/// completed (P1 stubs the handshake — we derive a deterministic
+/// session key from the two peer ids so `seal`/`open` round-trips
+/// out-of-the-box without requiring both sides to be online). The
+/// real handshake integration lands when the P2P transport is wired
+/// in P2.
 pub struct PeerSession {
     /// True once a Noise_XX handshake completed for this peer.
     pub handshake_completed: bool,
@@ -35,6 +42,31 @@ pub struct PeerSession {
     /// Optional so the P0-default `PeerSession::default()` stays
     /// usable in tests that only inspect the marker flags.
     pub dm: Option<DmSession>,
+}
+
+impl Default for PeerSession {
+    fn default() -> Self {
+        Self {
+            handshake_completed: false,
+            last_handshake_at: None,
+            group_iterations: std::collections::HashMap::new(),
+            dm: None,
+        }
+    }
+}
+
+// Manual `Debug` impl: `DmSession` lives in `a3chat-crypto` and
+// does not (yet) derive `Debug`. We treat it as an opaque option
+// in the debug output.
+impl std::fmt::Debug for PeerSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerSession")
+            .field("handshake_completed", &self.handshake_completed)
+            .field("last_handshake_at", &self.last_handshake_at)
+            .field("group_iterations", &self.group_iterations)
+            .field("dm", &self.dm.as_ref().map(|_| "⟪DmSession⟫"))
+            .finish()
+    }
 }
 
 impl PeerSession {
@@ -91,11 +123,12 @@ impl PeerSession {
 
 /// The keyring — a `UserId → PeerSession` cache wrapped in an
 /// `Arc` for cheap cloning.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct E2eKeyring {
     inner: Arc<Inner>,
 }
 
+#[derive(Debug)]
 struct Inner {
     owner: UserId,
     /// `parking_lot::RwLock` is held only for synchronous read/write

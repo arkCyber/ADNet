@@ -8,16 +8,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::chat_service::ChatService;
-use crate::notification_bus::NotificationBus;
-use crate::storage::{ChatStorage, StorageConfig};
-use a3chat_core::event::A3chatEvent;
 use a3chat_core::id::{ConversationId, UserId};
-use a3chat_core::message::{ChatMessage, MessageBody, MessageEnvelope, MessageType};
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::interval;
+use a3chat_core::message::{MessageBody, MessageEnvelope, MessageType};
+use tokio::sync::RwLock;
 
 /// Bot 的角色类型
 #[derive(Debug, Clone, PartialEq, Eq)]

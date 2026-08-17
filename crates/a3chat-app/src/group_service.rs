@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use a3chat_core::error::A3chatError;
 use a3chat_core::event::A3chatEvent;
-use a3chat_core::group::{Group, GroupInvitation, GroupMember, InvitationStatus, MemberRole};
+use a3chat_core::group::{Group, GroupMember, MemberRole};
 use a3chat_core::id::{ConversationId, UserId};
 use a3chat_core::rpc::A3chatRpcMethod;
 
@@ -39,6 +39,9 @@ type ImManager = a3net_chatstore::ImManager;
 type ChatStorage = crate::storage::ChatStorage;
 
 /// Guards against [`None`] storage/hub on methods that require them.
+/// Reserved for future use; the P3 wiring uses `if let Some(...)` directly
+/// so this macro is currently unused.
+#[allow(unused_macros)]
 macro_rules! require_initialised {
     ($self:expr, $field:ident) => {
         if $self.$field.get().is_none() {
@@ -76,7 +79,23 @@ pub struct GroupService {
     /// Per-user local chat history. `None` until [`with_storage`](Self::with_storage).
     storage: Arc<std::sync::Mutex<Option<Arc<ChatStorage>>>>,
     /// Canonical hub store. `None` until [`with_hub`](Self::with_hub).
+    ///
+    /// GB-13 — `std::sync::Mutex` is used for *slot* replacement
+    /// only. **Acquire, clone the inner `Arc<ImManager>` out, and
+    /// drop the guard before the first `.await` on the inner value.**
+    /// Every method in this file follows that pattern via the
+    /// [`hub_arc`](Self::hub_arc) helper.
     hub: Arc<std::sync::Mutex<Option<Arc<ImManager>>>>,
+    /// F-08 / B-24: invitation store. `None` until
+    /// [`with_invitation_state`](Self::with_invitation_state).
+    ///
+    /// GB-13 — `Arc<std::sync::Mutex<Option<…>>>` so the builder
+    /// methods can swap the slot regardless of how many clones of
+    /// the outer service exist. Access it via
+    /// [`invitation_arc`](Self::invitation_arc) so the guard is
+    /// always released before any `.await`.
+    invitation_state:
+        Arc<std::sync::Mutex<Option<crate::group_invitation_service::GroupInvitationService>>>,
 }
 
 impl GroupService {
@@ -88,6 +107,7 @@ impl GroupService {
             bus,
             storage: Arc::new(std::sync::Mutex::new(None)),
             hub: Arc::new(std::sync::Mutex::new(None)),
+            invitation_state: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -95,15 +115,58 @@ impl GroupService {
         &self.bus
     }
 
+    /// Acquire the hub slot, clone the inner `Arc`, drop the guard,
+    /// and return it. `None` when `with_hub` has not been called.
+    ///
+    /// GB-13 — centralises the canonical "extract Arc out of the
+    /// mutex before `.await`" pattern. Every method that talks to
+    /// the hub uses this helper so the pattern is uniform.
+    fn hub_arc(&self) -> Option<Arc<ImManager>> {
+        let guard = self.hub.lock().expect("hub slot mutex poisoned");
+        guard.as_ref().map(Arc::clone)
+    }
+
+    /// Acquire the storage slot, clone the inner `Arc`, drop the
+    /// guard, and return it.
+    fn storage_arc(&self) -> Option<Arc<ChatStorage>> {
+        let guard = self.storage.lock().expect("storage slot mutex poisoned");
+        guard.as_ref().map(Arc::clone)
+    }
+
+    /// Acquire the invitation slot, clone the inner service, drop
+    /// the guard, and return it.
+    fn invitation_arc(&self) -> Option<crate::group_invitation_service::GroupInvitationService> {
+        let guard = self
+            .invitation_state
+            .lock()
+            .expect("invitation slot mutex poisoned");
+        guard.as_ref().cloned()
+    }
+
     /// Provide the per-user [`ChatStorage`] instance.
     pub fn with_storage(self: Arc<Self>, storage: Arc<ChatStorage>) -> Arc<Self> {
-        *self.storage.lock().unwrap() = Some(storage);
+        *self.storage.lock().expect("storage slot mutex poisoned") = Some(storage);
         self
     }
 
     /// Provide the canonical hub [`ImManager`] instance.
     pub fn with_hub(self: Arc<Self>, hub: Arc<ImManager>) -> Arc<Self> {
-        *self.hub.lock().unwrap() = Some(hub);
+        *self.hub.lock().expect("hub slot mutex poisoned") = Some(hub);
+        self
+    }
+
+    /// Provide the F-08 invitation state. Until this is called
+    /// `invite` / `accept_invitation` / `decline_invitation` /
+    /// `revoke_invitation` will return
+    /// [`AppError::NotInitialised`].
+    pub fn with_invitation_state(
+        self: Arc<Self>,
+        invitations: crate::group_invitation_service::GroupInvitationService,
+    ) -> Arc<Self> {
+        *self
+            .invitation_state
+            .lock()
+            .expect("invitation slot mutex poisoned") = Some(invitations);
         self
     }
 
@@ -119,17 +182,12 @@ impl GroupService {
 
         let now = chrono::Utc::now();
 
-        // Resolve the hub reference BEFORE any await — `std::sync::MutexGuard`
-        // is !Send and cannot be held across `.await` points (axum requires
-        // Send futures for its handler layer). We extract the `Arc<ImManager>`
-        // so the mutex is unlocked before the first async call.
-        let hub = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let hub = hub.as_ref().ok_or_else(|| {
-            AppError::NotInitialised("GroupService hub not set".into())
-        })?;
+        // GB-13 — extract the `Arc<ImManager>` *before* the first
+        // `.await` so the slot mutex is dropped. All hub-touching
+        // methods in this file use `hub_arc()` for this reason.
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
 
         // Insert the canonical conversation row into hub and use the returned ID.
         let conv = hub
@@ -177,13 +235,10 @@ impl GroupService {
         conversation_id: &ConversationId,
         _invitation_id: &str,
     ) -> AppResult<GroupMember> {
-        let hub = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let hub = hub.as_ref().ok_or_else(|| {
-            AppError::NotInitialised("GroupService hub not set".into())
-        })?;
+        // GB-13 — extract the hub Arc before any `.await`.
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
 
         let member = hub
             .add_group_member(conversation_id.as_str(), user.as_str(), MemberRole::Member.as_str())
@@ -199,6 +254,144 @@ impl GroupService {
         Ok(hub_member_to_core(member))
     }
 
+    /// `a3chat.group.invite` — owner or admin invites a user; emits
+    /// a [`A3chatEvent::GroupInvitationReceived`] for the invitee.
+    pub async fn invite(
+        &self,
+        inviter: &UserId,
+        conversation_id: &ConversationId,
+        invitee_id: &UserId,
+        group_name: &str,
+        message: Option<&str>,
+    ) -> AppResult<a3chat_core::group::GroupInvitation> {
+        self.require_role(inviter, conversation_id, MemberRole::Admin)
+            .await?;
+
+        // GB-14 — the previous implementation locked the hub slot
+        // just to drop it without using the value. The hub is not
+        // consulted here (invitations are stored exclusively in the
+        // a3chat invitation table); the lock was pure dead traffic.
+
+        let now_unix = chrono::Utc::now().timestamp();
+        let expires_at = now_unix + crate::group_invitation_service::DEFAULT_INVITATION_TTL_SECS;
+        let invitation_id = uuid::Uuid::new_v4().to_string();
+        let rec = crate::group_invitation_service::InvitationRecord {
+            invitation_id: invitation_id.clone(),
+            conversation_id: conversation_id.clone(),
+            group_name: group_name.to_string(),
+            inviter_id: inviter.clone(),
+            inviter_name: inviter.as_str().to_string(),
+            invitee_id: invitee_id.clone(),
+            status: crate::group_invitation_service::STATUS_PENDING.into(),
+            created_at_unix: now_unix,
+            expires_at_unix: expires_at,
+            responded_at_unix: None,
+            message: message.map(|s| s.to_string()),
+        };
+
+        // Persist via the a3chat invitation store. GB-13 — pull
+        // the service out of the slot before the first `.await`.
+        if let Some(state) = self.invitation_arc() {
+            state.create(inviter, rec.clone()).await?;
+        }
+
+        let invitation: a3chat_core::group::GroupInvitation = rec.into();
+        self.bus
+            .publish(A3chatEvent::GroupInvitationReceived {
+                invitation: invitation.clone(),
+            });
+        Ok(invitation)
+    }
+
+    /// Resolve the invitation inbox for the caller (i.e. all pending
+    /// invitations addressed to `user`).
+    pub async fn list_invitations(
+        &self,
+        user: &UserId,
+    ) -> AppResult<Vec<crate::group_invitation_service::InvitationRecord>> {
+        let state = self.invitation_arc().ok_or_else(|| {
+            AppError::NotInitialised("GroupService.invitation_state not set".into())
+        })?;
+        state.inbox(user).await
+    }
+
+    /// Accept a pending invitation. The caller must be the invitee.
+    pub async fn accept_invitation(
+        &self,
+        user: &UserId,
+        invitation_id: &str,
+    ) -> AppResult<a3chat_core::group::GroupInvitation> {
+        let state = self.invitation_arc().ok_or_else(|| {
+            AppError::NotInitialised("GroupService.invitation_state not set".into())
+        })?;
+        let rec = state
+            .set_status(user, invitation_id, crate::group_invitation_service::STATUS_ACCEPTED)
+            .await?;
+        // Re-issue a `GroupInvitationReceived` event with the new
+        // status so SSE subscribers can react to the acceptance.
+        let invitation: a3chat_core::group::GroupInvitation = rec.into();
+        self.bus
+            .publish(A3chatEvent::GroupInvitationReceived {
+                invitation: invitation.clone(),
+            });
+        Ok(invitation)
+    }
+
+    /// Decline a pending invitation (no-op on the group, just an
+    /// inbox row update).
+    pub async fn decline_invitation(
+        &self,
+        user: &UserId,
+        invitation_id: &str,
+    ) -> AppResult<a3chat_core::group::GroupInvitation> {
+        let state = self.invitation_arc().ok_or_else(|| {
+            AppError::NotInitialised("GroupService.invitation_state not set".into())
+        })?;
+        let rec = state
+            .set_status(user, invitation_id, crate::group_invitation_service::STATUS_DECLINED)
+            .await?;
+        let invitation: a3chat_core::group::GroupInvitation = rec.into();
+        self.bus
+            .publish(A3chatEvent::GroupInvitationReceived {
+                invitation: invitation.clone(),
+            });
+        Ok(invitation)
+    }
+
+    /// Revoke an outstanding invitation. The caller must be the
+    /// inviter (or a group admin).
+    pub async fn revoke_invitation(
+        &self,
+        owner: &UserId,
+        invitation_id: &str,
+    ) -> AppResult<a3chat_core::group::GroupInvitation> {
+        let state = self.invitation_arc().ok_or_else(|| {
+            AppError::NotInitialised("GroupService.invitation_state not set".into())
+        })?;
+        let rec = state
+            .set_status(owner, invitation_id, crate::group_invitation_service::STATUS_REVOKED)
+            .await?;
+        let invitation: a3chat_core::group::GroupInvitation = rec.into();
+        self.bus
+            .publish(A3chatEvent::GroupInvitationReceived {
+                invitation: invitation.clone(),
+            });
+        Ok(invitation)
+    }
+
+    /// Look up a single invitation by id (owner-side read).
+    pub async fn get_invitation(
+        &self,
+        owner: &UserId,
+        invitation_id: &str,
+    ) -> AppResult<Option<a3chat_core::group::GroupInvitation>> {
+        let state = self.invitation_arc().ok_or_else(|| {
+            AppError::NotInitialised("GroupService.invitation_state not set".into())
+        })?;
+        let rec = state.get(owner, invitation_id).await?;
+        Ok(rec.map(a3chat_core::group::GroupInvitation::from))
+    }
+
     /// `a3chat.group.member.add` — admin or owner adds a member.
     pub async fn add_member(
         &self,
@@ -209,13 +402,13 @@ impl GroupService {
         self.require_role(actor, conversation_id, MemberRole::Admin)
             .await?;
 
-        let hub = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let hub = hub.as_ref().ok_or_else(|| {
-            AppError::NotInitialised("GroupService hub not set".into())
-        })?;
+        // GB-2 — extract the hub Arc before any `.await` so the
+        // slot mutex is dropped. The previous implementation held
+        // the lock across `hub.add_group_member(...)`, which is
+        // unsound on a multi-threaded tokio runtime.
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
 
         let member = hub
             .add_group_member(conversation_id.as_str(), target.as_str(), MemberRole::Member.as_str())
@@ -239,18 +432,16 @@ impl GroupService {
         target: &UserId,
     ) -> AppResult<()> {
         // Owners cannot be removed (only via transfer/dissolve).
-        // Clone the Arc OUT of the mutex so the guard is dropped before await.
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let members = {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.get_group_members(conversation_id.as_str())
-        };
-        let members = members.await.map_err(AppError::from)?;
+        // GB-3 — both reads and the write go through the helper so
+        // the slot mutex is never held across `.await`.
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
 
         // Target must exist.
         let target_member = members
@@ -272,19 +463,9 @@ impl GroupService {
             ));
         }
 
-        // Remove from hub. Acquire lock, clone Arc, drop guard, await.
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.remove_group_member(conversation_id.as_str(), target.as_str())
-                .await
-                .map_err(AppError::from)?;
-        }
+        hub.remove_group_member(conversation_id.as_str(), target.as_str())
+            .await
+            .map_err(AppError::from)?;
 
         self.bus
             .publish(A3chatEvent::GroupMemberRemoved {
@@ -298,6 +479,10 @@ impl GroupService {
     }
 
     /// `a3chat.group.member.role` — owner or admin sets a member's role.
+    ///
+    /// GB-4 — emits [`A3chatEvent::GroupMemberRoleChanged`] so SSE
+    /// subscribers refresh the role badge. The previous implementation
+    /// persisted correctly but never published the event.
     pub async fn set_role(
         &self,
         actor: &UserId,
@@ -306,6 +491,9 @@ impl GroupService {
         new_role: MemberRole,
     ) -> AppResult<GroupMember> {
         // Validate before locking (DO-178C §6.1).
+        if actor.as_str().is_empty() {
+            return Err(AppError::Domain("actor user_id is empty".into()));
+        }
         if target.as_str().is_empty() {
             return Err(AppError::Domain("member user_id is empty".into()));
         }
@@ -313,20 +501,17 @@ impl GroupService {
             return Err(AppError::Domain("conversation_id is empty".into()));
         }
 
-        // Step 1: Read current members to perform validation (no lock needed for read).
-        let members = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let members = {
-            let hub = members.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.get_group_members(conversation_id.as_str())
-        };
-        let members = members.await.map_err(AppError::from)?;
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
 
-        // Step 2: Perform all validation checks (no lock needed).
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        // Validate actor and target are both members, and the actor
+        // outranks the target.
         let actor_member = members
             .iter()
             .find(|m| m.user_id == actor.as_str())
@@ -337,10 +522,8 @@ impl GroupService {
             .position(|m| m.user_id == target.as_str())
             .ok_or_else(|| AppError::Domain("target is not a member".into()))?;
 
-        let actor_rank =
-            a3chat_core::group::MemberRole::rank_from_str(&actor_member.role);
-        let target_rank =
-            a3chat_core::group::MemberRole::rank_from_str(&members[target_idx].role);
+        let actor_rank = a3chat_core::group::MemberRole::rank_from_str(&actor_member.role);
+        let target_rank = a3chat_core::group::MemberRole::rank_from_str(&members[target_idx].role);
 
         if actor_rank <= target_rank {
             return Err(AppError::Domain(
@@ -364,66 +547,58 @@ impl GroupService {
             ));
         }
 
-        // Step 3: Acquire hub lock, start update, drop guard, await.
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.set_group_member_role(
-                conversation_id.as_str(),
-                target.as_str(),
-                new_role.as_str(),
-            ).await.map_err(AppError::from)?;
-        }
+        hub.set_group_member_role(
+            conversation_id.as_str(),
+            target.as_str(),
+            new_role.as_str(),
+        )
+        .await
+        .map_err(AppError::from)?;
 
-        // Step 4: Fetch the updated member.
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let updated_members = {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.get_group_members(conversation_id.as_str())
-        };
-        let updated_members = updated_members.await.map_err(AppError::from)?;
+        let updated_members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
 
         let updated_member = updated_members
             .into_iter()
             .find(|m| m.user_id == target.as_str())
             .ok_or_else(|| AppError::Internal("updated member not found".into()))?;
 
+        // GB-4 — publish the role-changed event so SSE subscribers
+        // see the role badge update.
+        self.bus.publish(A3chatEvent::GroupMemberRoleChanged {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            member_user_id: target.clone(),
+            new_role: new_role.as_str().to_string(),
+            actor_user_id: actor.clone(),
+        });
+
         Ok(hub_member_to_core(updated_member))
     }
 
     /// Transfer ownership to another member. The old owner becomes Admin.
     /// Atomically promotes new owner and demotes old owner in hub.
+    ///
+    /// GB-17 — emits [`A3chatEvent::GroupMemberRoleChanged`] twice
+    /// (new owner, old owner→admin) instead of the previous
+    /// `GroupMemberJoined` + `GroupMemberRemoved` miscast.
     pub async fn transfer_ownership(
         &self,
         current_owner: &UserId,
         conversation_id: &ConversationId,
         new_owner: &UserId,
     ) -> AppResult<()> {
-        // Verify ownership and membership (pure reads, no lock needed).
-        // Clone the Arc out of the mutex so the guard is dropped before await.
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let members = {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.get_group_members(conversation_id.as_str())
-        };
-        let members = members.await.map_err(AppError::from)?;
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
 
-        // Verify current_owner is an Owner.
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+
         let old_owner_idx = members
             .iter()
             .position(|m| m.user_id == current_owner.as_str());
@@ -432,111 +607,96 @@ impl GroupService {
             return Err(AppError::Domain("current owner is not an owner".into()));
         }
 
-        // Verify new_owner is a member.
         let _ = members
             .iter()
             .position(|m| m.user_id == new_owner.as_str())
             .ok_or_else(|| AppError::Domain("new owner is not a member".into()))?;
 
-        // Demote old owner → Admin, promote new owner → Owner.
-        // Start async ops while lock is held, then drop guard before await.
-        // `futures::future::join` returns `(Result<A,E>, Result<B,E>)`.
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let hub = hub_arc.as_ref().ok_or_else(|| {
-            AppError::NotInitialised("GroupService hub not set".into())
-        })?;
-
-        // Order matters: promote first so the demotion doesn't cascade-triggers
-        // any "last owner" rule.
-        let promote_fut = hub.set_group_member_role(
+        // Promote first so the demotion doesn't cascade-trigger any
+        // "last owner" rule.
+        hub.set_group_member_role(
             conversation_id.as_str(),
             new_owner.as_str(),
             MemberRole::Owner.as_str(),
-        );
-        let promote_new_fut = hub.get_group_members(conversation_id.as_str());
+        )
+        .await
+        .map_err(AppError::from)?;
 
-        let (promote_result, new_members_result) =
-            futures::future::join(promote_fut, promote_new_fut).await;
-        let new_members = new_members_result.map_err(AppError::from)?;
-        promote_result.map_err(AppError::from)?;
-
-        let new_member = new_members
-            .into_iter()
-            .find(|m| m.user_id == new_owner.as_str())
-            .unwrap();
-
-        // Demote old owner.
-        let hub = hub_arc.as_ref().ok_or_else(|| {
-            AppError::NotInitialised("GroupService hub not set".into())
-        })?;
-        let demote_fut = hub.set_group_member_role(
+        // Demote old owner to Admin.
+        hub.set_group_member_role(
             conversation_id.as_str(),
             current_owner.as_str(),
             MemberRole::Admin.as_str(),
-        );
-        let demote_old_fut = hub.get_group_members(conversation_id.as_str());
-        let (demote_result, old_members_result) =
-            futures::future::join(demote_fut, demote_old_fut).await;
-        demote_result.map_err(AppError::from)?;
-        let _old_members = old_members_result.map_err(AppError::from)?;
+        )
+        .await
+        .map_err(AppError::from)?;
 
-        self.bus
-            .publish(A3chatEvent::GroupMemberJoined {
-                conversation_id: conversation_id.clone(),
-                member: hub_member_to_core(new_member.clone()),
-            });
-
-        self.bus
-            .publish(A3chatEvent::GroupMemberRemoved {
-                conversation_id: conversation_id.clone(),
-                user_id: current_owner.clone(),
-                actor_user_id: Some(current_owner.clone()),
-                removed_at_unix: chrono::Utc::now().timestamp(),
-            });
+        // GB-17 — publish two `GroupMemberRoleChanged` events so
+        // the front-end role badges update correctly. The previous
+        // implementation emitted `GroupMemberJoined` (wrong — the
+        // user was already a member) and `GroupMemberRemoved`
+        // (wrong — the user wasn't removed, just demoted).
+        self.bus.publish(A3chatEvent::GroupMemberRoleChanged {
+            user_id: current_owner.clone(),
+            conversation_id: conversation_id.clone(),
+            member_user_id: new_owner.clone(),
+            new_role: MemberRole::Owner.as_str().to_string(),
+            actor_user_id: current_owner.clone(),
+        });
+        self.bus.publish(A3chatEvent::GroupMemberRoleChanged {
+            user_id: current_owner.clone(),
+            conversation_id: conversation_id.clone(),
+            member_user_id: current_owner.clone(),
+            new_role: MemberRole::Admin.as_str().to_string(),
+            actor_user_id: current_owner.clone(),
+        });
 
         Ok(())
     }
 
     /// `a3chat.group.list` — all groups the user is a member of.
     pub async fn list(&self, user: &UserId) -> AppResult<Vec<Group>> {
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let convs = {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.list_user_conversations(user.as_str())
-        };
-        let convs = convs.await.map_err(AppError::from)?;
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
 
-        let groups: Vec<Group> = convs
+        let convs = hub
+            .list_user_conversations(user.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        // GB-18 — the previous implementation reported
+        // `owner_id = "unknown"` and `member_count = 1`. Look up the
+        // real owner and member count from hub for every group.
+        let mut groups: Vec<Group> = Vec::with_capacity(convs.len());
+        for c in convs
             .into_iter()
             .filter(|c| c.chat_type == a3net_chatstore::ChatType::Group)
-            .map(|c| {
-                let now = chrono::Utc::now();
-                // last_activity / last_sequence / owner_id / member_count
-                // are best-effort from hub's messages table; if we don't
-                // have a cached value we fall back to now/0/unknown.
-                Group {
-                    conversation_id: c.id.into(),
-                    name: c.title,
-                    description: c.description,
-                    avatar_url: None,
-                    owner_id: UserId::from("unknown"),
-                    member_count: 1,
-                    created_at: c.created_at,
-                    last_activity: c.updated_at,
-                    last_sequence: c.last_sequence,
-                    is_private: c.is_private,
-                    is_dissolved: c.is_dissolved,
-                }
-            })
-            .collect();
+        {
+            let members = hub
+                .get_group_members(&c.id)
+                .await
+                .map_err(AppError::from)?;
+            let member_count = members.len() as u32;
+            let owner_id = members
+                .iter()
+                .find(|m| m.role == "owner")
+                .map(|m| UserId::from(m.user_id.clone()))
+                .unwrap_or_else(|| UserId::from("unknown"));
+            groups.push(Group {
+                conversation_id: c.id.into(),
+                name: c.title,
+                description: c.description,
+                avatar_url: None,
+                owner_id,
+                member_count,
+                created_at: c.created_at,
+                last_activity: c.updated_at,
+                last_sequence: c.last_sequence,
+                is_private: c.is_private,
+                is_dissolved: c.is_dissolved,
+            });
+        }
 
         Ok(groups)
     }
@@ -546,17 +706,13 @@ impl GroupService {
         &self,
         conversation_id: &ConversationId,
     ) -> AppResult<Vec<GroupMember>> {
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let members = {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.get_group_members(conversation_id.as_str())
-        };
-        let members = members.await.map_err(AppError::from)?;
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
 
         Ok(members.into_iter().map(hub_member_to_core).collect())
     }
@@ -567,17 +723,13 @@ impl GroupService {
         conversation_id: &ConversationId,
         user: &UserId,
     ) -> AppResult<GroupMember> {
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let members = {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.get_group_members(conversation_id.as_str())
-        };
-        let members = members.await.map_err(AppError::from)?;
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
 
         Ok(members
             .into_iter()
@@ -587,6 +739,12 @@ impl GroupService {
     }
 
     /// `a3chat.group.dissolve` — owner permanently dissolves a group.
+    ///
+    /// GB-6 — emits [`A3chatEvent::GroupDissolved`] so SSE
+    /// subscribers on every device remove the conversation from
+    /// their UI. The previous implementation persisted to hub but
+    /// was not routed from the dispatcher at all and never
+    /// emitted the event.
     pub async fn dissolve(
         &self,
         actor: &UserId,
@@ -595,30 +753,93 @@ impl GroupService {
         self.require_role(actor, conversation_id, MemberRole::Owner)
             .await?;
 
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.dissolve_conversation(conversation_id.as_str())
-                .await
-                .map_err(AppError::from)?;
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        hub.dissolve_conversation(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        self.bus.publish(A3chatEvent::GroupDissolved {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            actor_user_id: actor.clone(),
+            dissolved_at_unix: chrono::Utc::now().timestamp(),
+        });
+
+        Ok(())
+    }
+
+    /// `a3chat.group.leave` — non-admin user voluntarily leaves the
+    /// group (G-04). Self-removal is distinct from admin-kick in
+    /// that we allow an ordinary `Member` to drop themselves; the
+    /// group membership row is removed and a
+    /// [`A3chatEvent::GroupMemberRemoved`] fires with
+    /// `actor_user_id = Some(leaver)` so the rest of the room can
+    /// react.
+    pub async fn leave(
+        &self,
+        user: &UserId,
+        conversation_id: &ConversationId,
+    ) -> AppResult<()> {
+        if user.as_str().is_empty() {
+            return Err(AppError::Domain("user_id is empty".into()));
         }
+        if conversation_id.as_str().is_empty() {
+            return Err(AppError::Domain("conversation_id is empty".into()));
+        }
+
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        let me = members
+            .iter()
+            .find(|m| m.user_id == user.as_str())
+            .ok_or_else(|| AppError::Domain("not a member".into()))?;
+
+        // Owners must transfer first or dissolve — they cannot
+        // simply walk away, otherwise the group would be left with
+        // no owner.
+        if me.role == "owner" {
+            return Err(AppError::Forbidden(
+                "owner must transfer ownership or dissolve the group before leaving"
+                    .into(),
+            ));
+        }
+
+        hub.remove_group_member(conversation_id.as_str(), user.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        self.bus.publish(A3chatEvent::GroupMemberRemoved {
+            conversation_id: conversation_id.clone(),
+            user_id: user.clone(),
+            actor_user_id: Some(user.clone()),
+            removed_at_unix: chrono::Utc::now().timestamp(),
+        });
 
         Ok(())
     }
 
     /// `a3chat.group.announcement.set` — owner posts a pinned announcement.
+    ///
+    /// GB-5 — emits [`A3chatEvent::GroupAnnouncementChanged`] after
+    /// the hub write so SSE subscribers see the banner update. The
+    /// previous implementation persisted the text but never
+    /// published the event.
     pub async fn set_announcement(
         &self,
         actor: &UserId,
         conversation_id: &ConversationId,
         text: String,
     ) -> AppResult<()> {
-        // Validate text first (no hub required).
         if text.trim().is_empty() {
             return Err(AppError::Domain("announcement is empty".into()));
         }
@@ -631,18 +852,20 @@ impl GroupService {
         self.require_role(actor, conversation_id, MemberRole::Admin)
             .await?;
 
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.set_group_announcement(conversation_id.as_str(), &text)
-                .await
-                .map_err(AppError::from)?;
-        }
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        hub.set_group_announcement(conversation_id.as_str(), &text)
+            .await
+            .map_err(AppError::from)?;
+
+        self.bus.publish(A3chatEvent::GroupAnnouncementChanged {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            text: Some(text),
+            actor_user_id: actor.clone(),
+        });
 
         Ok(())
     }
@@ -657,19 +880,37 @@ impl GroupService {
         self.require_role(actor, conversation_id, MemberRole::Admin)
             .await?;
 
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let hub = hub_arc.as_ref().ok_or_else(|| {
-            AppError::NotInitialised("GroupService hub not set".into())
-        })?;
+        // Audit issue #6: this used to be an empty stub. Validate
+        // the request, then forward each present field to the hub
+        // via the new `set_group_title` / `set_group_description`
+        // methods. A failure on either update aborts and surfaces
+        // to the caller.
+        req.validate().map_err(AppError::from)?;
 
-        // TODO(P0-3): Call hub.update_group_metadata once that method exists.
-        // For now the name/description live in hub's conversations table
-        // which we read via list(). The update path is:
-        // hub.update_group_name + hub.update_group_description.
-        let _ = (hub, req);
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        if let Some(ref name) = req.name {
+            hub.set_group_title(conversation_id.as_str(), name)
+                .await
+                .map_err(AppError::from)?;
+        }
+        if let Some(ref description) = req.description {
+            hub.set_group_description(conversation_id.as_str(), description)
+                .await
+                .map_err(AppError::from)?;
+        }
+        // GB-16 — the previous implementation returned `Internal`
+        // ("avatar_url update not yet wired to hub"). Rename to
+        // `Domain` so the wire error code reflects "not implemented"
+        // rather than "internal failure". Production deployments
+        // can branch on this code to display an actionable message.
+        if req.avatar_url.is_some() {
+            return Err(AppError::Domain(
+                "avatar_url update not yet wired to hub".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -683,17 +924,16 @@ impl GroupService {
         conversation_id: &ConversationId,
         required: MemberRole,
     ) -> AppResult<()> {
-        let hub_arc = {
-            let guard = self.hub.lock().unwrap();
-            guard.clone()
-        };
-        let members = {
-            let hub = hub_arc.as_ref().ok_or_else(|| {
-                AppError::NotInitialised("GroupService hub not set".into())
-            })?;
-            hub.get_group_members(conversation_id.as_str())
-        };
-        let members = members.await.map_err(AppError::from)?;
+        // GB-13 — single `hub_arc()` extraction, then a single
+        // `.await`. The previous implementation cloned the Arc out
+        // *and then* re-locked, which was unsound.
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
 
         let actor_member = members
             .iter()
@@ -710,6 +950,279 @@ impl GroupService {
         }
 
         Ok(())
+    }
+
+    // ── Group mute (G-02) ──────────────────────────────────────────────────────
+
+    /// Mute a single member for a window of `muted_until_secs`. Use
+    /// [`i64::MAX`](i64::MAX) for `muted_until_secs` to mute
+    /// indefinitely until `unmute_member` is called.
+    pub async fn mute_member(
+        &self,
+        actor: &UserId,
+        conversation_id: &ConversationId,
+        target: &UserId,
+        muted_until_secs: i64,
+        reason: Option<&str>,
+    ) -> AppResult<()> {
+        self.require_role(actor, conversation_id, MemberRole::Admin)
+            .await?;
+        if target.as_str().is_empty() {
+            return Err(AppError::Domain("target user_id is empty".into()));
+        }
+        if conversation_id.as_str().is_empty() {
+            return Err(AppError::Domain("conversation_id is empty".into()));
+        }
+        if muted_until_secs <= 0 {
+            return Err(AppError::Domain(
+                "muted_until_secs must be > 0 (use i64::MAX for indefinite)".into(),
+            ));
+        }
+
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        let now = chrono::Utc::now().timestamp();
+        let muted_until_unix = now.saturating_add(muted_until_secs);
+
+        storage
+            .set_group_member_mute(
+                conversation_id,
+                target,
+                actor,
+                muted_until_unix,
+                reason,
+                now,
+            )
+            .await?;
+
+        self.bus.publish(A3chatEvent::GroupMuteChanged {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            muted_user_id: target.clone(),
+            is_muted: true,
+            muted_until_unix: Some(muted_until_unix),
+            actor_user_id: actor.clone(),
+        });
+
+        Ok(())
+    }
+
+    /// Lift a per-member mute. `muted_until_unix = None` from the
+    /// caller perspective: we always store `i64::MIN` as the
+    /// sentinel "not muted" value so subsequent reads have a clear
+    /// indicator.
+    pub async fn unmute_member(
+        &self,
+        actor: &UserId,
+        conversation_id: &ConversationId,
+        target: &UserId,
+    ) -> AppResult<()> {
+        self.require_role(actor, conversation_id, MemberRole::Admin)
+            .await?;
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        storage
+            .clear_group_member_mute(conversation_id, target)
+            .await?;
+        self.bus.publish(A3chatEvent::GroupMuteChanged {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            muted_user_id: target.clone(),
+            is_muted: false,
+            muted_until_unix: None,
+            actor_user_id: actor.clone(),
+        });
+        Ok(())
+    }
+
+    /// Mute the entire group. Any subsequent
+    /// [`ChatService::send_message`](crate::chat_service::ChatService::send_message)
+    /// call with this conversation_id must consult the storage
+    /// helper and reject accordingly. The `chat_service.send_message`
+    /// gate is added separately (GB-22 follow-up).
+    pub async fn mute_all(
+        &self,
+        actor: &UserId,
+        conversation_id: &ConversationId,
+    ) -> AppResult<()> {
+        self.require_role(actor, conversation_id, MemberRole::Admin)
+            .await?;
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        storage
+            .set_group_mute_all(conversation_id, true)
+            .await?;
+        self.bus.publish(A3chatEvent::GroupMuteAllChanged {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            is_muted: true,
+            actor_user_id: actor.clone(),
+        });
+        Ok(())
+    }
+
+    /// Lift the group-wide mute.
+    pub async fn unmute_all(
+        &self,
+        actor: &UserId,
+        conversation_id: &ConversationId,
+    ) -> AppResult<()> {
+        self.require_role(actor, conversation_id, MemberRole::Admin)
+            .await?;
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        storage
+            .set_group_mute_all(conversation_id, false)
+            .await?;
+        self.bus.publish(A3chatEvent::GroupMuteAllChanged {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            is_muted: false,
+            actor_user_id: actor.clone(),
+        });
+        Ok(())
+    }
+
+    /// List every currently-muted member in this group. Expired
+    /// mutes are filtered out so the UI sees only effective rows.
+    pub async fn list_muted(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> AppResult<Vec<(UserId, i64, String)>> {
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        storage.list_group_member_mutes(conversation_id).await
+    }
+
+    /// Convenience — does the conversation currently refuse all
+    /// messages? Used by the chat service gate.
+    pub async fn is_group_muted(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> AppResult<bool> {
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        storage.is_group_mute_all(conversation_id).await
+    }
+
+    /// Convenience — is `target` muted right now? Used by the chat
+    /// service gate. `target` is the *sender* (since muting is
+    /// about whether the sender can post, not whether the receiver
+    /// can hear).
+    pub async fn is_member_muted(
+        &self,
+        conversation_id: &ConversationId,
+        target: &UserId,
+    ) -> AppResult<bool> {
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        storage.is_group_member_muted(conversation_id, target).await
+    }
+
+    // ── Group nicknames (G-06) ────────────────────────────────────────────────
+
+    /// Set or clear a member's per-group nickname (群昵称).
+    /// `nickname = None` clears the override.
+    pub async fn set_nickname(
+        &self,
+        actor: &UserId,
+        conversation_id: &ConversationId,
+        target: &UserId,
+        nickname: Option<&str>,
+    ) -> AppResult<()> {
+        // Members can set their own nickname; admins/owners can set
+        // anyone's. Owner/admin is also enforced for the cross-user
+        // case to keep admin parity with WeChat's group manager UX.
+        if actor != target {
+            self.require_role(actor, conversation_id, MemberRole::Admin)
+                .await?;
+        }
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        let now = chrono::Utc::now().timestamp();
+        storage
+            .set_group_member_nickname(conversation_id, target, nickname, now)
+            .await?;
+        self.bus.publish(A3chatEvent::GroupNicknameChanged {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            member_user_id: target.clone(),
+            nickname: nickname.map(str::to_string),
+            actor_user_id: actor.clone(),
+        });
+        Ok(())
+    }
+
+    /// Fetch a single member's nickname override.
+    pub async fn get_nickname(
+        &self,
+        conversation_id: &ConversationId,
+        target: &UserId,
+    ) -> AppResult<Option<String>> {
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        storage.get_group_member_nickname(conversation_id, target).await
+    }
+
+    /// List every nickname override for the conversation.
+    pub async fn list_nicknames(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> AppResult<Vec<(UserId, String)>> {
+        let storage = self
+            .storage_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService storage not set".into()))?;
+        storage.list_group_member_nicknames(conversation_id).await
+    }
+
+    // ── @-mentions (G-05) ──────────────────────────────────────────────────────
+
+    /// Parse `@nickname` and `@<NodeId>` tokens in a pending body.
+    /// The matcher is case-sensitive for hex NodeIds and
+    /// case-insensitive for nicknames / display names. The caller
+    /// is expected to call
+    /// [`validate_mention_members`](Self::validate_mention_members)
+    /// on the result before sending so a forged mention list can't
+    /// notify non-members.
+    pub fn parse_mentions(
+        &self,
+        body: &str,
+        nicknames: &[(UserId, String)],
+    ) -> Vec<crate::group_mention::MentionMatch> {
+        crate::group_mention::parse(body, nicknames)
+    }
+
+    /// Validate that every `mentioned_user_id` in `mentions` is a
+    /// current member of `conversation_id`. Returns the list of
+    /// unknown ids so the caller can surface them.
+    pub async fn validate_mention_members(
+        &self,
+        conversation_id: &ConversationId,
+        mentions: &[UserId],
+    ) -> AppResult<Vec<UserId>> {
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+        let known: std::collections::HashSet<String> =
+            members.iter().map(|m| m.user_id.clone()).collect();
+        Ok(mentions
+            .iter()
+            .filter(|m| !known.contains(m.as_str()))
+            .cloned()
+            .collect())
     }
 }
 
@@ -838,6 +1351,397 @@ pub async fn dispatch(
                 .map_err(A3chatError::from)?;
             Ok(serde_json::json!({ "ok": true }))
         }
+
+        // ── GB-6 — dissolve ────────────────────────────────────────
+        A3chatRpcMethod::GROUP_DISSOLVE => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            svc.dissolve(owner, &conversation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        // ── G-04 — leave ────────────────────────────────────────────
+        A3chatRpcMethod::GROUP_LEAVE => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            svc.leave(owner, &conversation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        // ── GB-7 — invitation quintet ──────────────────────────────
+        A3chatRpcMethod::GROUP_INVITE => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let invitee_id: UserId = serde_json::from_value(
+                params
+                    .get("invitee_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("invitee_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let group_name: String = params
+                .get("group_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| A3chatError::InvalidInput("group_name missing".into()))?
+                .to_string();
+            // `inviter_name` is parsed for input validation but
+            // the canonical display name is supplied by the
+            // authoritative `invite` method itself (which always
+            // uses `inviter.as_str()`), so we drop it here.
+            let _inviter_name: String = params
+                .get("inviter_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| A3chatError::InvalidInput("inviter_name missing".into()))?
+                .to_string();
+            let message = params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let inv = svc
+                .invite(owner, &conversation_id, &invitee_id, &group_name, message.as_deref())
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&inv).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_INVITE_LIST => {
+            let records = svc
+                .list_invitations(owner)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&records).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_INVITE_ACCEPT => {
+            let invitation_id: String = params
+                .get("invitation_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| A3chatError::InvalidInput("invitation_id missing".into()))?
+                .to_string();
+            let inv = svc
+                .accept_invitation(owner, &invitation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&inv).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_INVITE_DECLINE => {
+            let invitation_id: String = params
+                .get("invitation_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| A3chatError::InvalidInput("invitation_id missing".into()))?
+                .to_string();
+            let inv = svc
+                .decline_invitation(owner, &invitation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&inv).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_INVITE_REVOKE => {
+            let invitation_id: String = params
+                .get("invitation_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| A3chatError::InvalidInput("invitation_id missing".into()))?
+                .to_string();
+            let inv = svc
+                .revoke_invitation(owner, &invitation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&inv).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_INVITE_GET => {
+            let invitation_id: String = params
+                .get("invitation_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| A3chatError::InvalidInput("invitation_id missing".into()))?
+                .to_string();
+            let inv = svc
+                .get_invitation(owner, &invitation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&inv).map_err(A3chatError::from)
+        }
+
+        // ── GB-8 — list / members / member.get / metadata.update / transfer_ownership ──
+        A3chatRpcMethod::GROUP_LIST => {
+            let groups = svc.list(owner).await.map_err(A3chatError::from)?;
+            serde_json::to_value(&groups).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_MEMBERS => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let members = svc
+                .list_members(&conversation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&members).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_MEMBER_GET => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let user_id: UserId = serde_json::from_value(
+                params
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let member = svc
+                .get_member(&conversation_id, &user_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&member).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_METADATA_UPDATE => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let req: UpdateGroupMetadataRequest =
+                serde_json::from_value(params).map_err(A3chatError::from)?;
+            svc.update_metadata(owner, &conversation_id, req)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        A3chatRpcMethod::GROUP_TRANSFER_OWNERSHIP => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let new_owner: UserId = serde_json::from_value(
+                params
+                    .get("new_owner_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("new_owner_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            svc.transfer_ownership(owner, &conversation_id, &new_owner)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        // ── G-02 — mute / unmute / mute-all / unmute-all / list_muted ──
+        A3chatRpcMethod::GROUP_MUTE_MEMBER => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: UserId = serde_json::from_value(
+                params
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let muted_until_secs: i64 = params
+                .get("muted_until_secs")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| A3chatError::InvalidInput("muted_until_secs missing".into()))?;
+            let reason = params
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            svc.mute_member(
+                owner,
+                &conversation_id,
+                &target,
+                muted_until_secs,
+                reason.as_deref(),
+            )
+            .await
+            .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        A3chatRpcMethod::GROUP_UNMUTE_MEMBER => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: UserId = serde_json::from_value(
+                params
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            svc.unmute_member(owner, &conversation_id, &target)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        A3chatRpcMethod::GROUP_MUTE_ALL => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            svc.mute_all(owner, &conversation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        A3chatRpcMethod::GROUP_UNMUTE_ALL => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            svc.unmute_all(owner, &conversation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        A3chatRpcMethod::GROUP_LIST_MUTED => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let mutes = svc
+                .list_muted(&conversation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&mutes).map_err(A3chatError::from)
+        }
+
+        // ── G-06 — nickname ─────────────────────────────────────────
+        A3chatRpcMethod::GROUP_NICKNAME_SET => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: UserId = serde_json::from_value(
+                params
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let nickname = params
+                .get("nickname")
+                .and_then(|v| v.as_str());
+            svc.set_nickname(owner, &conversation_id, &target, nickname)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        A3chatRpcMethod::GROUP_NICKNAME_GET => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: UserId = serde_json::from_value(
+                params
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let n = svc
+                .get_nickname(&conversation_id, &target)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&n).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_NICKNAME_LIST => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let rows = svc
+                .list_nicknames(&conversation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&rows).map_err(A3chatError::from)
+        }
+
+        // ── G-05 — mention.parse ────────────────────────────────────
+        A3chatRpcMethod::GROUP_MENTION_PARSE => {
+            let body: String = params
+                .get("body")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| A3chatError::InvalidInput("body missing".into()))?
+                .to_string();
+            // Optional pre-supplied nicknames; if absent the caller
+            // can chain a `group.nickname.list` round-trip.
+            let nicknames_in: Vec<serde_json::Value> = params
+                .get("nicknames")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut nicknames: Vec<(UserId, String)> = Vec::with_capacity(nicknames_in.len());
+            for nv in nicknames_in {
+                let uid = nv
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| A3chatError::InvalidInput("nicknames[].user_id missing".into()))?
+                    .to_string();
+                let name = nv
+                    .get("nickname")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| A3chatError::InvalidInput("nicknames[].nickname missing".into()))?
+                    .to_string();
+                nicknames.push((UserId::from(uid), name));
+            }
+            let matches = svc.parse_mentions(&body, &nicknames);
+            serde_json::to_value(&matches).map_err(A3chatError::from)
+        }
+
         _ => Err(A3chatError::Internal(format!(
             "GroupService does not handle {method}"
         ))),

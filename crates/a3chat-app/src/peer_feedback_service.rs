@@ -190,7 +190,7 @@ impl PeerFeedbackService {
             )
         })?;
         let by_user = user_to_u64(owner.as_str());
-        let target_node = user_to_node(target_user_id);
+        let target_node = user_to_node(target_user_id).map_err(AppError::from)?;
         ChatSignal(&rep).report(target_node, by_user, kind);
         Ok(())
     }
@@ -212,7 +212,7 @@ impl PeerFeedbackService {
             .get(owner.as_str(), target_user_id)
             .await
             .map_err(AppError::from)?;
-        let target_node = user_to_node(target_user_id);
+        let target_node = user_to_node(target_user_id).map_err(AppError::from)?;
         let chat_signal = record.as_ref().map(|r| {
             TrustSignal::new(
                 user_to_u64(owner.as_str()),
@@ -277,12 +277,19 @@ fn user_to_u64(user_id: &str) -> u64 {
     u64::from_le_bytes(buf)
 }
 
-fn user_to_node(user_id: &str) -> NodeId {
+fn user_to_node(user_id: &str) -> Result<NodeId, A3chatError> {
+    // Audit issue #16: the previous version of this helper
+    // silently fell back to an all-zero NodeId on parse
+    // failure, which collides with any real NodeId that happens
+    // to be all zero and would route trust to the wrong peer.
+    // `NodeId::from_bytes` only fails if the input is the wrong
+    // length; we now do the slice ourselves and return a
+    // structured error instead.
     let h = blake3::hash(user_id.as_bytes());
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(&h.as_bytes()[..32]);
-    NodeId::from_bytes(&bytes)
-        .unwrap_or_else(|_| NodeId::from_bytes(&[0u8; 32]).expect("zero NodeId is valid"))
+    let bytes: [u8; 32] = h.as_bytes()[..32]
+        .try_into()
+        .map_err(|_| A3chatError::Internal("blake3 digest shorter than 32 bytes".into()))?;
+    NodeId::from_bytes(&bytes).map_err(|e| A3chatError::Internal(format!("invalid NodeId: {e}")))
 }
 
 // ── JSON dispatch ────────────────────────────────────────────────────
@@ -457,7 +464,7 @@ mod tests {
             .await
             .unwrap();
         // Score must have dropped for the target's NodeId.
-        let target = user_to_node("peer-spammer");
+        let target = user_to_node("peer-spammer").expect("peer-spammer NodeId");
         let score = reporter.table().score(&target).unwrap_or(0.0);
         assert!(
             score < 0.0,
@@ -479,7 +486,7 @@ mod tests {
             .await
             .unwrap();
         // Score should be positive for the target's NodeId.
-        let target = user_to_node("peer-friend");
+        let target = user_to_node("peer-friend").expect("peer-friend NodeId");
         let score = reporter.table().score(&target).unwrap_or(0.0);
         assert!(
             score > 0.0,
@@ -577,10 +584,10 @@ mod tests {
 
     #[test]
     fn user_to_node_is_deterministic() {
-        let a = user_to_node("alice");
-        let b = user_to_node("alice");
+        let a = user_to_node("alice").expect("alice NodeId");
+        let b = user_to_node("alice").expect("alice NodeId");
         assert_eq!(a, b);
-        let c = user_to_node("bob");
+        let c = user_to_node("bob").expect("bob NodeId");
         assert_ne!(a, c);
     }
 }

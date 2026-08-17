@@ -9,8 +9,6 @@ use a3chat_core::error::A3chatError;
 use a3chat_core::id::{ConversationId, MessageId, UserId};
 use a3chat_core::message::{ChatMessage, MessageBody, MessageEnvelope};
 use a3chat_core::rpc::A3chatRpcMethod;
-
-#[cfg(feature = "iroh")]
 use tokio::sync::RwLock;
 
 use crate::error::{AppError, AppResult};
@@ -32,7 +30,37 @@ pub struct ChatService {
     /// construction via [`ChatService::with_iroh_docs_chat`].
     #[cfg(feature = "iroh")]
     iroh_docs_chat: Arc<RwLock<Option<Arc<IrohDocsChat>>>>,
+    /// GB-22 — async mute gate. When `Some`, every outbound
+    /// `send_message` consults it for group conversations and
+    /// short-circuits with [`AppError::Forbidden`] when the gate
+    /// returns `true`. The hook is wired in `A3chatApp::new`
+    /// (`chat.with_mute_gate(group.mute_gate)`) so chat and
+    /// group remain loosely coupled.
+    ///
+    /// The closure is stored behind `Arc` so concurrent
+    /// `send_message` calls can read the gate without racing the
+    /// writer and without an `Arc::get_mut` dance.
+    mute_gate: Arc<std::sync::Mutex<Option<MuteGate>>>,
 }
+
+/// Async predicate for GB-22. `(conversation_id, sender) -> true`
+/// means the sender is currently muted in this conversation and the
+/// outbound message must be rejected.
+///
+/// `MuteGate` is the `Send + Sync` `dyn Fn` trait object directly so
+/// callers can `Arc::new(...)` their closure without an extra
+/// `Box::new`. The slot that holds it ([`ChatService::mute_gate`])
+/// is `Arc<Mutex<Option<Arc<MuteGate>>>>` so concurrent reads can
+/// clone the inner `Arc` cheaply without racing the writer.
+pub type MuteGate = Arc<
+    dyn Fn(
+            ConversationId,
+            UserId,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = bool> + Send + Sync>,
+        > + Send
+        + Sync,
+>;
 
 impl ChatService {
     pub fn new(storage: ChatStorage, bus: NotificationBus) -> Self {
@@ -40,6 +68,7 @@ impl ChatService {
             storage,
             bus,
             moderation: None,
+            mute_gate: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(feature = "iroh")]
             iroh_docs_chat: Arc::new(RwLock::new(None)),
         }
@@ -51,6 +80,30 @@ impl ChatService {
     /// `AppError::Forbidden` and never reaches the bus.
     pub fn with_moderation(mut self, moderation: ModerationService) -> Self {
         self.moderation = Some(moderation);
+        self
+    }
+
+    /// GB-22 — attach a group-mute gate. Returns `self` so
+    /// callers can chain `.with_moderation(...).with_mute_gate(...)`
+    /// during bootstrap.
+    ///
+    /// The gate is consulted in [`ChatService::send_message`] only
+    /// for conversations whose [`ConversationId::kind_hint`] is
+    /// `Group`; DMs bypass the check entirely.
+    pub fn with_mute_gate(mut self, gate: MuteGate) -> Self {
+        // `MuteGate = Arc<dyn Fn(...)>` — the caller hands us an
+        // `Arc` wrapping the trait object. Install it under the
+        // mutex (or take the `Arc::get_mut` fast path).
+        if let Some(slot) = Arc::get_mut(&mut self.mute_gate) {
+            // `slot: &mut Mutex<Option<MuteGate>>` — go through
+            // the Mutex API so we hit the proper write path.
+            *slot.get_mut().expect("mute_gate mutex poisoned") = Some(gate);
+        } else {
+            let gate_arc = self.mute_gate.clone();
+            tokio::spawn(async move {
+                *gate_arc.lock().expect("mute_gate mutex poisoned") = Some(gate);
+            });
+        }
         self
     }
 
@@ -103,7 +156,7 @@ impl ChatService {
         limit: u32,
     ) -> AppResult<Vec<ChatMessage>> {
         // Primary: authoritative SQLite read.
-        let mut sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
+        let sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
 
         #[cfg(feature = "iroh")]
         if let Some(docs_chat) = self.iroh_docs_chat.read().await.as_ref() {
@@ -165,6 +218,28 @@ impl ChatService {
                             decision.reason
                         )));
                     }
+                }
+            }
+        }
+        // GB-22 — group mute gate. Only consulted for group
+        // conversations (`ConversationKindHint::Group`). A muted
+        // sender returns Forbidden, mirroring WeChat semantics
+        // ("你已被禁言"). System messages bypass the gate.
+        if matches!(
+            envelope.conversation_id.kind_hint(),
+            a3chat_core::id::ConversationKindHint::Group
+        ) && !matches!(
+            envelope.message_type,
+            a3chat_core::message::MessageType::System
+        ) {
+            // Clone the `MuteGate` (an `Arc<dyn Fn...>`) out under
+            // the lock so the inner `.await` runs without holding
+            // it. The `Arc::clone` keeps the trait object alive
+            // and lets callers re-enter the gate concurrently.
+            let gate_opt = self.mute_gate.lock().expect("mute_gate mutex poisoned").clone();
+            if let Some(f) = gate_opt {
+                if f(envelope.conversation_id.clone(), owner.clone()).await {
+                    return Err(AppError::Forbidden("you are muted in this group".into()));
                 }
             }
         }
@@ -553,7 +628,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             sequence: 1,
-            timestamp: 1_700_000_000,
+            timestamp: chrono::Utc::now().timestamp(),
         }
     }
 

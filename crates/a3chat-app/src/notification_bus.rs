@@ -30,7 +30,7 @@ pub struct NotificationReceiver {
 
 /// Shared bus. Cloning is cheap — every clone holds the same inner
 /// sender.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NotificationBus {
     tx: broadcast::Sender<A3chatEvent>,
 }
@@ -47,12 +47,45 @@ impl NotificationBus {
         Self { tx }
     }
 
-    /// Publish an event. Returns `Ok(())` always — `send` only
-    /// fails if there are no receivers, which we treat as a no-op.
+    /// Publish an event. Returns the receiver count that received
+    /// the event.
+    ///
+    /// `tokio::sync::broadcast::send` returns `Err(SendError(value))`
+    /// for two distinct reasons that **must not be conflated**:
+    ///
+    /// 1. **No receivers** — `receiver_count() == 0`. This is the
+    ///    normal "no SSE clients attached" path; dropping the event
+    ///    is correct.
+    /// 2. **Lag** — at least one receiver exists but their queue
+    ///    overflowed. The event is silently dropped and the lagged
+    ///    receiver will see a `RecvError::Lagged` on its next poll.
+    ///    This is a real correctness bug because the SSE client
+    ///    will miss events with no easy way to recover.
+    ///
+    /// We surface the lag case via `tracing::warn!` so operators can
+    /// see the dropped-event count and recognise the symptom of a
+    /// busy period overwhelming the channel capacity. Future work
+    /// (P1) will hook this into a `bus_overflow_total` Prometheus
+    /// counter (see audit issue #8).
     pub fn publish(&self, event: A3chatEvent) -> usize {
-        // `send` returns the receiver count if any were listening.
-        // We surface it for tests / logging.
-        self.tx.send(event).unwrap_or_default()
+        match self.tx.send(event) {
+            Ok(n) => n,
+            Err(broadcast::error::SendError(value)) => {
+                if self.tx.receiver_count() == 0 {
+                    // No subscribers — drop silently (normal case).
+                    0
+                } else {
+                    // Lag — at least one receiver is overflowing.
+                    // Log the variant so operators can correlate.
+                    tracing::warn!(
+                        event_kind = value.kind(),
+                        receivers = self.tx.receiver_count(),
+                        "notification bus overflow: lagged receiver dropped an event"
+                    );
+                    0
+                }
+            }
+        }
     }
 
     /// Subscribe to all events. The returned `NotificationReceiver`
@@ -105,6 +138,16 @@ impl NotificationReceiver {
             (Some(_), A3chatEvent::ChatMessageRead { .. }) => true,
             (Some(uid), A3chatEvent::ChatMessageEdited { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::ChatMessageDeleted { user_id, .. }) => uid == user_id,
+            // F-08 / B-06: each event carries the local owner's
+            // user_id, so we route by that exactly like the chat
+            // message events above. A None subscriber (catch-all)
+            // is handled by the last branch.
+            (Some(uid), A3chatEvent::GroupAnnouncementChanged { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::GroupDissolved { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::GroupMemberRoleChanged { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::GroupMuteChanged { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::GroupMuteAllChanged { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::GroupNicknameChanged { user_id, .. }) => uid == user_id,
             // Moments / 朋友圈 (F-05) — every event carries the
             // `user_id` of the local owner, so we route them the
             // same way as `ChatMessageReceived`: only the matching
@@ -118,15 +161,35 @@ impl NotificationReceiver {
             // Presence events broadcast to all subscribers regardless.
             (_, A3chatEvent::PresenceChanged { .. }) => true,
             (_, A3chatEvent::ChatTyping { .. }) => true,
+            // Contact events — broadcast to all (friend system)
             (_, A3chatEvent::ContactRequestReceived { .. }) => true,
-            // NOTE: A3chatEvent::GroupMemberRemoved is already covered
-            // by the (Some, ..) branch above (line 102) and by the
-            // catch-all (None, _) branch below (line 117).
-            // The (_, A3chatEvent::LinkBookmarkAdded { .. }) wildcard
-            // intentionally follows the global broadcast pattern.
+            (_, A3chatEvent::ContactAdded { .. }) => true,
+            (_, A3chatEvent::ContactRemoved { .. }) => true,
+            (_, A3chatEvent::ContactUpdated { .. }) => true,
+            (_, A3chatEvent::ContactBlocked { .. }) => true,
+            (_, A3chatEvent::ContactUnblocked { .. }) => true,
+            (_, A3chatEvent::ContactFavoriteToggled { .. }) => true,
+            (_, A3chatEvent::ContactRequestAccepted { .. }) => true,
+            // Chat message reaction events — broadcast to all
+            (_, A3chatEvent::ChatMessageReactionToggled { .. }) => true,
+            // Link bookmark events — broadcast to all
             (_, A3chatEvent::LinkBookmarkAdded { .. }) => true,
             (_, A3chatEvent::LinkBookmarkUpdated { .. }) => true,
             (_, A3chatEvent::LinkBookmarkDeleted { .. }) => true,
+            // Pin / notification / device events — broadcast to all
+            (_, A3chatEvent::ConversationPinChanged { .. }) => true,
+            (_, A3chatEvent::NotificationSettingsChanged { .. }) => true,
+            (_, A3chatEvent::DeviceRegistered { .. }) => true,
+            (_, A3chatEvent::DeviceRevoked { .. }) => true,
+            (_, A3chatEvent::DevicePrimaryChanged { .. }) => true,
+            // Pairing events — broadcast to all subscribers. The
+            // owner id is embedded in the event for completeness but
+            // the UI listens for *any* pairing activity so a
+            // disconnected mobile client can refresh its device list
+            // as soon as it comes back.
+            (_, A3chatEvent::PairingInvitationCreated { .. }) => true,
+            (_, A3chatEvent::PairingTrustedDeviceAdded { .. }) => true,
+            (_, A3chatEvent::PairingTrustedDeviceRevoked { .. }) => true,
         }
     }
 }
@@ -191,6 +254,45 @@ mod tests {
         let bus = NotificationBus::new(16);
         let n = bus.publish(chat_event("alice"));
         assert_eq!(n, 0);
+    }
+
+    // Regression test for issue #8: when the broadcast channel
+    // overflows, the `publish` path must NOT silently discard the
+    // event without distinguishing it from "no subscribers". The
+    // fix records a `tracing::warn!` and continues to return 0
+    // (the receiver count when the event is dropped). We assert
+    // that the receiver reports a `Lagged` error on its next poll
+    // whenever the channel overflows.
+    #[tokio::test]
+    async fn publish_overflow_returns_lagged_to_subscriber() {
+        let bus = NotificationBus::new(4);
+        let mut rx = bus.subscribe();
+        // Publish 4+1 events without polling — the channel is
+        // depth 4 so the 5th publish overflows.
+        for i in 0..5 {
+            bus.publish(chat_event(&format!("u{i}")));
+        }
+        // The receiver must observe a Lagged error somewhere in
+        // its stream. It might appear as the first poll (if all
+        // older events were evicted) or interleaved.
+        let mut saw_lag = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                rx.rx.recv(),
+            )
+            .await
+            {
+                Ok(Ok(_)) => continue,
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                    saw_lag = true;
+                    break;
+                }
+                Ok(Err(_)) => break, // closed
+                Err(_) => continue,  // timeout, keep polling
+            }
+        }
+        assert!(saw_lag, "overflow should surface as RecvError::Lagged");
     }
 
     #[test]

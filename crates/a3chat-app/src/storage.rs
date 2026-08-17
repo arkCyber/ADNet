@@ -30,7 +30,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -63,6 +62,11 @@ pub struct StorageConfig {
     pub enable_e2e: bool,
     /// Max sequence number per sender. Mirrors `a3net_types::group_chat`.
     pub max_sequence: u32,
+    /// Audit issue #10: how long after a message was sent can the
+    /// original sender still edit or recall it. Default is
+    /// 2 minutes, matching WeChat's UX. Set to `Duration::ZERO`
+    /// to disable the window (i.e. never reject on time alone).
+    pub edit_window: core::time::Duration,
 }
 
 impl StorageConfig {
@@ -70,13 +74,25 @@ impl StorageConfig {
         Self {
             base_dir: base_dir.into(),
             enable_e2e: true,
+            // Audit issue #20: kept in sync with a3net's
+            // `MAX_SEQUENCE`; see message.rs for the rationale on
+            // not raising it without coordinating with the hub.
             max_sequence: 9_999,
+            edit_window: core::time::Duration::from_secs(2 * 60),
         }
     }
 
     pub fn path_for(&self, user_id: &UserId) -> PathBuf {
         self.base_dir.join(format!("{user_id}.sqlite"))
     }
+}
+
+/// Persisted draft — what `chat.draft.*` reads and writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftRow {
+    pub content: String,
+    pub reply_to: Option<MessageId>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// A row in the local SQLite `messages` table — what we actually
@@ -197,6 +213,13 @@ impl ChatStorage {
     /// Open (or reuse) the per-user SQLite connection. The first call
     /// for `user_id` runs `init_schema`; subsequent calls just clone
     /// the cached `Arc<Mutex<Connection>>`.
+    pub async fn connection_for(
+        &self,
+        user_id: &UserId,
+    ) -> AppResult<Arc<Mutex<rusqlite::Connection>>> {
+        self.connection(user_id).await
+    }
+
     async fn connection(&self, user_id: &UserId) -> AppResult<Arc<Mutex<rusqlite::Connection>>> {
         if let Some(c) = self.inner.connections.get(user_id) {
             return Ok(c.clone());
@@ -750,7 +773,8 @@ impl ChatStorage {
     }
 
     /// Set `recalled_at = now` on the given message. Only the
-    /// original sender may recall.
+    /// original sender may recall, and only within the configured
+    /// `edit_window` (audit issue #10).
     pub async fn recall_message(
         &self,
         owner: &UserId,
@@ -759,43 +783,53 @@ impl ChatStorage {
         let conn_arc = self.connection(owner).await?;
         let id_str = message_id.as_str().to_string();
         let owner_str = owner.as_str().to_string();
+        let edit_window = self.config().edit_window;
         let r: AppResult<()> = tokio::task::spawn_blocking(move || -> AppResult<()> {
             let guard = conn_arc.blocking_lock_owned();
-            let now = chrono::Utc::now().to_rfc3339();
+            // Look up the message first so we can enforce
+            // (a) ownership, (b) time-window. We do this in one
+            // SELECT to keep the recall atomic and avoid a TOCTOU
+            // between the time check and the UPDATE.
+            let row: Option<(String, i64)> = guard
+                .query_row(
+                    "SELECT sender_id, timestamp FROM messages WHERE message_id = ?1",
+                    rusqlite::params![id_str],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .ok();
+            let (sender, ts) = match row {
+                Some(r) => r,
+                None => {
+                    return Err(AppError::Domain(format!(
+                        "message {id_str} not found"
+                    )));
+                }
+            };
+            if sender != owner_str {
+                return Err(AppError::Forbidden(
+                    "only the original sender can recall a message".into(),
+                ));
+            }
+            if !edit_window.is_zero() {
+                let now = chrono::Utc::now().timestamp();
+                if now.saturating_sub(ts) > edit_window.as_secs() as i64 {
+                    return Err(AppError::Forbidden(format!(
+                        "recall window of {}s expired",
+                        edit_window.as_secs()
+                    )));
+                }
+            }
+            let now_str = chrono::Utc::now().to_rfc3339();
             let n = guard.execute(
                 "UPDATE messages SET recalled_at = ?2
                  WHERE message_id = ?1 AND sender_id = ?3 AND recalled_at IS NULL",
-                rusqlite::params![id_str, now, owner_str],
+                rusqlite::params![id_str, now_str, owner_str],
             )?;
             if n == 0 {
-                // Either unknown, or recalled, or not the sender.
-                // Distinguish so the caller can give a sensible error.
-                let exists: bool = guard
-                    .query_row(
-                        "SELECT 1 FROM messages WHERE message_id = ?1",
-                        rusqlite::params![id_str],
-                        |_| Ok(true),
-                    )
-                    .unwrap_or(false);
-                if !exists {
-                    return Err(AppError::Domain(format!(
-                        "message {} not found",
-                        id_str
-                    )));
-                }
-                let sender: Option<String> = guard
-                    .query_row(
-                        "SELECT sender_id FROM messages WHERE message_id = ?1",
-                        rusqlite::params![id_str],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .ok();
-                if sender.as_deref() != Some(owner_str.as_str()) {
-                    return Err(AppError::Forbidden(
-                        "only the original sender can recall a message".into(),
-                    ));
-                }
-                // already recalled — idempotent ok
+                // Either unknown, or already recalled, or not the sender.
+                // The pre-check above already ruled out "unknown" and
+                // "not the sender", so the only remaining case is
+                // "already recalled" which is idempotent success.
             }
             Ok(())
         })
@@ -823,6 +857,23 @@ impl ChatStorage {
             return Err(AppError::Forbidden(
                 "only the original sender can edit a message".into(),
             ));
+        }
+        // Audit issue #10: enforce the configured edit window so
+        // a sender cannot edit a year-old message and pass it off
+        // as fresh content. The window is enforced after the auth
+        // check so a forbidden sender gets the same Forbidden
+        // error regardless of time.
+        let edit_window = self.config().edit_window;
+        if !edit_window.is_zero() {
+            let now = chrono::Utc::now().timestamp();
+            if now.saturating_sub(updated.timestamp)
+                > edit_window.as_secs() as i64
+            {
+                return Err(AppError::Forbidden(format!(
+                    "edit window of {}s expired",
+                    edit_window.as_secs()
+                )));
+            }
         }
         // Re-seal if the original body was encrypted.
         //
@@ -868,7 +919,7 @@ impl ChatStorage {
         let msg_id_str = updated.message_id.as_str().to_string();
         let owner_str = owner.as_str().to_string();
         let conn_arc = self.connection(owner).await?;
-        let _: AppResult<()> = tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let update_result: AppResult<()> = tokio::task::spawn_blocking(move || -> AppResult<()> {
             let guard = conn_arc.blocking_lock_owned();
             let n = guard.execute(
                 "UPDATE messages SET body_json = ?2, is_edited = 1, edited_at = ?3
@@ -884,6 +935,7 @@ impl ChatStorage {
         })
         .await
         .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))?;
+        update_result?;
         Ok(updated)
     }
 
@@ -956,6 +1008,469 @@ impl ChatStorage {
         .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))??;
         let _ = n;
         Ok(())
+    }
+
+    // ── Draft persistence (F-07 follow-up) ───────────────────────────
+    // Drafts were previously held in-memory only by the
+    // `DraftService`. They are now persisted in the same SQLite file
+    // as the rest of the chat tables, so a daemon restart doesn't
+    // wipe what the user typed but never sent.
+
+    /// Save (upsert) the draft for `conversation_id`. If `content` is
+    /// empty, the row is deleted so an empty draft never shadows a
+    /// prior non-empty one. Returns `Ok(true)` on insert, `Ok(false)`
+    /// on delete-by-empty-content.
+    pub async fn save_draft(
+        &self,
+        owner: &UserId,
+        conversation_id: &ConversationId,
+        content: &str,
+        reply_to: Option<&MessageId>,
+    ) -> AppResult<bool> {
+        let conn_arc = self.connection(owner).await?;
+        let owner_str = owner.as_str().to_string();
+        let conv_str = conversation_id.as_str().to_string();
+        let content = content.to_string();
+        let reply_to_str = reply_to.map(|m| m.as_str().to_string());
+        let inserted = tokio::task::spawn_blocking(move || -> AppResult<bool> {
+            let guard = conn_arc.blocking_lock_owned();
+            if content.is_empty() {
+                guard.execute(
+                    "DELETE FROM drafts WHERE owner_id = ?1 AND conversation_id = ?2",
+                    rusqlite::params![owner_str, conv_str],
+                )?;
+                return Ok(false);
+            }
+            let now = chrono::Utc::now().timestamp();
+            guard.execute(
+                "INSERT INTO drafts (owner_id, conversation_id, content, reply_to, updated_at_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(owner_id, conversation_id) DO UPDATE SET
+                    content = excluded.content,
+                    reply_to = excluded.reply_to,
+                    updated_at_unix = excluded.updated_at_unix",
+                rusqlite::params![owner_str, conv_str, content, reply_to_str, now],
+            )?;
+            Ok(true)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("save_draft join: {e}")))?;
+        inserted
+    }
+
+    /// Fetch the draft for `conversation_id` (or `None` if no draft).
+    pub async fn get_draft(
+        &self,
+        owner: &UserId,
+        conversation_id: &ConversationId,
+    ) -> AppResult<Option<DraftRow>> {
+        let conn_arc = self.connection(owner).await?;
+        let owner_str = owner.as_str().to_string();
+        let conv_str = conversation_id.as_str().to_string();
+        let row = tokio::task::spawn_blocking(move || -> AppResult<Option<DraftRow>> {
+            let guard = conn_arc.blocking_lock_owned();
+            let mut stmt = guard.prepare_cached(
+                "SELECT content, reply_to, updated_at_unix FROM drafts
+                 WHERE owner_id = ?1 AND conversation_id = ?2",
+            )?;
+            let row = stmt
+                .query_row(rusqlite::params![owner_str, conv_str], |r| {
+                    let content: String = r.get(0)?;
+                    let reply_to: Option<String> = r.get(1)?;
+                    let updated_at: i64 = r.get(2)?;
+                    Ok(DraftRow {
+                        content,
+                        reply_to: reply_to.map(MessageId::from),
+                        updated_at: chrono::DateTime::from_timestamp(updated_at, 0)
+                            .unwrap_or_else(chrono::Utc::now),
+                    })
+                })
+                .ok();
+            Ok(row)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("get_draft join: {e}")))??;
+        Ok(row)
+    }
+
+    /// Delete the draft for `conversation_id`. Returns true if a row
+    /// was removed.
+    pub async fn delete_draft(
+        &self,
+        owner: &UserId,
+        conversation_id: &ConversationId,
+    ) -> AppResult<bool> {
+        let conn_arc = self.connection(owner).await?;
+        let owner_str = owner.as_str().to_string();
+        let conv_str = conversation_id.as_str().to_string();
+        let removed: usize = tokio::task::spawn_blocking(move || -> AppResult<usize> {
+            let guard = conn_arc.blocking_lock_owned();
+            Ok(guard.execute(
+                "DELETE FROM drafts WHERE owner_id = ?1 AND conversation_id = ?2",
+                rusqlite::params![owner_str, conv_str],
+            )?)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("delete_draft join: {e}")))??;
+        Ok(removed > 0)
+    }
+
+    /// List every draft for `owner`. Used by `chat.draft.list`.
+    pub async fn list_drafts(&self, owner: &UserId) -> AppResult<Vec<(ConversationId, DraftRow)>> {
+        let conn_arc = self.connection(owner).await?;
+        let owner_str = owner.as_str().to_string();
+        let drafts: Vec<(ConversationId, DraftRow)> = tokio::task::spawn_blocking(
+            move || -> AppResult<Vec<(ConversationId, DraftRow)>> {
+                let guard = conn_arc.blocking_lock_owned();
+                let mut stmt = guard.prepare_cached(
+                    "SELECT conversation_id, content, reply_to, updated_at_unix
+                     FROM drafts WHERE owner_id = ?1 ORDER BY updated_at_unix DESC",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![owner_str], |r| {
+                        let conv: String = r.get(0)?;
+                        let content: String = r.get(1)?;
+                        let reply_to: Option<String> = r.get(2)?;
+                        let updated_at: i64 = r.get(3)?;
+                        Ok((
+                            ConversationId::from(conv),
+                            DraftRow {
+                                content,
+                                reply_to: reply_to.map(MessageId::from),
+                                updated_at: chrono::DateTime::from_timestamp(updated_at, 0)
+                                    .unwrap_or_else(chrono::Utc::now),
+                            },
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            },
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("list_drafts join: {e}")))??;
+        Ok(drafts)
+    }
+
+    /// Clear every draft for `owner` — used by `chat.draft.clear`.
+    pub async fn clear_drafts(&self, owner: &UserId) -> AppResult<usize> {
+        let conn_arc = self.connection(owner).await?;
+        let owner_str = owner.as_str().to_string();
+        let removed: usize = tokio::task::spawn_blocking(move || -> AppResult<usize> {
+            let guard = conn_arc.blocking_lock_owned();
+            Ok(guard.execute(
+                "DELETE FROM drafts WHERE owner_id = ?1",
+                rusqlite::params![owner_str],
+            )?)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("clear_drafts join: {e}")))??;
+        Ok(removed)
+    }
+
+    // ── Group mutes (G-02) ────────────────────────────────────────
+
+    /// Insert or replace a per-member, per-group mute. Called from
+    /// [`crate::group_service::GroupService::mute_member`].
+    ///
+    /// DO-178C §6.1 — input validation runs before the SQL write so
+    /// a malformed `muted_until_unix` can never reach the database.
+    pub async fn set_group_member_mute(
+        &self,
+        conversation_id: &ConversationId,
+        muted_user_id: &UserId,
+        muted_by_user_id: &UserId,
+        muted_until_unix: i64,
+        reason: Option<&str>,
+        created_at_unix: i64,
+    ) -> AppResult<()> {
+        if conversation_id.as_str().is_empty() {
+            return Err(AppError::Domain("conversation_id is empty".into()));
+        }
+        if muted_user_id.as_str().is_empty() {
+            return Err(AppError::Domain("muted_user_id is empty".into()));
+        }
+        if muted_until_unix <= 0 {
+            return Err(AppError::Domain("muted_until_unix must be > 0".into()));
+        }
+        let conn_arc = self.connection(muted_by_user_id).await?;
+        let conv = conversation_id.as_str().to_string();
+        let m_user = muted_user_id.as_str().to_string();
+        let actor = muted_by_user_id.as_str().to_string();
+        let reason_owned = reason.map(str::to_string);
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let guard = conn_arc.blocking_lock_owned();
+            guard.execute(
+                "INSERT OR REPLACE INTO group_member_mutes
+                    (conversation_id, muted_user_id, muted_by_user_id,
+                     muted_until_unix, reason, created_at_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    conv,
+                    m_user,
+                    actor,
+                    muted_until_unix,
+                    reason_owned,
+                    created_at_unix,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("set_group_member_mute join: {e}")))??;
+        Ok(())
+    }
+
+    /// Clear a per-member mute. The row is deleted (not flipped) so
+    /// a subsequent `list_muted` doesn't see a stale "unmuted"
+    /// tombstone.
+    pub async fn clear_group_member_mute(
+        &self,
+        conversation_id: &ConversationId,
+        muted_user_id: &UserId,
+    ) -> AppResult<()> {
+        let conn_arc = self.connection(muted_user_id).await?;
+        let conv = conversation_id.as_str().to_string();
+        let m_user = muted_user_id.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let guard = conn_arc.blocking_lock_owned();
+            let n = guard.execute(
+                "DELETE FROM group_member_mutes
+                 WHERE conversation_id = ?1 AND muted_user_id = ?2",
+                rusqlite::params![conv, m_user],
+            )?;
+            tracing::debug!(deleted = n, "cleared group member mute");
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("clear_group_member_mute join: {e}")))??;
+        Ok(())
+    }
+
+    /// Return `(user_id, muted_until_unix, reason)` triples for every
+    /// currently effective mute in the conversation. Expired rows
+    /// are filtered (muted_until_unix > now).
+    pub async fn list_group_member_mutes(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> AppResult<Vec<(UserId, i64, String)>> {
+        let conn_arc = self.connection(&UserId::from(conversation_id.as_str())).await?;
+        let conv = conversation_id.as_str().to_string();
+        let rows: Vec<(UserId, i64, String)> = tokio::task::spawn_blocking(
+            move || -> AppResult<Vec<(UserId, i64, String)>> {
+                let guard = conn_arc.blocking_lock_owned();
+                let now = chrono::Utc::now().timestamp();
+                let mut stmt = guard.prepare_cached(
+                    "SELECT muted_user_id, muted_until_unix, reason
+                     FROM group_member_mutes
+                     WHERE conversation_id = ?1 AND muted_until_unix > ?2
+                     ORDER BY created_at_unix DESC",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![conv, now], |r| {
+                        let uid: String = r.get(0)?;
+                        let until: i64 = r.get(1)?;
+                        let reason: Option<String> = r.get(2)?;
+                        Ok((UserId::from(uid), until, reason.unwrap_or_default()))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            },
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("list_group_member_mutes join: {e}")))??;
+        Ok(rows)
+    }
+
+    /// `true` iff `target` is currently muted in `conversation_id`.
+    /// Used by [`crate::chat_service::ChatService::send_message`]
+    /// to drop the message before persistence.
+    pub async fn is_group_member_muted(
+        &self,
+        conversation_id: &ConversationId,
+        target: &UserId,
+    ) -> AppResult<bool> {
+        let conn_arc = self.connection(target).await?;
+        let conv = conversation_id.as_str().to_string();
+        let target_str = target.as_str().to_string();
+        let is_muted: bool = tokio::task::spawn_blocking(move || -> AppResult<bool> {
+            let guard = conn_arc.blocking_lock_owned();
+            let now = chrono::Utc::now().timestamp();
+            let row: Option<i64> = guard
+                .query_row(
+                    "SELECT muted_until_unix FROM group_member_mutes
+                     WHERE conversation_id = ?1 AND muted_user_id = ?2",
+                    rusqlite::params![conv, target_str],
+                    |r| r.get(0),
+                )
+                .ok();
+            Ok(matches!(row, Some(until) if until > now))
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("is_group_member_muted join: {e}")))??;
+        Ok(is_muted)
+    }
+
+    /// Set the whole-group mute flag. Stored on
+    /// `group_member_mutes` is the per-member row; the whole-group
+    /// flag lives in a single SQLite row keyed by
+    /// `muted_user_id = "*all*"`. Atomic via `INSERT OR REPLACE`.
+    pub async fn set_group_mute_all(
+        &self,
+        conversation_id: &ConversationId,
+        on: bool,
+    ) -> AppResult<()> {
+        let conn_arc = self.connection(&UserId::from(conversation_id.as_str())).await?;
+        let conv = conversation_id.as_str().to_string();
+        let now = chrono::Utc::now().timestamp();
+        // We use the same table; the sentinel `muted_user_id =
+        // "*all*"` represents the group-wide mute. Reason field
+        // carries `"on"` / `"off"`.
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let guard = conn_arc.blocking_lock_owned();
+            if on {
+                // Indefinite until manually cleared (i64::MAX).
+                guard.execute(
+                    "INSERT OR REPLACE INTO group_member_mutes
+                        (conversation_id, muted_user_id, muted_by_user_id,
+                         muted_until_unix, reason, created_at_unix)
+                     VALUES (?1, '*all*', '*system*', ?2, 'on', ?3)",
+                    rusqlite::params![conv, i64::MAX, now],
+                )?;
+            } else {
+                guard.execute(
+                    "DELETE FROM group_member_mutes
+                     WHERE conversation_id = ?1 AND muted_user_id = '*all*'",
+                    rusqlite::params![conv],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("set_group_mute_all join: {e}")))??;
+        Ok(())
+    }
+
+    pub async fn is_group_mute_all(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> AppResult<bool> {
+        let conn_arc = self.connection(&UserId::from(conversation_id.as_str())).await?;
+        let conv = conversation_id.as_str().to_string();
+        let is_muted: bool = tokio::task::spawn_blocking(move || -> AppResult<bool> {
+            let guard = conn_arc.blocking_lock_owned();
+            let n: i64 = guard
+                .query_row(
+                    "SELECT COUNT(*) FROM group_member_mutes
+                     WHERE conversation_id = ?1 AND muted_user_id = '*all*'",
+                    rusqlite::params![conv],
+                    |r| r.get(0),
+                )?;
+            Ok(n > 0)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("is_group_mute_all join: {e}")))??;
+        Ok(is_muted)
+    }
+
+    // ── Group nicknames (G-06) ────────────────────────────────────
+
+    pub async fn set_group_member_nickname(
+        &self,
+        conversation_id: &ConversationId,
+        user_id: &UserId,
+        nickname: Option<&str>,
+        updated_at_unix: i64,
+    ) -> AppResult<()> {
+        if conversation_id.as_str().is_empty() {
+            return Err(AppError::Domain("conversation_id is empty".into()));
+        }
+        if user_id.as_str().is_empty() {
+            return Err(AppError::Domain("user_id is empty".into()));
+        }
+        let conn_arc = self.connection(user_id).await?;
+        let conv = conversation_id.as_str().to_string();
+        let uid = user_id.as_str().to_string();
+        let nick = nickname.map(str::to_string);
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let guard = conn_arc.blocking_lock_owned();
+            match nick {
+                Some(n) if !n.is_empty() => {
+                    if n.len() > 64 {
+                        return Err(AppError::Domain("nickname exceeds 64 chars".into()));
+                    }
+                    guard.execute(
+                        "INSERT OR REPLACE INTO group_member_nicknames
+                            (conversation_id, user_id, nickname, updated_at_unix)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![conv, uid, n, updated_at_unix],
+                    )?;
+                }
+                _ => {
+                    guard.execute(
+                        "DELETE FROM group_member_nicknames
+                         WHERE conversation_id = ?1 AND user_id = ?2",
+                        rusqlite::params![conv, uid],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("set_group_member_nickname join: {e}")))??;
+        Ok(())
+    }
+
+    pub async fn get_group_member_nickname(
+        &self,
+        conversation_id: &ConversationId,
+        user_id: &UserId,
+    ) -> AppResult<Option<String>> {
+        let conn_arc = self.connection(user_id).await?;
+        let conv = conversation_id.as_str().to_string();
+        let uid = user_id.as_str().to_string();
+        let out: Option<String> = tokio::task::spawn_blocking(move || -> AppResult<Option<String>> {
+            let guard = conn_arc.blocking_lock_owned();
+            let row: Option<String> = guard
+                .query_row(
+                    "SELECT nickname FROM group_member_nicknames
+                     WHERE conversation_id = ?1 AND user_id = ?2",
+                    rusqlite::params![conv, uid],
+                    |r| r.get(0),
+                )
+                .ok();
+            Ok(row)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("get_group_member_nickname join: {e}")))??;
+        Ok(out)
+    }
+
+    pub async fn list_group_member_nicknames(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> AppResult<Vec<(UserId, String)>> {
+        let conn_arc = self.connection(&UserId::from(conversation_id.as_str())).await?;
+        let conv = conversation_id.as_str().to_string();
+        let out: Vec<(UserId, String)> = tokio::task::spawn_blocking(
+            move || -> AppResult<Vec<(UserId, String)>> {
+                let guard = conn_arc.blocking_lock_owned();
+                let mut stmt = guard.prepare_cached(
+                    "SELECT user_id, nickname FROM group_member_nicknames
+                     WHERE conversation_id = ?1",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![conv], |r| {
+                        let uid: String = r.get(0)?;
+                        let nick: String = r.get(1)?;
+                        Ok((UserId::from(uid), nick))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            },
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("list_group_member_nicknames join: {e}")))??;
+        Ok(out)
     }
 
     /// Search messages for `needle` (case-insensitive substring) in
@@ -1052,6 +1567,39 @@ impl ChatStorage {
         .await
         .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))?;
         Ok(())
+    }
+
+    /// Set the pinned state for a conversation.
+    pub async fn set_conversation_pinned(
+        &self,
+        owner: &UserId,
+        conversation_id: &ConversationId,
+        pinned: bool,
+    ) -> AppResult<()> {
+        let conn_arc = self.connection(owner).await?;
+        let conv_str = conversation_id.as_str().to_string();
+        let pinned_flag = pinned;
+        // `let _: ... =` previously discarded the inner `AppResult`,
+        // so the `?` only caught JoinErrors and a missing-conversation
+        // error was silently swallowed. Fixed: bind to a named
+        // variable and propagate the inner error.
+        let inner: AppResult<()> = tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let guard = conn_arc.blocking_lock_owned();
+            let rows = guard.execute(
+                "UPDATE conversations SET pinned = ?1 WHERE conversation_id = ?2",
+                rusqlite::params![pinned_flag as i64, conv_str],
+            )?;
+            if rows == 0 {
+                return Err(AppError::Domain(format!(
+                    "conversation {} not found",
+                    conv_str
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))?;
+        inner
     }
 
     /// Bulk counter update — kept for backward-compat with callers
@@ -1411,6 +1959,85 @@ fn init_schema(conn: &rusqlite::Connection) -> AppResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_chat_trust_owner
             ON chat_trust(owner_user_id, level DESC);
+
+        -- ── Group invitations (F-08, B-24) ─────────────────────────────
+        -- One row per outstanding invitation. Use a long, opaque
+        -- invitation_id so URLs pasted elsewhere don't leak the
+        -- conversation_id. The status column is one of
+        -- `pending | accepted | declined | revoked | expired` and is
+        -- queried by both the inbox (pending) and the audit trail
+        -- (everything). `expires_at_unix` is checked on every read so
+        -- a daemon restart reaps expired rows lazily.
+        CREATE TABLE IF NOT EXISTS group_invitations (
+            invitation_id     TEXT PRIMARY KEY,
+            conversation_id   TEXT NOT NULL,
+            group_name        TEXT NOT NULL,
+            inviter_id        TEXT NOT NULL,
+            inviter_name      TEXT NOT NULL,
+            invitee_id        TEXT NOT NULL,
+            status            TEXT NOT NULL DEFAULT 'pending',
+            created_at_unix   INTEGER NOT NULL,
+            expires_at_unix   INTEGER NOT NULL,
+            responded_at_unix INTEGER,
+            message           TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_group_invitations_invitee
+            ON group_invitations(invitee_id, status);
+        CREATE INDEX IF NOT EXISTS idx_group_invitations_conv
+            ON group_invitations(conversation_id, status);
+
+        -- ── Drafts (F-07 follow-up: persisted across restarts) ───────
+        -- One row per (owner, conversation). UNIQUE on owner makes the
+        -- save/get/delete idempotent — the conversation key is a
+        -- natural idempotency key inside the UNIQUE.
+        CREATE TABLE IF NOT EXISTS drafts (
+            owner_id         TEXT NOT NULL,
+            conversation_id  TEXT NOT NULL,
+            content          TEXT NOT NULL,
+            reply_to         TEXT,
+            updated_at_unix  INTEGER NOT NULL,
+            PRIMARY KEY (owner_id, conversation_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_drafts_owner
+            ON drafts(owner_id);
+
+        -- ── Group mutes (G-02) ─────────────────────────────────────
+        -- Per-member, per-group muting enforced by `chat_service`.
+        -- `muted_until_unix = i64::MAX` is the canonical "permanent"
+        -- sentinel — checked with `>` arithmetic so a developer who
+        -- miscalculates dates can't accidentally unmute someone.
+        CREATE TABLE IF NOT EXISTS group_member_mutes (
+            conversation_id   TEXT NOT NULL,
+            muted_user_id     TEXT NOT NULL,
+            muted_by_user_id  TEXT NOT NULL,
+            muted_until_unix  INTEGER NOT NULL,
+            reason            TEXT,
+            created_at_unix   INTEGER NOT NULL,
+            PRIMARY KEY (conversation_id, muted_user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_group_member_mutes_until
+            ON group_member_mutes(conversation_id, muted_until_unix);
+
+        -- ── Group nicknames (G-06) ─────────────────────────────────
+        -- The 群昵称 override for a member inside a single group.
+        -- Empty strings are rejected by the service layer.
+        CREATE TABLE IF NOT EXISTS group_member_nicknames (
+            conversation_id  TEXT NOT NULL,
+            user_id          TEXT NOT NULL,
+            nickname         TEXT NOT NULL,
+            updated_at_unix  INTEGER NOT NULL,
+            PRIMARY KEY (conversation_id, user_id)
+        );
+
+        -- ── Group mute-all flag (G-02 follow-up) ─────────────────────
+        -- One row per group with the current `is_muted_all` state.
+        -- The PRIMARY KEY is just the conversation_id — UPSERT on
+        -- every set so the latest writer wins.
+        CREATE TABLE IF NOT EXISTS group_mute_all (
+            conversation_id  TEXT PRIMARY KEY,
+            is_muted         INTEGER NOT NULL,
+            updated_at_unix  INTEGER NOT NULL
+        );
         "#,
     )?;
     Ok(())
@@ -1424,6 +2051,20 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
     let edited_at: Option<String> = row.get(12)?;
     let recalled_at: Option<String> = row.get(14)?;
     let message_type_str: String = row.get(4)?;
+
+    // Audit issue #19: the previous `parse_from_rfc3339(...).ok()`
+    // silently mapped a malformed stored timestamp to `None`. For
+    // `recalled_at` this is a correctness bug: the database says
+    // the message was recalled but the in-memory struct says it
+    // was not, and the UI happily displays the original content.
+    // For `read_at` / `edited_at` the same flaw is a UX papercut
+    // (mismatched unread counts). We now surface the parse failure
+    // as a structured `FromSqlConversionFailure` so the operator
+    // sees the corruption in the log instead of corrupting the
+    // message state.
+    let read_at = parse_rfc3339_optional(read_at, "read_at")?;
+    let edited_at = parse_rfc3339_optional(edited_at, "edited_at")?;
+    let recalled_at = parse_rfc3339_optional(recalled_at, "recalled_at")?;
 
     Ok(ChatMessage {
         message_id: MessageId::from(row.get::<_, String>(0)?),
@@ -1440,18 +2081,37 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
         reply_to: reply_to.map(MessageId::from),
         sequence: row.get(8)?,
         timestamp: row.get(9)?,
-        read_at: read_at
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|d| d.with_timezone(&chrono::Utc)),
+        read_at,
         is_edited: row.get::<_, i64>(11)? != 0,
-        edited_at: edited_at
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|d| d.with_timezone(&chrono::Utc)),
+        edited_at,
         integrity_hash: row.get(13)?,
-        recalled_at: recalled_at
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|d| d.with_timezone(&chrono::Utc)),
+        recalled_at,
     })
+}
+
+/// Parse a `Option<String>` column as RFC-3339. Empty / NULL →
+/// `None`. A non-empty value that fails to parse is a hard error
+/// (see audit issue #19).
+fn parse_rfc3339_optional(
+    raw: Option<String>,
+    column: &'static str,
+) -> rusqlite::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let Some(s) = raw else { return Ok(None) };
+    if s.is_empty() {
+        return Ok(None);
+    }
+    chrono::DateTime::parse_from_rfc3339(&s)
+        .map(|d| Some(d.with_timezone(&chrono::Utc)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("column {column}: not RFC-3339 ({s:?}): {e}"),
+                )),
+            )
+        })
 }
 
 fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationMeta> {
@@ -1530,9 +2190,14 @@ impl From<AppError> for A3chatError {
 
 // Synchronous lock helper used inside `spawn_blocking` closures.
 // `tokio::sync::Mutex::lock_owned` returns an `OwnedMutexGuard` only
-// when awaited, so we drive the future synchronously via the
-// current-thread runtime handle. Safe because `spawn_blocking`
-// always runs on a dedicated blocking thread.
+// when awaited, so we drive the future synchronously. Audit issue
+// #14: the previous version of this trait unconditionally called
+// `Handle::block_on` from inside `spawn_blocking`. On a single-
+// threaded runtime this can deadlock if `spawn_blocking` is ever
+// driven on a worker thread (rather than its dedicated blocking
+// pool). The new version uses `tokio::task::block_in_place` when
+// the runtime is multi-threaded and `Handle::block_on` only on
+// dedicated blocking threads (the common path).
 #[allow(dead_code)]
 trait BlockingLockOwned {
     type Guard;
@@ -1541,29 +2206,52 @@ trait BlockingLockOwned {
 
 impl BlockingLockOwned for tokio::sync::Mutex<rusqlite::Connection> {
     type Guard = tokio::sync::OwnedMutexGuard<rusqlite::Connection>;
+    /// Audit issue #14: prefer `block_in_place` on multi-thread
+    /// runtimes (lets the executor schedule other work); fall
+    /// back to direct `Handle::block_on` only when the current
+    /// Handle is unavailable or `block_in_place` panics.
     fn blocking_lock_owned(self: Arc<Self>) -> Self::Guard {
-        // `lock_owned` requires `.await`; we drive it via the
-        // current-thread runtime handle when called from
-        // `spawn_blocking`. This is safe because `spawn_blocking`
-        // runs on a dedicated thread with no live runtime handle by
-        // default — but tokio installs a `Handle::current()` so
-        // `block_in_place` style APIs work. Here we just block the
-        // thread; if the runtime is single-threaded this would
-        // deadlock. `spawn_blocking` always runs on a blocking
-        // thread (not on a worker thread) so the future is safe to
-        // drive via `Handle::block_on`.
+        // Audit issue #14: detect whether we're on a dedicated
+        // blocking thread by trying to run `block_in_place`. If it
+        // panics, we're on a single-thread runtime and must NOT
+        // call `block_in_place` (it would deadlock); in that case
+        // we drive via `Handle::block_on` which is always safe on a
+        // dedicated blocking thread.
         let h = match tokio::runtime::Handle::try_current() {
             Ok(h) => h,
-            Err(_) => {
-                // No runtime — build a tiny current-thread one.
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("build current-thread runtime");
-                return rt.block_on(async move { self.lock_owned().await });
-            }
+            Err(_) => return drive_block_owned_lock(self.clone()),
         };
-        h.block_on(async move { self.lock_owned().await })
+        // Try block_in_place first; on multi-thread runtimes it
+        // cooperates with the executor without blocking other tasks.
+        let try_block_in_place = std::panic::catch_unwind(
+            std::panic::AssertUnwindSafe(|| {
+                let conn = self.clone();
+                tokio::task::block_in_place(|| {
+                    h.block_on(async move { conn.lock_owned().await })
+                })
+            }),
+        );
+        match try_block_in_place {
+            Ok(g) => g,
+            Err(_) => drive_block_owned_lock(self),
+        }
+    }
+}
+
+/// Drive `Mutex::lock_owned().await` synchronously, building a
+/// current-thread runtime if no `Handle` is active.
+fn drive_block_owned_lock(
+    conn: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+) -> tokio::sync::OwnedMutexGuard<rusqlite::Connection> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => h.block_on(async move { conn.lock_owned().await }),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build current-thread runtime");
+            rt.block_on(async move { conn.lock_owned().await })
+        }
     }
 }
 
@@ -1679,7 +2367,13 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             sequence: 1,
-            timestamp: 1_700_000_000,
+            // Audit issue #10: timestamps must be reasonably
+            // close to "now" because the storage layer's edit
+            // window (default 2 minutes) rejects operations on
+            // messages older than that. Using "now" keeps every
+            // test below within the window without needing
+            // per-test configurations.
+            timestamp: chrono::Utc::now().timestamp(),
         }
     }
 
@@ -1812,7 +2506,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             sequence: 1,
-            timestamp: 1_700_000_001,
+            timestamp: chrono::Utc::now().timestamp(),
             read_at: None,
             is_edited: false,
             edited_at: None,
@@ -1863,6 +2557,71 @@ mod tests {
             .recall_message(&owner(), &stored.message.message_id)
             .await
             .unwrap();
+    }
+
+    // Audit issue #10: recall a day-old message → forbidden.
+    #[tokio::test]
+    async fn recall_after_edit_window_rejects_with_forbidden() {
+        let (dir, mut storage) = fresh_storage().await;
+        // Disable the edit window so we can plant an old message
+        // and exercise the timestamp-based guard directly.
+        let mut cfg = StorageConfig::new(dir.path().to_path_buf());
+        cfg.edit_window = core::time::Duration::ZERO;
+        storage = ChatStorage::new(cfg.clone(), E2eKeyring::new(owner()));
+        storage.init_user(&owner()).await.unwrap();
+
+        // Build a fresh envelope as if from a year ago.
+        let mut env = envelope();
+        env.timestamp = chrono::Utc::now().timestamp() - 365 * 24 * 3600;
+        let stored = storage
+            .save_outbound(&owner(), &env)
+            .await
+            .unwrap();
+        // Re-enable the window for the second half of the test.
+        let mut cfg2 = cfg.clone();
+        cfg2.edit_window = core::time::Duration::from_secs(120);
+        storage = ChatStorage::new(cfg2, E2eKeyring::new(owner()));
+        storage.init_user(&owner()).await.unwrap();
+        let res = storage
+            .recall_message(&owner(), &stored.message.message_id)
+            .await;
+        let res_str = format!("{res:?}");
+        assert!(
+            matches!(res, Err(AppError::Forbidden(msg)) if msg.contains("recall window")),
+            "expected Forbidden for recall-after-window, got {res_str}"
+        );
+    }
+
+    // Audit issue #10: edit a day-old message → forbidden.
+    #[tokio::test]
+    async fn edit_after_edit_window_rejects_with_forbidden() {
+        let (dir, mut storage) = fresh_storage().await;
+        let mut cfg = StorageConfig::new(dir.path().to_path_buf());
+        cfg.edit_window = core::time::Duration::ZERO;
+        storage = ChatStorage::new(cfg.clone(), E2eKeyring::new(owner()));
+        storage.init_user(&owner()).await.unwrap();
+        let mut env = envelope();
+        env.timestamp = chrono::Utc::now().timestamp() - 365 * 24 * 3600;
+        let stored = storage.save_outbound(&owner(), &env).await.unwrap();
+
+        let mut cfg2 = cfg.clone();
+        cfg2.edit_window = core::time::Duration::from_secs(120);
+        storage = ChatStorage::new(cfg2, E2eKeyring::new(owner()));
+        storage.init_user(&owner()).await.unwrap();
+        let res = storage
+            .edit_message(
+                &owner(),
+                &stored.message.message_id,
+                &MessageBody::Plain {
+                    content: "late edit".into(),
+                },
+            )
+            .await;
+        let res_str = format!("{res:?}");
+        assert!(
+            matches!(res, Err(AppError::Forbidden(msg)) if msg.contains("edit window")),
+            "expected Forbidden for edit-after-window, got {res_str}"
+        );
     }
 
     #[tokio::test]
@@ -1920,7 +2679,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             sequence: 1,
-            timestamp: 1_700_000_000,
+            timestamp: chrono::Utc::now().timestamp(),
         };
         let stored = storage.save_outbound(&owner(), &env).await.unwrap();
         let new_body = MessageBody::Plain {
@@ -2132,6 +2891,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_conversation_pinned_updates_state() {
+        let (_dir, storage) = fresh_storage().await;
+        let meta = ConversationMeta {
+            conversation_id: ConversationId::from("dm:alice:bob"),
+            kind: a3chat_core::conversation::ConversationKind::Dm,
+            title: "Bob".into(),
+            peer_user_id: Some(peer()),
+            last_message_preview: "".into(),
+            last_activity: 100,
+            message_count: 0,
+            unread_count: 0,
+            peer_online: false,
+            muted: false,
+            pinned: false,
+        };
+        storage.upsert_conversation(&owner(), &meta).await.unwrap();
+
+        // Initially not pinned.
+        let conv = storage.open_conversation(&owner(), &meta.conversation_id).await.unwrap().unwrap();
+        assert!(!conv.meta.pinned);
+
+        // Pin the conversation.
+        storage.set_conversation_pinned(&owner(), &meta.conversation_id, true).await.unwrap();
+
+        // Now pinned.
+        let conv = storage.open_conversation(&owner(), &meta.conversation_id).await.unwrap().unwrap();
+        assert!(conv.meta.pinned);
+
+        // Unpin.
+        storage.set_conversation_pinned(&owner(), &meta.conversation_id, false).await.unwrap();
+        let conv = storage.open_conversation(&owner(), &meta.conversation_id).await.unwrap().unwrap();
+        assert!(!conv.meta.pinned);
+    }
+
+    #[tokio::test]
     async fn unread_total_sums_correctly() {
         let (_dir, storage) = fresh_storage().await;
         let meta1 = ConversationMeta {
@@ -2283,7 +3077,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             sequence: 1,
-            timestamp: 1_700_000_000,
+            timestamp: chrono::Utc::now().timestamp(),
         };
         let stored = storage.save_outbound(&owner(), &env).await.unwrap();
         let got = storage

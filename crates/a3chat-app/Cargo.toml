@@ -20,6 +20,13 @@ a3net-userstore            = { workspace = true }
 a3net-blobstore            = { workspace = true }
 a3net-moderation           = { workspace = true }
 a3net-reputation           = { workspace = true }
+# P2P device pairing — `a3net-pairing` provides Ed25519 challenge-response,
+# EIP-191 signed invitations, capability grants, trusted-device persistence,
+# revocation, and a short human-readable pairing code (ADNET:XXXX-...).
+# a3chat-app wraps it as `PairingService` so JSON-RPC clients (CLI / Tauri /
+# Flutter) can issue, verify, accept, and revoke pairing invitations.
+a3net-pairing              = { workspace = true }
+a3net-identity             = { workspace = true }
 # Moments / 朋友圈 (F-05) — the bridge in
 # `crates/a3chat-app/src/moments_service.rs` wraps the canonical
 # `a3net-socialfeed` runtime. Required because the integration
@@ -49,6 +56,11 @@ uuid                       = { workspace = true }
 
 # Crypto / hashing
 blake3                     = { workspace = true }
+chacha20poly1305          = { workspace = true }
+# `rand` is used by the pairing service to mint the per-invitation
+# salt and replay-guard nonces. `OsRng` is the only entry point we
+# touch, so the default features are kept off.
+rand                       = { workspace = true }
 
 # Persistence
 rusqlite                   = { version = "0.32", features = ["bundled"] }
