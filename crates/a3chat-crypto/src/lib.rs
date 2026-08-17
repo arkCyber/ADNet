@@ -43,6 +43,8 @@ pub use sender_keys::{
     SenderKey, SenderKeyChain, SenderKeyDistribution, SenderKeyId, step_sender_key as StepSenderKey,
 };
 pub use session::{
-    DmSession, HandshakeMessage, SessionKey, SessionKeys, handshake_initiator, handshake_responder,
+    DmSession, HandshakeMessage, SessionKey, SessionKeys,
+    handshake_initiator, handshake_responder,
+    initiator_first_message, initiator_final_message, responder_second_message,
     open, seal,
 };
