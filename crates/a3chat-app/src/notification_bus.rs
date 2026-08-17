@@ -15,7 +15,7 @@
 
 use tokio::sync::broadcast;
 
-use a3chat_core::event::A3chatEvent;
+pub use a3chat_core::event::A3chatEvent;
 use a3chat_core::id::UserId;
 
 /// Default broadcast channel capacity. 1024 events is enough to
@@ -99,16 +99,34 @@ impl NotificationReceiver {
         match (self.user_id.as_ref(), event) {
             (Some(uid), A3chatEvent::ChatMessageReceived { user_id, .. }) => uid == user_id,
             (Some(_), A3chatEvent::GroupMemberJoined { .. }) => true,
+            (Some(uid), A3chatEvent::GroupMemberRemoved { user_id, .. }) => uid == user_id,
             (Some(_), A3chatEvent::GroupInvitationReceived { .. }) => true,
             (Some(uid), A3chatEvent::ChatMessageRecalled { user_id, .. }) => uid == user_id,
             (Some(_), A3chatEvent::ChatMessageRead { .. }) => true,
             (Some(uid), A3chatEvent::ChatMessageEdited { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::ChatMessageDeleted { user_id, .. }) => uid == user_id,
+            // Moments / 朋友圈 (F-05) — every event carries the
+            // `user_id` of the local owner, so we route them the
+            // same way as `ChatMessageReceived`: only the matching
+            // subscriber receives them. A `None` subscriber still
+            // sees everything via the catch-all below.
+            (Some(uid), A3chatEvent::MomentsPostCreated { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::MomentsPostDeleted { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::MomentsCommentAdded { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::MomentsReactionToggled { user_id, .. }) => uid == user_id,
             (None, _) => true,
             // Presence events broadcast to all subscribers regardless.
             (_, A3chatEvent::PresenceChanged { .. }) => true,
             (_, A3chatEvent::ChatTyping { .. }) => true,
             (_, A3chatEvent::ContactRequestReceived { .. }) => true,
+            // NOTE: A3chatEvent::GroupMemberRemoved is already covered
+            // by the (Some, ..) branch above (line 102) and by the
+            // catch-all (None, _) branch below (line 117).
+            // The (_, A3chatEvent::LinkBookmarkAdded { .. }) wildcard
+            // intentionally follows the global broadcast pattern.
+            (_, A3chatEvent::LinkBookmarkAdded { .. }) => true,
+            (_, A3chatEvent::LinkBookmarkUpdated { .. }) => true,
+            (_, A3chatEvent::LinkBookmarkDeleted { .. }) => true,
         }
     }
 }

@@ -59,12 +59,7 @@ impl Metrics {
 
     /// Record a completed call. `latency_us` is the wall-clock
     /// micros spent in the handler.
-    pub fn record(
-        &self,
-        method: &str,
-        outcome: RpcOutcome,
-        latency_us: u64,
-    ) {
+    pub fn record(&self, method: &str, outcome: RpcOutcome, latency_us: u64) {
         self.rpc_total.fetch_add(1, Ordering::Relaxed);
         match outcome {
             RpcOutcome::Success => {}
@@ -95,11 +90,11 @@ impl Metrics {
     }
     pub fn sse_dec(&self) {
         // saturating so we never underflow
-        let prev = self.sse_clients.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |v| Some(v.saturating_sub(1)),
-        );
+        let prev = self
+            .sse_clients
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
         let _ = prev;
     }
     pub fn sse_clients(&self) -> u64 {
@@ -133,7 +128,10 @@ impl Metrics {
     pub fn to_prometheus(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
-        let _ = writeln!(out, "# HELP a3chat_rpc_calls_total Total RPC calls since process start.");
+        let _ = writeln!(
+            out,
+            "# HELP a3chat_rpc_calls_total Total RPC calls since process start."
+        );
         let _ = writeln!(out, "# TYPE a3chat_rpc_calls_total counter");
         let _ = writeln!(out, "a3chat_rpc_calls_total {}", self.rpc_total());
         let _ = writeln!(
@@ -147,11 +145,7 @@ impl Metrics {
             "# HELP a3chat_rpc_transient_total RPC calls that returned a transient error."
         );
         let _ = writeln!(out, "# TYPE a3chat_rpc_transient_total counter");
-        let _ = writeln!(
-            out,
-            "a3chat_rpc_transient_total {}",
-            self.rpc_transient()
-        );
+        let _ = writeln!(out, "a3chat_rpc_transient_total {}", self.rpc_transient());
         let _ = writeln!(
             out,
             "# HELP a3chat_sse_clients Connected Server-Sent-Events clients."

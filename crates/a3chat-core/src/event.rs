@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::group::{GroupInvitation, GroupMember};
 use crate::id::{ConversationId, MessageId, UserId};
+use crate::link_bookmark::LinkBookmark;
 use crate::message::ChatMessage;
 use crate::presence::{PresenceEvent, PresenceStatus};
 
@@ -15,11 +16,23 @@ pub const NOTIFICATION_KIND_PRESENCE: &str = "presence.changed";
 pub const NOTIFICATION_KIND_TYPING: &str = "chat.typing";
 pub const NOTIFICATION_KIND_CONTACT: &str = "contact.request.received";
 pub const NOTIFICATION_KIND_GROUP: &str = "group.member.joined";
+pub const NOTIFICATION_KIND_GROUP_MEMBER_REMOVED: &str = "group.member.removed";
 pub const NOTIFICATION_KIND_MESSAGE_RECALLED: &str = "chat.message.recalled";
 pub const NOTIFICATION_KIND_MESSAGE_READ: &str = "chat.message.read";
 pub const NOTIFICATION_KIND_MESSAGE_EDITED: &str = "chat.message.edited";
 pub const NOTIFICATION_KIND_MESSAGE_DELETED: &str = "chat.message.deleted";
 pub const NOTIFICATION_KIND_GROUP_INVITATION: &str = "group.invitation.received";
+pub const NOTIFICATION_KIND_LINK_BOOKMARK_ADDED: &str = "link.bookmark.added";
+pub const NOTIFICATION_KIND_LINK_BOOKMARK_UPDATED: &str = "link.bookmark.updated";
+pub const NOTIFICATION_KIND_LINK_BOOKMARK_DELETED: &str = "link.bookmark.deleted";
+
+// Moments / 朋友圈 (F-05). The `kind` strings are what SSE subscribers
+// match against when deciding to refresh their timeline; keeping them
+// stable is a public-API contract.
+pub const NOTIFICATION_KIND_MOMENTS_POST_CREATED: &str = "moments.post.created";
+pub const NOTIFICATION_KIND_MOMENTS_POST_DELETED: &str = "moments.post.deleted";
+pub const NOTIFICATION_KIND_MOMENTS_COMMENT_ADDED: &str = "moments.comment.added";
+pub const NOTIFICATION_KIND_MOMENTS_REACTION_TOGGLED: &str = "moments.reaction.toggled";
 
 /// All a3chat server-pushed events. The discriminator is `kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +69,16 @@ pub enum A3chatEvent {
         member: GroupMember,
     },
 
+    /// A member was removed from a group (kicked, left, or by
+    /// cascade after `dissolve`). `actor_user_id` is the user who
+    /// triggered the removal (`None` when no actor — e.g. cascade).
+    GroupMemberRemoved {
+        conversation_id: ConversationId,
+        user_id: UserId,
+        actor_user_id: Option<UserId>,
+        removed_at_unix: i64,
+    },
+
     /// A previously-sent message was recalled by the sender.
     ChatMessageRecalled {
         user_id: UserId,
@@ -89,6 +112,69 @@ pub enum A3chatEvent {
 
     /// A new group invitation was received.
     GroupInvitationReceived { invitation: GroupInvitation },
+
+    /// A link bookmark was added by the local user (or by SSE push
+    /// from another device).
+    LinkBookmarkAdded {
+        user_id: UserId,
+        bookmark: LinkBookmark,
+    },
+
+    /// A link bookmark was updated — title / description / tags /
+    /// folder / pinned / archived flags.
+    LinkBookmarkUpdated {
+        user_id: UserId,
+        bookmark: LinkBookmark,
+    },
+
+    /// A link bookmark was deleted. The full record is *not* sent
+    /// over the wire (faster + smaller) but the URL is included so
+    /// SSE clients can remove the row from their local cache.
+    LinkBookmarkDeleted {
+        user_id: UserId,
+        bookmark_id: String,
+        url: String,
+    },
+
+    // ----- Moments / 朋友圈 (F-05) ---------------------------------------
+    // All four events carry the `user_id` of the *owner of the local
+    // node*, so the SSE bus can fan out to subscribed devices without
+    // re-deriving it. `author_id` is the gossip-side author of the
+    // underlying record (same as `user_id` for posts created by the
+    // local owner; may differ for inbound gossiped records).
+    MomentsPostCreated {
+        user_id: UserId,
+        post_id: String,
+        author_id: String,
+        /// Visibility string (one of `a3net_types::invariants::Visibility`):
+        /// `"public"`, `"friends"`, `"private"`, etc. Carried as a
+        /// string so the SSE layer does not need to depend on the
+        /// gossip crate's enum.
+        visibility: String,
+    },
+
+    MomentsPostDeleted {
+        user_id: UserId,
+        post_id: String,
+        author_id: String,
+    },
+
+    MomentsCommentAdded {
+        user_id: UserId,
+        post_id: String,
+        comment_id: String,
+        author_id: String,
+    },
+
+    /// `is_added = false` when an existing reaction is removed (so
+    /// the receiving client can decrement its count atomically).
+    MomentsReactionToggled {
+        user_id: UserId,
+        target_id: String,
+        actor_id: String,
+        reaction_type: String,
+        is_added: bool,
+    },
 }
 
 impl A3chatEvent {
@@ -99,11 +185,19 @@ impl A3chatEvent {
             A3chatEvent::ChatTyping { .. } => NOTIFICATION_KIND_TYPING,
             A3chatEvent::ContactRequestReceived { .. } => NOTIFICATION_KIND_CONTACT,
             A3chatEvent::GroupMemberJoined { .. } => NOTIFICATION_KIND_GROUP,
+            A3chatEvent::GroupMemberRemoved { .. } => NOTIFICATION_KIND_GROUP_MEMBER_REMOVED,
             A3chatEvent::ChatMessageRecalled { .. } => NOTIFICATION_KIND_MESSAGE_RECALLED,
             A3chatEvent::ChatMessageRead { .. } => NOTIFICATION_KIND_MESSAGE_READ,
             A3chatEvent::ChatMessageEdited { .. } => NOTIFICATION_KIND_MESSAGE_EDITED,
             A3chatEvent::ChatMessageDeleted { .. } => NOTIFICATION_KIND_MESSAGE_DELETED,
             A3chatEvent::GroupInvitationReceived { .. } => NOTIFICATION_KIND_GROUP_INVITATION,
+            A3chatEvent::LinkBookmarkAdded { .. } => NOTIFICATION_KIND_LINK_BOOKMARK_ADDED,
+            A3chatEvent::LinkBookmarkUpdated { .. } => NOTIFICATION_KIND_LINK_BOOKMARK_UPDATED,
+            A3chatEvent::LinkBookmarkDeleted { .. } => NOTIFICATION_KIND_LINK_BOOKMARK_DELETED,
+            A3chatEvent::MomentsPostCreated { .. } => NOTIFICATION_KIND_MOMENTS_POST_CREATED,
+            A3chatEvent::MomentsPostDeleted { .. } => NOTIFICATION_KIND_MOMENTS_POST_DELETED,
+            A3chatEvent::MomentsCommentAdded { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_ADDED,
+            A3chatEvent::MomentsReactionToggled { .. } => NOTIFICATION_KIND_MOMENTS_REACTION_TOGGLED,
         }
     }
 

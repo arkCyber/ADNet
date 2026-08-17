@@ -37,6 +37,7 @@
 
 pub mod error;
 pub mod im;
+pub mod link_bookmark;
 pub mod schema;
 pub mod storage;
 pub mod trust;
@@ -45,6 +46,11 @@ pub use error::{ChatStoreError, Result};
 pub use im::{
     ChatType, Conversation, GroupMember, ImManager, MAX_SEQUENCE, Message, MessageReceipt,
     PendingMessage, SenderSequence, SyncRequest, SyncResponse, User, UserSequence,
+};
+pub use link_bookmark::{
+    compute_bookmark_id, BookmarkSource, LinkBookmark, LinkBookmarkStore,
+    LinkBookmarkStoreConfig, ListFilter as LinkBookmarkFilter,
+    CountFilter as LinkBookmarkCountFilter,
 };
 pub use schema::SCHEMA_VERSION;
 pub use storage::{ChatStorage, ChatStorageConfig, Friend, MessageAttachment};

@@ -31,7 +31,7 @@ pub mod store;
 
 pub use error::{UserStoreError, UserStoreResult};
 pub use model::{
-    AvatarBlob, DeviceClass, PublicKeyAlgorithm, UserDevice, UserPreferences, UserProfile,
+    AvatarBlob, DeviceClass, PublicKeyAlgorithm, UserDevice, UserKind, UserPreferences, UserProfile,
     UserPublicKey, MAX_AVATAR_BLOB_HASH_LEN, MAX_DISPLAY_NAME_LEN, MAX_USERNAME_LEN,
 };
 pub use sqlite::{SqliteUserStore, SqliteUserStoreConfig, USER_SCHEMA_VERSION};

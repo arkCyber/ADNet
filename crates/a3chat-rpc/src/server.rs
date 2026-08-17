@@ -206,8 +206,9 @@ impl RpcServer {
         } else {
             let mut layer = CorsLayer::new().allow_methods(Any);
             for o in &self.config.allowed_origins {
-                let header: axum::http::HeaderValue =
-                    o.parse().expect("invalid origin: must be URI scheme://host[:port]");
+                let header: axum::http::HeaderValue = o
+                    .parse()
+                    .expect("invalid origin: must be URI scheme://host[:port]");
                 layer = layer.allow_origin(header);
             }
             layer
@@ -241,14 +242,12 @@ impl RpcServer {
 // -- HTTP handlers ---------------------------------------------------------
 
 fn owner_from_headers(headers: &HeaderMap) -> Result<UserId, RpcError> {
-    let value = headers
-        .get(HEADER_OWNER)
-        .ok_or_else(|| {
-            RpcError::new(
-                ERR_A3CHAT_NOT_AUTHENTICATED,
-                format!("missing {HEADER_OWNER} header"),
-            )
-        })?;
+    let value = headers.get(HEADER_OWNER).ok_or_else(|| {
+        RpcError::new(
+            ERR_A3CHAT_NOT_AUTHENTICATED,
+            format!("missing {HEADER_OWNER} header"),
+        )
+    })?;
     let s = value
         .to_str()
         .map_err(|e| RpcError::new(ERR_INVALID_PARAMS, format!("invalid owner header: {e}")))?;
@@ -301,7 +300,6 @@ async fn rpc_handler(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-
     // ── Authentication ────────────────────────────────────────────
     let owner = match owner_from_headers(&headers) {
         Ok(o) => o,
@@ -334,7 +332,7 @@ async fn rpc_handler(
         }
     };
 
-// ── Dispatch ──────────────────────────────────────────────────
+    // ── Dispatch ──────────────────────────────────────────────────
     let span = tracing::info_span!(
         "rpc_call",
         request_id = %request_id.as_deref().unwrap_or(""),
@@ -347,13 +345,7 @@ async fn rpc_handler(
         ParsedEnvelope::Single(req) => {
             let method_name = req.method.clone();
             let started_single = std::time::Instant::now();
-            let resp = dispatch_one(
-                &state,
-                &owner,
-                req,
-                request_id.as_deref(),
-            )
-            .await;
+            let resp = dispatch_one(&state, &owner, req, request_id.as_deref()).await;
             // ── Metrics ──────────────────────────────────────
             let elapsed_us = started_single.elapsed().as_micros() as u64;
             if let Some(err) = &resp.error {
@@ -364,7 +356,9 @@ async fn rpc_handler(
                 };
                 state.metrics.record(&method_name, outcome, elapsed_us);
             } else {
-                state.metrics.record(&method_name, RpcOutcome::Success, elapsed_us);
+                state
+                    .metrics
+                    .record(&method_name, RpcOutcome::Success, elapsed_us);
             }
             let status = if resp.error.is_some() {
                 axum::http::StatusCode::BAD_REQUEST
@@ -422,10 +416,7 @@ async fn rpc_handler(
             for r in &rows {
                 state.metrics.record(&r.method, r.outcome, r.elapsed_us);
             }
-            let replyable: Vec<bool> = rows
-                .iter()
-                .map(|r| !r.response.id.is_null())
-                .collect();
+            let replyable: Vec<bool> = rows.iter().map(|r| !r.response.id.is_null()).collect();
             let bodies: Vec<RpcResponse> = rows.into_iter().map(|r| r.response).collect();
             let all_errors = bodies.iter().all(|r| r.error.is_some());
             let mut response = if replyable.iter().all(|&x| !x) {
@@ -473,10 +464,7 @@ async fn dispatch_one(
             err.kind = Some(a3net_error::ErrorKind::Timeout.as_str().to_string());
             // Error code maps via From<A3chatError>; we synthesise
             // here so callers see -32603 with kind=timeout.
-            RpcResponse::failure(
-                serde_json::Value::Null,
-                err,
-            )
+            RpcResponse::failure(serde_json::Value::Null, err)
         }
     }
 }
@@ -671,10 +659,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), 4096).await.unwrap(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(res.into_body(), 4096).await.unwrap())
+                .unwrap();
         assert_eq!(body["service"], "a3chat");
         assert!(body.get("version").is_some());
     }
@@ -693,12 +680,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), 8192).await.unwrap(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(res.into_body(), 8192).await.unwrap())
+                .unwrap();
         let list = body["methods"].as_array().expect("methods is array");
-        assert!(list.iter().any(|v| v == &serde_json::json!("a3chat.contact.list")));
+        assert!(
+            list.iter()
+                .any(|v| v == &serde_json::json!("a3chat.contact.list"))
+        );
     }
 
     #[tokio::test]

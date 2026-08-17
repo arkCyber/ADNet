@@ -622,7 +622,7 @@ async fn im_create_user_and_conversation() {
     let bob = mgr.create_user("bob", "Bob").await.unwrap();
 
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "alice<->bob")
+        .create_conversation(ChatType::OneOnOne, "alice<->bob", false)
         .await
         .unwrap();
     mgr.add_group_member(&conv.id, &alice.id, "member")
@@ -672,7 +672,7 @@ async fn im_send_message_rejects_empty_content() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let err = mgr
@@ -699,7 +699,7 @@ async fn im_send_message_group_must_have_no_receiver() {
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let bob = mgr.create_user("bob", "Bob").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::Group, "team")
+        .create_conversation(ChatType::Group, "team", false)
         .await
         .unwrap();
     let err = mgr
@@ -715,7 +715,7 @@ async fn im_send_message_stamps_sequence_and_hash() {
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let bob = mgr.create_user("bob", "Bob").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "alice<->bob")
+        .create_conversation(ChatType::OneOnOne, "alice<->bob", false)
         .await
         .unwrap();
 
@@ -748,7 +748,7 @@ async fn im_sync_supports_pagination_and_compression() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
 
@@ -795,7 +795,7 @@ async fn im_sync_rejects_zero_limit() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let err = mgr
@@ -813,7 +813,7 @@ async fn im_sequence_cycles_at_max_sequence() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
 
@@ -860,7 +860,7 @@ async fn im_detect_missing_messages_returns_range() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
 
@@ -894,7 +894,7 @@ async fn im_pending_messages_queue_and_drain() {
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let bob = mgr.create_user("bob", "Bob").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "dm")
+        .create_conversation(ChatType::OneOnOne, "dm", false)
         .await
         .unwrap();
     let msg = mgr
@@ -929,7 +929,7 @@ async fn im_add_group_member_returns_existing_on_duplicate() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::Group, "team")
+        .create_conversation(ChatType::Group, "team", false)
         .await
         .unwrap();
     let first = mgr
@@ -955,7 +955,7 @@ async fn im_receipts_roundtrip() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let msg = mgr
@@ -990,7 +990,7 @@ async fn im_remove_group_member_returns_count() {
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let bob = mgr.create_user("bob", "Bob").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::Group, "team")
+        .create_conversation(ChatType::Group, "team", false)
         .await
         .unwrap();
     mgr.add_group_member(&conv.id, &alice.id, "admin")
@@ -1227,7 +1227,7 @@ async fn im_edit_message_re_stamps_hash_and_marks_edited() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let original = mgr
@@ -1271,7 +1271,7 @@ async fn im_delete_message_cascades_receipts() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let msg = mgr
@@ -1293,7 +1293,7 @@ async fn im_count_messages_and_prune() {
     let (_dir, mgr) = temp_im();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     for i in 0..3 {

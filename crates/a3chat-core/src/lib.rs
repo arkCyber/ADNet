@@ -27,6 +27,7 @@ pub mod error;
 pub mod event;
 pub mod group;
 pub mod id;
+pub mod link_bookmark;
 pub mod message;
 pub mod presence;
 pub mod rpc;
@@ -37,12 +38,22 @@ pub use conversation::{ConversationKind, ConversationMeta, ConversationRecord};
 pub use error::{A3chatError, A3chatResult};
 pub use event::{
     A3chatEvent, A3chatNotification, NOTIFICATION_KIND_CHAT, NOTIFICATION_KIND_GROUP_INVITATION,
-    NOTIFICATION_KIND_PRESENCE,
+    NOTIFICATION_KIND_LINK_BOOKMARK_ADDED, NOTIFICATION_KIND_LINK_BOOKMARK_DELETED,
+    NOTIFICATION_KIND_LINK_BOOKMARK_UPDATED, NOTIFICATION_KIND_MOMENTS_COMMENT_ADDED,
+    NOTIFICATION_KIND_MOMENTS_POST_CREATED, NOTIFICATION_KIND_MOMENTS_POST_DELETED,
+    NOTIFICATION_KIND_MOMENTS_REACTION_TOGGLED, NOTIFICATION_KIND_PRESENCE,
 };
 pub use group::{Group, GroupInvitation, GroupMember, InvitationStatus, MemberRole};
 pub use id::{
     ConversationId, DeviceId, MessageId, UserId, generate_conversation_id, generate_device_id,
     generate_message_id, generate_user_id,
+};
+pub use link_bookmark::{
+    BookmarkSource, DEFAULT_FOLDER, INTEGRITY_HASH_TAG, LinkBookmark, LinkBookmarkCount,
+    LinkBookmarkListFilter, LinkBookmarkSearchQuery, LinkFolderNode, LinkTagCount,
+    MAX_DESCRIPTION_LEN, MAX_FOLDER_DEPTH, MAX_FOLDER_LEN, MAX_SNAPSHOT_LEN, MAX_TAG_LEN,
+    MAX_TAGS_PER_BOOKMARK, MAX_TITLE_LEN, UpsertLinkBookmarkRequest, compute_bookmark_id,
+    normalize_tag, normalize_tags, validate_folder,
 };
 pub use message::{
     Attachment, AttachmentKind, ChatMessage, MAX_PREVIEW_LEN, MessageBody, MessageEnvelope,

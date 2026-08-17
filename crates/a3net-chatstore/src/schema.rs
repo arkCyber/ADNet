@@ -37,7 +37,7 @@ use crate::error::{ChatStoreError, Result};
 
 /// Current schema version. Bump on every schema change and add a
 /// migration step in [`migrate_to`].
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// All `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
 /// statements bundled together so the bootstrap path is a single
@@ -119,6 +119,10 @@ pub(super) const CREATE_STATEMENTS: &[&str] = &[
         id             TEXT PRIMARY KEY,
         chat_type      TEXT NOT NULL,
         title          TEXT NOT NULL,
+        description    TEXT,
+        announcement   TEXT,
+        is_private     INTEGER NOT NULL DEFAULT 1,
+        is_dissolved   INTEGER NOT NULL DEFAULT 0,
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL,
         message_count  INTEGER NOT NULL DEFAULT 0,
@@ -233,6 +237,31 @@ pub(super) const INDEX_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_group_members_user        ON group_members(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_user_sequences_user       ON user_sequences(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_hub_receipts_message      ON hub_message_receipts(message_id)",
+    // ---- link bookmarks (per-user URL archive) -----------------------------
+    "CREATE TABLE IF NOT EXISTS link_bookmarks (
+        bookmark_id      TEXT NOT NULL,
+        owner_id         TEXT NOT NULL,
+        url              TEXT NOT NULL,
+        title            TEXT NOT NULL,
+        description      TEXT,
+        favicon_hash     TEXT,
+        folder           TEXT NOT NULL DEFAULT '/',
+        tags_json        TEXT NOT NULL DEFAULT '[]',
+        is_pinned        INTEGER NOT NULL DEFAULT 0,
+        is_archived      INTEGER NOT NULL DEFAULT 0,
+        snapshot_text    TEXT,
+        source           TEXT NOT NULL DEFAULT 'manual',
+        created_at_unix  INTEGER NOT NULL,
+        updated_at_unix  INTEGER NOT NULL,
+        last_visited_unix INTEGER,
+        visit_count      INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (owner_id, bookmark_id)
+     )",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner        ON link_bookmarks(owner_id)",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_url    ON link_bookmarks(owner_id, url)",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_folder ON link_bookmarks(owner_id, folder)",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_pinned ON link_bookmarks(owner_id, is_pinned)",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_archived ON link_bookmarks(owner_id, is_archived)",
 ];
 
 /// The `schema_version` table is created before everything else so
@@ -331,6 +360,16 @@ fn migrate_to(conn: &rusqlite::Transaction<'_>, target: u32) -> rusqlite::Result
                  CREATE INDEX IF NOT EXISTS idx_chat_trust_owner
                      ON chat_trust(owner_user_id, level DESC);",
             )?;
+        }
+        4 => {
+            // Add group-metadata columns to `conversations`.
+            // Each try_add_column call is idempotent: it silently succeeds
+            // if the column already exists (safe for fresh v4 DBs and
+            // for re-runs of the migration on already-upgraded DBs).
+            try_add_column(conn, "conversations", "description", "TEXT")?;
+            try_add_column(conn, "conversations", "announcement", "TEXT")?;
+            try_add_column(conn, "conversations", "is_private", "INTEGER NOT NULL DEFAULT 1")?;
+            try_add_column(conn, "conversations", "is_dissolved", "INTEGER NOT NULL DEFAULT 0")?;
         }
         _ => {
             // Unknown future version. Should be unreachable because

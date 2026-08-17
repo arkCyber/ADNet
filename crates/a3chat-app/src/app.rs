@@ -141,7 +141,7 @@ fn empty_test_store_arc() -> std::sync::Arc<dyn a3net_userstore::store::UserStor
 pub struct A3chatApp {
     pub chat: ChatService,
     pub contact: ContactService,
-    pub group: GroupService,
+    pub group: Arc<GroupService>,
     pub sync: SyncService,
     pub presence: PresenceService,
     /// User-profile layer backed by `a3net-userstore`.
@@ -223,7 +223,7 @@ impl A3chatApp {
         Ok(Self {
             chat: ChatService::new(storage.clone(), bus.clone()).with_moderation(moderation.clone()),
             contact: ContactService::new(bus.clone()),
-            group: GroupService::new(bus.clone()),
+            group: Arc::new(GroupService::new(bus.clone())),
             sync: SyncService::new(storage.clone()),
             presence: PresenceService::new(storage.clone(), bus.clone()),
             profile,
@@ -310,7 +310,7 @@ impl A3chatApp {
         Self {
             chat: ChatService::new(storage.clone(), bus.clone()).with_moderation(moderation.clone()),
             contact: ContactService::new(bus.clone()),
-            group: GroupService::new(bus.clone()),
+            group: Arc::new(GroupService::new(bus.clone())),
             sync: SyncService::new(storage.clone()),
             presence: PresenceService::new(storage.clone(), bus.clone()),
             // Tests that build via `with_storage` skip the
@@ -358,7 +358,7 @@ impl A3chatApp {
             .await;
         }
         if method.starts_with("a3chat.group.") {
-            return group_service::dispatch(Arc::new(self.group.clone()), method, owner, params)
+            return group_service::dispatch(self.group.clone(), method, owner, params)
                 .await;
         }
         if method.starts_with("a3chat.presence.") {

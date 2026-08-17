@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Open a conversation and add both users.
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "alice<->bob")
+        .create_conversation(ChatType::OneOnOne, "alice<->bob", false)
         .await?;
     mgr.add_group_member(&conv.id, &alice.id, "member").await?;
     mgr.add_group_member(&conv.id, &bob.id, "member").await?;

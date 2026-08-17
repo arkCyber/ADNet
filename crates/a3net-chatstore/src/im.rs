@@ -122,6 +122,14 @@ pub struct Conversation {
     pub id: String,
     pub chat_type: ChatType,
     pub title: String,
+    /// Group description. Empty string when the group has no description.
+    pub description: String,
+    /// Pinned announcement text. Empty string when none is set.
+    pub announcement: String,
+    /// True for invite-only groups.
+    pub is_private: bool,
+    /// True after the group was dissolved. Dissolved groups reject new messages.
+    pub is_dissolved: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub message_count: u32,
@@ -412,6 +420,7 @@ impl ImManager {
         &self,
         chat_type: ChatType,
         title: &str,
+        is_private: bool,
     ) -> Result<Conversation> {
         a3net_types::invariants::validate_name("title", title)?;
         debug!("creating conversation: {title} ({chat_type:?})");
@@ -420,12 +429,13 @@ impl ImManager {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO conversations
-             (id, chat_type, title, created_at, updated_at, message_count, last_sequence)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)",
+             (id, chat_type, title, description, announcement, is_private, is_dissolved, created_at, updated_at, message_count, last_sequence)
+             VALUES (?1, ?2, ?3, '', '', ?4, 0, ?5, ?6, 0, 0)",
             params![
                 id,
                 chat_type.as_str(),
                 title,
+                is_private as i64,
                 now.to_rfc3339(),
                 now.to_rfc3339()
             ],
@@ -434,6 +444,10 @@ impl ImManager {
             id,
             chat_type,
             title: title.to_string(),
+            description: String::new(),
+            announcement: String::new(),
+            is_private,
+            is_dissolved: false,
             created_at: now,
             updated_at: now,
             message_count: 0,
@@ -446,7 +460,8 @@ impl ImManager {
         a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, chat_type, title, created_at, updated_at, message_count, last_sequence
+            "SELECT id, chat_type, title, description, announcement, is_private, is_dissolved,
+                    created_at, updated_at, message_count, last_sequence
              FROM conversations WHERE id = ?1",
         )?;
         let conv = stmt
@@ -455,14 +470,57 @@ impl ImManager {
         Ok(conv)
     }
 
+    /// Mark a group conversation as dissolved. After dissolution the
+    /// group rejects new messages and members can no longer join.
+    /// Dissolution is idempotent — re-dissolving a dissolved group
+    /// succeeds with no-op.
+    pub async fn dissolve_conversation(&self, conversation_id: &str) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE conversations
+             SET is_dissolved = 1, updated_at = ?1
+             WHERE id = ?2 AND is_dissolved = 0",
+            params![now.to_rfc3339(), conversation_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set or clear the pinned announcement for a group. Set to empty
+    /// string to clear it. Validates the text length (≤ 1024 chars).
+    pub async fn set_group_announcement(
+        &self,
+        conversation_id: &str,
+        text: &str,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        if text.len() > 1024 {
+            return Err(ChatStoreError::Validation(format!(
+                "announcement text length {} exceeds 1024 chars",
+                text.len()
+            )));
+        }
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE conversations
+             SET announcement = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![text, now.to_rfc3339(), conversation_id],
+        )?;
+        Ok(())
+    }
+
     /// All conversations visible to `user_id` (every 1-to-1 chat
     /// plus every group the user is a member of).
     pub async fn list_user_conversations(&self, user_id: &str) -> Result<Vec<Conversation>> {
         a3net_types::invariants::validate_id("user_id", user_id)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.chat_type, c.title, c.created_at, c.updated_at,
-                    c.message_count, c.last_sequence
+            "SELECT c.id, c.chat_type, c.title, c.description, c.announcement,
+                    c.is_private, c.is_dissolved,
+                    c.created_at, c.updated_at, c.message_count, c.last_sequence
              FROM conversations c
              LEFT JOIN group_members gm
                     ON c.id = gm.conversation_id AND gm.user_id = ?1
@@ -541,6 +599,31 @@ impl ImManager {
             params![conversation_id, user_id],
         )?;
         Ok(removed)
+    }
+
+    /// Update a member's role. Returns `Ok(())` if updated; no-op if the
+    /// user was not a member. Validates the new role string.
+    pub async fn set_group_member_role(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        new_role: &str,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        a3net_types::invariants::validate_id("user_id", user_id)?;
+        a3net_types::invariants::validate_id("role", new_role)?;
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE group_members SET role = ?1
+             WHERE conversation_id = ?2 AND user_id = ?3",
+            params![new_role, conversation_id, user_id],
+        )?;
+        if updated == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "member {user_id} not found in group {conversation_id}"
+            )));
+        }
+        Ok(())
     }
 
     /// All members of a group conversation, oldest-joined first.
@@ -1342,10 +1425,14 @@ fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         id: row.get(0)?,
         chat_type: ChatType::parse(&row.get::<_, String>(1)?),
         title: row.get(2)?,
-        created_at: parse_dt(row.get::<_, String>(3)?)?,
-        updated_at: parse_dt(row.get::<_, String>(4)?)?,
-        message_count: row.get::<_, i64>(5)? as u32,
-        last_sequence: row.get::<_, i64>(6)? as u32,
+        description: row.get(3)?,
+        announcement: row.get(4)?,
+        is_private: row.get::<_, bool>(5)?,
+        is_dissolved: row.get::<_, bool>(6)?,
+        created_at: parse_dt(row.get::<_, String>(7)?)?,
+        updated_at: parse_dt(row.get::<_, String>(8)?)?,
+        message_count: row.get::<_, i64>(9)? as u32,
+        last_sequence: row.get::<_, i64>(10)? as u32,
     })
 }
 

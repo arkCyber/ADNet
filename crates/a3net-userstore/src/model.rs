@@ -43,6 +43,45 @@ pub enum PublicKeyAlgorithm {
     Other,
 }
 
+/// Account kind — distinguishes human operators from
+/// machine-controlled identities (agents, services, system
+/// publishers). Persisted in the v2 `kind` column on
+/// `user_profile` and exposed via
+/// [`crate::store::UserStore::get_kind`] / `set_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UserKind {
+    #[default]
+    Human,
+    Agent,
+    System,
+    Unknown,
+}
+
+impl UserKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserKind::Human => "human",
+            UserKind::Agent => "agent",
+            UserKind::System => "system",
+            UserKind::Unknown => "unknown",
+        }
+    }
+
+    /// Lenient parser used by [`UserKind`] reads from older rows
+    /// that pre-date the column. Unknown strings default to
+    /// [`UserKind::Human`] (DO-178C §6.1 — *no panics on missing
+    /// data*).
+    pub fn from_str_loose(s: &str) -> Self {
+        match s {
+            "agent" => UserKind::Agent,
+            "system" => UserKind::System,
+            "unknown" => UserKind::Unknown,
+            _ => UserKind::Human,
+        }
+    }
+}
+
 impl PublicKeyAlgorithm {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -74,6 +113,10 @@ pub struct UserPublicKey {
     pub algorithm: String, // see [`PublicKeyAlgorithm::as_str`]
     /// Raw key material (base64-encoded).
     pub key_material: String,
+    /// Free-form UI label (e.g. "primary", "rotated 2026-Q3").
+    /// Stored in the v2 `label` column on `user_public_keys`.
+    #[serde(default)]
+    pub label: String,
     /// Unix seconds.
     pub created_at: u64,
     /// Unix seconds; `None` means not revoked.
@@ -188,6 +231,10 @@ pub struct UserProfile {
     pub avatar: Option<AvatarBlob>,
     /// Bio / status line.
     pub bio: String,
+    /// Account kind — defaults to [`UserKind::Human`] when read
+    /// from older rows that pre-date the column.
+    #[serde(default)]
+    pub kind: UserKind,
     pub preferences: UserPreferences,
     /// Unix seconds.
     pub created_at: u64,
@@ -203,6 +250,7 @@ impl UserProfile {
             display_name: String::new(),
             avatar: None,
             bio: String::new(),
+            kind: UserKind::default(),
             preferences: UserPreferences::default(),
             created_at: 0,
             updated_at: 0,

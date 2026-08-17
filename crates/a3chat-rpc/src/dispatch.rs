@@ -12,9 +12,9 @@
 //! list of method names.
 
 use a3chat_app::A3chatApp;
+use a3chat_core::error::A3chatError;
 use a3chat_core::id::UserId;
 use a3chat_core::rpc::A3chatRpcMethod;
-use a3chat_core::error::A3chatError;
 use a3net_error::{ErrorKind, IntoReport};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -402,7 +402,10 @@ mod tests {
         };
         let resp = dispatch_rpc_call(&app, &owner(), req, None).await;
         assert!(resp.error.is_none(), "notification must not error");
-        assert!(resp.result.is_none(), "notification must not return a result");
+        assert!(
+            resp.result.is_none(),
+            "notification must not return a result"
+        );
         assert_eq!(resp.id, serde_json::Value::Null);
 
         // Error-path notification

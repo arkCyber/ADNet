@@ -8,8 +8,8 @@
 
 use std::time::Duration;
 
-use a3chat_app::storage::StorageConfig;
 use a3chat_app::A3chatApp;
+use a3chat_app::storage::StorageConfig;
 use a3chat_core::id::UserId;
 use a3chat_rpc::{RpcServer, RpcServerConfig};
 use serde_json::{Value, json};
@@ -163,7 +163,8 @@ async fn contact_add_request_then_list_round_trip() {
     assert!(list_resp.status().is_success(), "list status");
     let list_body: Value = list_resp.json().await.expect("decode list");
     assert_eq!(
-        list_body["error"], Value::Null,
+        list_body["error"],
+        Value::Null,
         "list must not error initially: {list_body}"
     );
     assert_eq!(
@@ -191,7 +192,8 @@ async fn contact_add_request_then_list_round_trip() {
     assert!(add_resp.status().is_success(), "add status");
     let add_body: Value = add_resp.json().await.expect("decode add");
     assert_eq!(
-        add_body["error"], Value::Null,
+        add_body["error"],
+        Value::Null,
         "add_request must not error: {add_body}"
     );
     let request_id = add_body["result"]["request_id"]

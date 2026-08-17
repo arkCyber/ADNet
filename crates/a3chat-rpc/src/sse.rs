@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header;
 use axum::http::HeaderMap;
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
 
 use a3chat_app::A3chatApp;
@@ -127,6 +127,20 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
                 "member": member,
             }),
         ),
+        A3chatEvent::GroupMemberRemoved {
+            conversation_id,
+            user_id,
+            actor_user_id,
+            removed_at_unix,
+        } => (
+            A3chatRpcMethod::NOTIFICATION_GROUP_MEMBER_REMOVED,
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "actor_user_id": actor_user_id,
+                "removed_at_unix": removed_at_unix,
+            }),
+        ),
         A3chatEvent::GroupInvitationReceived { invitation } => (
             A3chatRpcMethod::NOTIFICATION_GROUP_INVITATION_RECEIVED,
             serde_json::json!({
@@ -163,6 +177,97 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
                 "message_id": message_id,
             }),
         ),
+        // Moments / 朋友圈 (F-05) — the SSE client receives these
+        // as `event:` lines so it can refresh the timeline without
+        // having to poll. The `kind` strings match the constants
+        // exposed in `A3chatRpcMethod` and are considered a
+        // public-API contract.
+        A3chatEvent::MomentsPostCreated {
+            user_id,
+            post_id,
+            author_id,
+            visibility,
+        } => (
+            "a3chat.moments.post.created",
+            serde_json::json!({
+                "user_id": user_id,
+                "post_id": post_id,
+                "author_id": author_id,
+                "visibility": visibility,
+            }),
+        ),
+        A3chatEvent::MomentsPostDeleted {
+            user_id,
+            post_id,
+            author_id,
+        } => (
+            "a3chat.moments.post.deleted",
+            serde_json::json!({
+                "user_id": user_id,
+                "post_id": post_id,
+                "author_id": author_id,
+            }),
+        ),
+        A3chatEvent::MomentsCommentAdded {
+            user_id,
+            post_id,
+            comment_id,
+            author_id,
+        } => (
+            "a3chat.moments.comment.added",
+            serde_json::json!({
+                "user_id": user_id,
+                "post_id": post_id,
+                "comment_id": comment_id,
+                "author_id": author_id,
+            }),
+        ),
+        A3chatEvent::MomentsReactionToggled {
+            user_id,
+            target_id,
+            actor_id,
+            reaction_type,
+            is_added,
+        } => (
+            "a3chat.moments.reaction.toggled",
+            serde_json::json!({
+                "user_id": user_id,
+                "target_id": target_id,
+                "actor_id": actor_id,
+                "reaction_type": reaction_type,
+                "is_added": is_added,
+            }),
+        ),
+        // Link bookmarks / favorites (F-08). The full bookmark
+        // is included for added/updated (clients refresh their
+        // cache) but only the id+url for delete (cheaper, plus
+        // the cache can look the row up locally if it needs to).
+        A3chatEvent::LinkBookmarkAdded { user_id, bookmark } => (
+            "a3chat.link.bookmark.added",
+            serde_json::json!({
+                "user_id": user_id,
+                "bookmark": bookmark,
+            }),
+        ),
+        A3chatEvent::LinkBookmarkUpdated { user_id, bookmark } => (
+            "a3chat.link.bookmark.updated",
+            serde_json::json!({
+                "user_id": user_id,
+                "bookmark": bookmark,
+            }),
+        ),
+        A3chatEvent::LinkBookmarkDeleted {
+            user_id,
+            bookmark_id,
+            url,
+        } => (
+            "a3chat.link.bookmark.deleted",
+            serde_json::json!({
+                "user_id": user_id,
+                "bookmark_id": bookmark_id,
+                "url": url,
+            }),
+        ),
     };
     let envelope = serde_json::json!({
         "jsonrpc": "2.0",
@@ -188,14 +293,12 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
 }
 
 fn owner_from_headers(headers: &HeaderMap) -> Result<UserId, RpcError> {
-    let value = headers
-        .get(HEADER_OWNER)
-        .ok_or_else(|| {
-            RpcError::new(
-                ERR_A3CHAT_NOT_AUTHENTICATED,
-                format!("missing {HEADER_OWNER} header"),
-            )
-        })?;
+    let value = headers.get(HEADER_OWNER).ok_or_else(|| {
+        RpcError::new(
+            ERR_A3CHAT_NOT_AUTHENTICATED,
+            format!("missing {HEADER_OWNER} header"),
+        )
+    })?;
     let s = value
         .to_str()
         .map_err(|e| RpcError::new(ERR_INVALID_PARAMS, format!("invalid owner header: {e}")))?;
@@ -221,10 +324,7 @@ pub async fn sse_handler(
     // Reconnect-token support (spec §6.4). When a client
     // supplies `Last-Event-Id`, log it so a future P1 can wire
     // the bus replay buffer; for now we acknowledge but ignore.
-    if let Some(last_id) = headers
-        .get("last-event-id")
-        .and_then(|v| v.to_str().ok())
-    {
+    if let Some(last_id) = headers.get("last-event-id").and_then(|v| v.to_str().ok()) {
         tracing::debug!(last_event_id = %last_id, owner = %owner.as_str(), "sse client reconnecting");
     }
 
@@ -435,6 +535,93 @@ mod tests {
         };
         let s = event_to_sse(evt);
         assert!(s.contains("\"request_id\":\"r1\""));
+    }
+
+    #[test]
+    fn moments_post_created_serializes() {
+        let evt = A3chatEvent::MomentsPostCreated {
+            user_id: UserId::from("alice"),
+            post_id: "p-1".into(),
+            author_id: "alice".into(),
+            visibility: "public".into(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.moments.post.created"));
+        assert!(s.contains("\"post_id\":\"p-1\""));
+        assert!(s.contains("\"visibility\":\"public\""));
+    }
+
+    #[test]
+    fn moments_post_deleted_serializes() {
+        let evt = A3chatEvent::MomentsPostDeleted {
+            user_id: UserId::from("alice"),
+            post_id: "p-1".into(),
+            author_id: "alice".into(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.moments.post.deleted"));
+        assert!(s.contains("\"post_id\":\"p-1\""));
+    }
+
+    #[test]
+    fn moments_comment_added_serializes() {
+        let evt = A3chatEvent::MomentsCommentAdded {
+            user_id: UserId::from("alice"),
+            post_id: "p-1".into(),
+            comment_id: "c-1".into(),
+            author_id: "alice".into(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.moments.comment.added"));
+        assert!(s.contains("\"comment_id\":\"c-1\""));
+    }
+
+    #[test]
+    fn moments_reaction_toggled_serializes() {
+        let evt = A3chatEvent::MomentsReactionToggled {
+            user_id: UserId::from("alice"),
+            target_id: "p-1".into(),
+            actor_id: "bob".into(),
+            reaction_type: "like".into(),
+            is_added: true,
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.moments.reaction.toggled"));
+        assert!(s.contains("\"reaction_type\":\"like\""));
+        assert!(s.contains("\"is_added\":true"));
+    }
+
+    #[test]
+    fn link_bookmark_added_serializes() {
+        let evt = A3chatEvent::LinkBookmarkAdded {
+            user_id: UserId::from("alice"),
+            bookmark: a3chat_core::link_bookmark::LinkBookmark::default(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.link.bookmark.added"));
+        assert!(s.contains("\"bookmark\""));
+    }
+
+    #[test]
+    fn link_bookmark_updated_serializes() {
+        let evt = A3chatEvent::LinkBookmarkUpdated {
+            user_id: UserId::from("alice"),
+            bookmark: a3chat_core::link_bookmark::LinkBookmark::default(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.link.bookmark.updated"));
+    }
+
+    #[test]
+    fn link_bookmark_deleted_serializes() {
+        let evt = A3chatEvent::LinkBookmarkDeleted {
+            user_id: UserId::from("alice"),
+            bookmark_id: "bm-1".into(),
+            url: "https://example.com".into(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.link.bookmark.deleted"));
+        assert!(s.contains("\"bookmark_id\":\"bm-1\""));
     }
 
     #[test]

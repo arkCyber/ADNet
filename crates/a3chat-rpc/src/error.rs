@@ -66,7 +66,11 @@ impl RpcError {
     /// through `IntoReport::emit()` for observability dashboards.
     pub fn with_report_metadata(mut self, a3chat: &A3chatError, request_id: Option<&str>) -> Self {
         self.string_code = Some(<A3chatError as IntoReport>::code(a3chat).to_string());
-        self.kind = Some(<A3chatError as IntoReport>::kind(a3chat).as_str().to_string());
+        self.kind = Some(
+            <A3chatError as IntoReport>::kind(a3chat)
+                .as_str()
+                .to_string(),
+        );
         // Side-effect: emit structured tracing event.
         let mut report = a3chat.into_report("a3chat-rpc");
         if let Some(rid) = request_id {

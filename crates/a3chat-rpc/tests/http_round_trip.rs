@@ -27,10 +27,7 @@ async fn spawn_server() -> (
 ) {
     let dir = tempfile::tempdir().unwrap();
     let keyring = E2eKeyring::new(owner());
-    let storage = ChatStorage::new(
-        StorageConfig::new(dir.path().to_path_buf()),
-        keyring,
-    );
+    let storage = ChatStorage::new(StorageConfig::new(dir.path().to_path_buf()), keyring);
     let bus = NotificationBus::new(64);
     // Build the app with a pre-constructed storage so the RPC layer
     // shares the same database handle as the test's persistence path.

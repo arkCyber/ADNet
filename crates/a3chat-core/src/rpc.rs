@@ -62,6 +62,12 @@ impl A3chatRpcMethod {
     pub const PROFILE_DEVICE_LIST: &'static str = "a3chat.profile.device_list";
     pub const PROFILE_DIGIT_GET: &'static str = "a3chat.profile.digit_get";
     pub const PROFILE_AVATAR_SET: &'static str = "a3chat.profile.avatar_set";
+    pub const PROFILE_AVATAR_UPLOAD: &'static str = "a3chat.profile.avatar.upload";
+    pub const PROFILE_AVATAR_GET: &'static str = "a3chat.profile.avatar.get";
+    pub const PROFILE_AVATAR_REMOVE: &'static str = "a3chat.profile.avatar.remove";
+    pub const PROFILE_PUBLIC_KEY_LABEL: &'static str = "a3chat.profile.public_key.label";
+    pub const PROFILE_KIND_GET: &'static str = "a3chat.profile.kind.get";
+    pub const PROFILE_KIND_SET: &'static str = "a3chat.profile.kind.set";
 
     // Media / crypto
     pub const MEDIA_UPLOAD_INIT: &'static str = "a3chat.media.upload_init";
@@ -74,6 +80,24 @@ impl A3chatRpcMethod {
     // Stream (SSE)
     pub const STREAM_SUBSCRIBE: &'static str = "a3chat.stream.subscribe";
 
+    // Link bookmarks / favorites (F-08) ------------------------------
+    // CRUD + listing/search + maintenance. `add` and `update` share
+    // the `UpsertLinkBookmarkRequest` shape so the client uses the
+    // same form for both; the dispatcher differentiates via method.
+    pub const LINK_BOOKMARK_ADD: &'static str = "a3chat.link.bookmark.add";
+    pub const LINK_BOOKMARK_UPDATE: &'static str = "a3chat.link.bookmark.update";
+    pub const LINK_BOOKMARK_GET: &'static str = "a3chat.link.bookmark.get";
+    pub const LINK_BOOKMARK_GET_BY_URL: &'static str = "a3chat.link.bookmark.get_by_url";
+    pub const LINK_BOOKMARK_LIST: &'static str = "a3chat.link.bookmark.list";
+    pub const LINK_BOOKMARK_SEARCH: &'static str = "a3chat.link.bookmark.search";
+    pub const LINK_BOOKMARK_DELETE: &'static str = "a3chat.link.bookmark.delete";
+    pub const LINK_BOOKMARK_SET_PINNED: &'static str = "a3chat.link.bookmark.set_pinned";
+    pub const LINK_BOOKMARK_SET_ARCHIVED: &'static str = "a3chat.link.bookmark.set_archived";
+    pub const LINK_BOOKMARK_TOUCH_VISIT: &'static str = "a3chat.link.bookmark.touch_visit";
+    pub const LINK_BOOKMARK_TAGS: &'static str = "a3chat.link.bookmark.tags";
+    pub const LINK_BOOKMARK_FOLDERS: &'static str = "a3chat.link.bookmark.folders";
+    pub const LINK_BOOKMARK_COUNT: &'static str = "a3chat.link.bookmark.count";
+
     // SSE notification event names (emitted on `/rpc/stream`).
     // The frontend subscribes to these via EventSource.
     pub const NOTIFICATION_CHAT_MESSAGE_RECEIVED: &'static str = "a3chat.chat.message.received";
@@ -84,6 +108,7 @@ impl A3chatRpcMethod {
     pub const NOTIFICATION_CHAT_TYPING: &'static str = "a3chat.chat.typing";
     pub const NOTIFICATION_PRESENCE_CHANGED: &'static str = "a3chat.presence.changed";
     pub const NOTIFICATION_GROUP_MEMBER_JOINED: &'static str = "a3chat.group.member.joined";
+    pub const NOTIFICATION_GROUP_MEMBER_REMOVED: &'static str = "a3chat.group.member.removed";
     pub const NOTIFICATION_GROUP_INVITATION_RECEIVED: &'static str =
         "a3chat.group.invitation.received";
     pub const NOTIFICATION_CONTACT_REQUEST_RECEIVED: &'static str =
@@ -128,6 +153,12 @@ impl A3chatRpcMethod {
         Self::PROFILE_DEVICE_LIST,
         Self::PROFILE_DIGIT_GET,
         Self::PROFILE_AVATAR_SET,
+        Self::PROFILE_AVATAR_UPLOAD,
+        Self::PROFILE_AVATAR_GET,
+        Self::PROFILE_AVATAR_REMOVE,
+        Self::PROFILE_PUBLIC_KEY_LABEL,
+        Self::PROFILE_KIND_GET,
+        Self::PROFILE_KIND_SET,
         Self::MEDIA_UPLOAD_INIT,
         Self::MEDIA_UPLOAD_CHUNK,
         Self::MEDIA_UPLOAD_FINALIZE,
@@ -135,6 +166,19 @@ impl A3chatRpcMethod {
         Self::E2E_BUNDLE_EXPORT,
         Self::E2E_BUNDLE_IMPORT,
         Self::STREAM_SUBSCRIBE,
+        Self::LINK_BOOKMARK_ADD,
+        Self::LINK_BOOKMARK_UPDATE,
+        Self::LINK_BOOKMARK_GET,
+        Self::LINK_BOOKMARK_GET_BY_URL,
+        Self::LINK_BOOKMARK_LIST,
+        Self::LINK_BOOKMARK_SEARCH,
+        Self::LINK_BOOKMARK_DELETE,
+        Self::LINK_BOOKMARK_SET_PINNED,
+        Self::LINK_BOOKMARK_SET_ARCHIVED,
+        Self::LINK_BOOKMARK_TOUCH_VISIT,
+        Self::LINK_BOOKMARK_TAGS,
+        Self::LINK_BOOKMARK_FOLDERS,
+        Self::LINK_BOOKMARK_COUNT,
     ];
 }
 
@@ -194,7 +238,13 @@ mod tests {
     #[test]
     fn all_list_is_not_empty() {
         assert!(!A3chatRpcMethod::ALL.is_empty());
-        // Profile namespace adds 10 methods; bump floor to match.
-        assert!(A3chatRpcMethod::ALL.len() >= 35);
+        // Bump floor when adding a new namespace. As of F-08 the
+        // floor covers:
+        //  - chat / contact / group / sync / presence (~24)
+        //  - profile (~10)
+        //  - media / e2e / stream (~6)
+        //  - link bookmarks (~13)
+        // Total ≈ 58.
+        assert!(A3chatRpcMethod::ALL.len() >= 50);
     }
 }

@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let alice = mgr.create_user("alice", "Alice").await?;
         let bob = mgr.create_user("bob", "Bob").await?;
         let conv = mgr
-            .create_conversation(ChatType::OneOnOne, "alice<->bob")
+            .create_conversation(ChatType::OneOnOne, "alice<->bob", false)
             .await?;
         mgr.add_group_member(&conv.id, &alice.id, "member").await?;
         mgr.add_group_member(&conv.id, &bob.id, "member").await?;

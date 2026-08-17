@@ -221,7 +221,7 @@ fn rand_index(max: usize) -> usize {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    ((nanos as usize) % max)
+    nanos as usize % max
 }
 
 /// Bot 发送的消息事件

@@ -35,6 +35,19 @@ impl MemberRole {
             _ => return None,
         })
     }
+    /// Rank for permission comparisons. Higher rank = more authority.
+    /// DO-178C §6.1: no panics on parse errors — unknown strings return 0.
+    pub fn rank(self) -> u8 {
+        match self {
+            MemberRole::Owner => 2,
+            MemberRole::Admin => 1,
+            MemberRole::Member => 0,
+        }
+    }
+    /// Parse from a string and return rank. Used by hub bridge code.
+    pub fn rank_from_str(s: &str) -> i32 {
+        Self::parse(s).map(|r| r.rank() as i32).unwrap_or(0)
+    }
 }
 
 /// Full group record — what `chat.conversation.open` returns for a
