@@ -268,6 +268,272 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
                 "url": url,
             }),
         ),
+        // F-07: reaction toggled on a chat message.
+        A3chatEvent::ChatMessageReactionToggled {
+            user_id,
+            conversation_id,
+            message_id,
+            reactor_id,
+            reaction_type,
+            is_added,
+        } => (
+            "a3chat.chat.message.reaction.toggled",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "reactor_id": reactor_id,
+                "reaction_type": reaction_type,
+                "is_added": is_added,
+            }),
+        ),
+        // F-07: pinned-state change.
+        A3chatEvent::ConversationPinChanged {
+            user_id,
+            conversation_id,
+            pinned,
+        } => (
+            "a3chat.chat.conversation.pin.changed",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "pinned": pinned,
+            }),
+        ),
+        // F-07: notification settings change.
+        A3chatEvent::NotificationSettingsChanged {
+            user_id,
+            conversation_id,
+            global_dnd,
+        } => (
+            "a3chat.chat.notification.changed",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "global_dnd": global_dnd,
+            }),
+        ),
+        // F-07: device lifecycle.
+        A3chatEvent::DeviceRegistered { user_id, device_id } => (
+            "a3chat.device.registered",
+            serde_json::json!({
+                "user_id": user_id,
+                "device_id": device_id,
+            }),
+        ),
+        A3chatEvent::DeviceRevoked { user_id, device_id } => (
+            "a3chat.device.revoked",
+            serde_json::json!({
+                "user_id": user_id,
+                "device_id": device_id,
+            }),
+        ),
+        A3chatEvent::DevicePrimaryChanged { user_id, device_id } => (
+            "a3chat.device.primary.changed",
+            serde_json::json!({
+                "user_id": user_id,
+                "device_id": device_id,
+            }),
+        ),
+        // F-08 / B-24: group admin actions (announcement, dissolve,
+        // role changes). The payload is the same shape that
+        // `A3chatEvent::kind()` exposes — keeping these arms here
+        // guarantees the wire string matches `kind()`.
+        A3chatEvent::GroupAnnouncementChanged {
+            user_id,
+            conversation_id,
+            text,
+            actor_user_id,
+        } => (
+            "a3chat.group.announcement.changed",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "text": text,
+                "actor_user_id": actor_user_id,
+            }),
+        ),
+        A3chatEvent::GroupDissolved {
+            user_id,
+            conversation_id,
+            actor_user_id,
+            dissolved_at_unix,
+        } => (
+            "a3chat.group.dissolved",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "actor_user_id": actor_user_id,
+                "dissolved_at_unix": dissolved_at_unix,
+            }),
+        ),
+        A3chatEvent::GroupMemberRoleChanged {
+            user_id,
+            conversation_id,
+            member_user_id,
+            new_role,
+            actor_user_id,
+        } => (
+            "a3chat.group.member.role.changed",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "member_user_id": member_user_id,
+                "new_role": new_role,
+                "actor_user_id": actor_user_id,
+            }),
+        ),
+        A3chatEvent::GroupMuteChanged {
+            user_id,
+            conversation_id,
+            muted_user_id,
+            is_muted,
+            muted_until_unix,
+            actor_user_id,
+        } => (
+            "a3chat.group.mute.changed",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "muted_user_id": muted_user_id,
+                "is_muted": is_muted,
+                "muted_until_unix": muted_until_unix,
+                "actor_user_id": actor_user_id,
+            }),
+        ),
+        A3chatEvent::GroupMuteAllChanged {
+            user_id,
+            conversation_id,
+            is_muted,
+            actor_user_id,
+        } => (
+            "a3chat.group.mute.all.changed",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "is_muted": is_muted,
+                "actor_user_id": actor_user_id,
+            }),
+        ),
+        A3chatEvent::GroupNicknameChanged {
+            user_id,
+            conversation_id,
+            member_user_id,
+            nickname,
+            actor_user_id,
+        } => (
+            "a3chat.group.nickname.changed",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "member_user_id": member_user_id,
+                "nickname": nickname,
+                "actor_user_id": actor_user_id,
+            }),
+        ),
+        // Pairing (P2P device linking).
+        A3chatEvent::PairingInvitationCreated {
+            user_id,
+            issuer_node_id,
+            expires_at_unix,
+        } => (
+            "a3chat.pairing.invitation.created",
+            serde_json::json!({
+                "user_id": user_id,
+                "issuer_node_id": issuer_node_id,
+                "expires_at_unix": expires_at_unix,
+            }),
+        ),
+        A3chatEvent::PairingTrustedDeviceAdded {
+            user_id,
+            credential_id,
+            role,
+            device_name,
+        } => (
+            "a3chat.pairing.trusted.added",
+            serde_json::json!({
+                "user_id": user_id,
+                "credential_id": credential_id,
+                "role": role,
+                "device_name": device_name,
+            }),
+        ),
+        A3chatEvent::PairingTrustedDeviceRevoked {
+            user_id,
+            credential_id,
+        } => (
+            "a3chat.pairing.trusted.revoked",
+            serde_json::json!({
+                "user_id": user_id,
+                "credential_id": credential_id,
+            }),
+        ),
+        // F-07: contact roster changes (already documented in
+        // A3chatEvent::kind() but missing from the SSE dispatch
+        // here — explicit arms guarantee the original event
+        // names reach the client).
+        A3chatEvent::ContactAdded { contact_id } => (
+            "a3chat.contact.added",
+            serde_json::json!({ "contact_id": contact_id }),
+        ),
+        A3chatEvent::ContactRemoved { contact_id } => (
+            "a3chat.contact.removed",
+            serde_json::json!({ "contact_id": contact_id }),
+        ),
+        A3chatEvent::ContactUpdated { contact_id } => (
+            "a3chat.contact.updated",
+            serde_json::json!({ "contact_id": contact_id }),
+        ),
+        A3chatEvent::ContactBlocked { user_id } => (
+            "a3chat.contact.blocked",
+            serde_json::json!({ "user_id": user_id }),
+        ),
+        A3chatEvent::ContactUnblocked { user_id } => (
+            "a3chat.contact.unblocked",
+            serde_json::json!({ "user_id": user_id }),
+        ),
+        A3chatEvent::ContactFavoriteToggled {
+            contact_id,
+            is_favorite,
+        } => (
+            "a3chat.contact.favorite.toggled",
+            serde_json::json!({
+                "contact_id": contact_id,
+                "is_favorite": is_favorite,
+            }),
+        ),
+        A3chatEvent::ContactRequestAccepted {
+            request_id,
+            contact_id,
+        } => (
+            "a3chat.contact.request.accepted",
+            serde_json::json!({
+                "request_id": request_id,
+                "contact_id": contact_id,
+            }),
+        ),
+        // Forward-compatible catch-all for any *future* event variants
+        // that this dispatcher has not yet been taught about. Today
+        // every variant is enumerated explicitly above, so this arm
+        // is intentionally unreachable; the `#[allow]` keeps the
+        // dispatcher future-proof without re-introducing the
+        // non-exhaustive-match hazard that previously broke the
+        // build.
+        #[allow(unreachable_patterns)]
+        other => {
+            let payload = serde_json::to_value(&other).unwrap_or(serde_json::Value::Null);
+            // The catch-all leaks a heap-allocated String, but the
+            // String lives only for the lifetime of `event`; we
+            // therefore leak the box so the `(kind, payload)`
+            // tuple can stay `(&'static str, _)`. Leaking is
+            // appropriate here because the event name is fully
+            // determined by the (statically-known) variant name.
+            let kind: &'static str = Box::leak(format!(
+                "a3chat.event.{}",
+                event_variant_name(&other)
+            ).into_boxed_str());
+            (kind, payload)
+        }
     };
     let envelope = serde_json::json!({
         "jsonrpc": "2.0",
@@ -290,6 +556,56 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
         }
     };
     format!("event: {kind}\ndata: {json_str}\n\n")
+}
+
+/// Return the snake_case variant name of an `A3chatEvent`. Used by
+/// the forward-compatible catch-all in [`event_to_sse`] so that new
+/// event variants surface over SSE without requiring a code change
+/// in this dispatcher.
+fn event_variant_name(event: &a3chat_core::event::A3chatEvent) -> &'static str {
+    use a3chat_core::event::A3chatEvent;
+    match event {
+        A3chatEvent::ChatMessageReceived { .. } => "chat_message_received",
+        A3chatEvent::ChatMessageRecalled { .. } => "chat_message_recalled",
+        A3chatEvent::ChatMessageRead { .. } => "chat_message_read",
+        A3chatEvent::ChatMessageEdited { .. } => "chat_message_edited",
+        A3chatEvent::ChatMessageDeleted { .. } => "chat_message_deleted",
+        A3chatEvent::ChatTyping { .. } => "chat_typing",
+        A3chatEvent::ChatMessageReactionToggled { .. } => "chat_message_reaction_toggled",
+        A3chatEvent::PresenceChanged { .. } => "presence_changed",
+        A3chatEvent::GroupMemberJoined { .. } => "group_member_joined",
+        A3chatEvent::GroupMemberRemoved { .. } => "group_member_removed",
+        A3chatEvent::GroupInvitationReceived { .. } => "group_invitation_received",
+        A3chatEvent::ContactRequestReceived { .. } => "contact_request_received",
+        A3chatEvent::ContactAdded { .. } => "contact_added",
+        A3chatEvent::ContactRemoved { .. } => "contact_removed",
+        A3chatEvent::ContactUpdated { .. } => "contact_updated",
+        A3chatEvent::ContactBlocked { .. } => "contact_blocked",
+        A3chatEvent::ContactUnblocked { .. } => "contact_unblocked",
+        A3chatEvent::ContactFavoriteToggled { .. } => "contact_favorite_toggled",
+        A3chatEvent::ContactRequestAccepted { .. } => "contact_request_accepted",
+        A3chatEvent::ConversationPinChanged { .. } => "conversation_pin_changed",
+        A3chatEvent::MomentsPostCreated { .. } => "moments_post_created",
+        A3chatEvent::MomentsPostDeleted { .. } => "moments_post_deleted",
+        A3chatEvent::MomentsCommentAdded { .. } => "moments_comment_added",
+        A3chatEvent::MomentsReactionToggled { .. } => "moments_reaction_toggled",
+        A3chatEvent::LinkBookmarkAdded { .. } => "link_bookmark_added",
+        A3chatEvent::LinkBookmarkUpdated { .. } => "link_bookmark_updated",
+        A3chatEvent::LinkBookmarkDeleted { .. } => "link_bookmark_deleted",
+        A3chatEvent::NotificationSettingsChanged { .. } => "notification_settings_changed",
+        A3chatEvent::DeviceRegistered { .. } => "device_registered",
+        A3chatEvent::DeviceRevoked { .. } => "device_revoked",
+        A3chatEvent::DevicePrimaryChanged { .. } => "device_primary_changed",
+        A3chatEvent::GroupAnnouncementChanged { .. } => "group_announcement_changed",
+        A3chatEvent::GroupDissolved { .. } => "group_dissolved",
+        A3chatEvent::GroupMemberRoleChanged { .. } => "group_member_role_changed",
+        A3chatEvent::GroupMuteChanged { .. } => "group_mute_changed",
+        A3chatEvent::GroupMuteAllChanged { .. } => "group_mute_all_changed",
+        A3chatEvent::GroupNicknameChanged { .. } => "group_nickname_changed",
+        A3chatEvent::PairingInvitationCreated { .. } => "pairing_invitation_created",
+        A3chatEvent::PairingTrustedDeviceAdded { .. } => "pairing_trusted_added",
+        A3chatEvent::PairingTrustedDeviceRevoked { .. } => "pairing_trusted_revoked",
+    }
 }
 
 fn owner_from_headers(headers: &HeaderMap) -> Result<UserId, RpcError> {
@@ -822,5 +1138,111 @@ mod tests {
         let _ = MessageBody::Plain {
             content: "x".into(),
         };
+    }
+
+    // ── P3 wired events — every newly-onboarded service must
+    // serialize over SSE so multi-device clients see the event. ──
+
+    #[test]
+    fn reaction_toggled_event_serializes() {
+        let evt = A3chatEvent::ChatMessageReactionToggled {
+            user_id: UserId::from("alice"),
+            conversation_id: ConversationId::from("dm:a:b"),
+            message_id: a3chat_core::id::MessageId::from("m1"),
+            reactor_id: UserId::from("bob"),
+            reaction_type: "thumbsup".into(),
+            is_added: false,
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.chat.message.reaction.toggled"));
+        assert!(s.contains("\"reactor_id\":\"bob\""));
+        assert!(s.contains("\"is_added\":false"));
+    }
+
+    #[test]
+    fn conversation_pin_changed_event_serializes() {
+        let evt = A3chatEvent::ConversationPinChanged {
+            user_id: UserId::from("alice"),
+            conversation_id: ConversationId::from("dm:a:b"),
+            pinned: true,
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.chat.conversation.pin.changed"));
+        assert!(s.contains("\"pinned\":true"));
+    }
+
+    #[test]
+    fn notification_settings_changed_event_serializes() {
+        let evt = A3chatEvent::NotificationSettingsChanged {
+            user_id: UserId::from("alice"),
+            conversation_id: Some(ConversationId::from("dm:a:b")),
+            global_dnd: None,
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.chat.notification.changed"));
+        assert!(s.contains("\"conversation_id\":\"dm:a:b\""));
+    }
+
+    #[test]
+    fn device_registered_event_serializes() {
+        let evt = A3chatEvent::DeviceRegistered {
+            user_id: UserId::from("alice"),
+            device_id: "dev-1".into(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.device.registered"));
+        assert!(s.contains("\"device_id\":\"dev-1\""));
+    }
+
+    #[test]
+    fn device_revoked_event_serializes() {
+        let evt = A3chatEvent::DeviceRevoked {
+            user_id: UserId::from("alice"),
+            device_id: "dev-1".into(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.device.revoked"));
+    }
+
+    #[test]
+    fn device_primary_changed_event_serializes() {
+        let evt = A3chatEvent::DevicePrimaryChanged {
+            user_id: UserId::from("alice"),
+            device_id: "dev-2".into(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.device.primary.changed"));
+        assert!(s.contains("\"device_id\":\"dev-2\""));
+    }
+
+    #[test]
+    fn chat_message_edited_event_serializes() {
+        let evt = A3chatEvent::ChatMessageEdited {
+            user_id: UserId::from("alice"),
+            conversation_id: ConversationId::from("dm:a:b"),
+            message: ChatMessage::new_system(
+                ConversationId::from("dm:a:b"),
+                UserId::from("server"),
+                "edit",
+                1,
+                1,
+            )
+            .unwrap(),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.chat.message.edited"));
+        assert!(s.contains("\"message\""));
+    }
+
+    #[test]
+    fn chat_message_deleted_event_serializes() {
+        let evt = A3chatEvent::ChatMessageDeleted {
+            user_id: UserId::from("alice"),
+            conversation_id: ConversationId::from("dm:a:b"),
+            message_id: a3chat_core::id::MessageId::from("m1"),
+        };
+        let s = event_to_sse(evt);
+        assert!(s.contains("a3chat.chat.message.deleted"));
+        assert!(s.contains("\"message_id\":\"m1\""));
     }
 }
