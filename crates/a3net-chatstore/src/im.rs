@@ -512,6 +512,69 @@ impl ImManager {
         Ok(())
     }
 
+    /// Set or clear the group title. Empty string clears it.
+    /// Audit issue #6: this method was missing — callers like
+    /// `a3chat-app::GroupService::update_metadata` had no way to
+    /// propagate name changes through the hub. Validates the title
+    /// length (≤ 256 chars, matching `MAX_NAME_LEN`).
+    pub async fn set_group_title(
+        &self,
+        conversation_id: &str,
+        title: &str,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        if title.len() > 256 {
+            return Err(ChatStoreError::Validation(format!(
+                "group title length {} exceeds 256 chars",
+                title.len()
+            )));
+        }
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE conversations
+             SET title = ?1, updated_at = ?2
+             WHERE id = ?3 AND chat_type = 'group'",
+            params![title, now.to_rfc3339(), conversation_id],
+        )?;
+        if n == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "group conversation {conversation_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Set or clear the group description. Empty string clears it.
+    /// Audit issue #6: paired with [`set_group_title`].
+    pub async fn set_group_description(
+        &self,
+        conversation_id: &str,
+        description: &str,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        if description.len() > 1024 {
+            return Err(ChatStoreError::Validation(format!(
+                "group description length {} exceeds 1024 chars",
+                description.len()
+            )));
+        }
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE conversations
+             SET description = ?1, updated_at = ?2
+             WHERE id = ?3 AND chat_type = 'group'",
+            params![description, now.to_rfc3339(), conversation_id],
+        )?;
+        if n == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "group conversation {conversation_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
     /// All conversations visible to `user_id` (every 1-to-1 chat
     /// plus every group the user is a member of).
     pub async fn list_user_conversations(&self, user_id: &str) -> Result<Vec<Conversation>> {
