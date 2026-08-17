@@ -85,6 +85,62 @@ impl ChatService {
         self.storage.open_conversation(owner, conversation_id).await
     }
 
+    /// `a3chat.chat.message.list` — messages for `conversation_id`.
+    ///
+    /// Phase 5c: when `iroh_docs_chat` is attached, this merges
+    /// messages from SQLite (source of truth for local state) with
+    /// messages from iroh-docs (remote peers' writes not yet synced
+    /// to our SQLite). The merge is by `(sender_id, sequence)`:
+    /// SQLite rows are kept, iroh rows fill gaps from senders we
+    /// haven't synced yet. The result is sorted by sequence ascending.
+    ///
+    /// If the iroh fetch fails, SQLite results are returned unchanged
+    /// (best-effort — we do not fail the RPC on iroh unavailability).
+    pub async fn list_messages(
+        &self,
+        owner: &UserId,
+        conversation_id: &ConversationId,
+        limit: u32,
+    ) -> AppResult<Vec<ChatMessage>> {
+        // Primary: authoritative SQLite read.
+        let mut sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
+
+        #[cfg(feature = "iroh")]
+        if let Some(docs_chat) = self.iroh_docs_chat.read().await.as_ref() {
+            let conv_id = conversation_id.as_str();
+            // Take the max sequence we already have from SQLite as the
+            // cursor — iroh returns only newer messages from that point.
+            let after_seq = sqlite_msgs.last().map(|m| m.sequence);
+            let limit_usize = limit as usize;
+            match docs_chat.get_messages(conv_id, after_seq, limit_usize).await {
+                Ok(iroh_msgs) => {
+                    let converted: Vec<ChatMessage> = iroh_msgs
+                        .into_iter()
+                        .filter_map(|m| crate::storage::iroh_message_to_chat_message(m, conversation_id))
+                        .collect();
+                    // Merge: deduplicate by (sender_id, sequence), preferring SQLite rows.
+                    // SQLite is authoritative for all locally-written messages; iroh rows
+                    // are only merged in for remote peers not yet synced to SQLite.
+                    let sqlite_keys: std::collections::HashSet<_> = sqlite_msgs
+                        .iter()
+                        .map(|m| (m.sender_id.as_str().to_string(), m.sequence))
+                        .collect();
+                    let new_from_iroh: Vec<ChatMessage> = converted
+                        .into_iter()
+                        .filter(|m| !sqlite_keys.contains(&(m.sender_id.as_str().to_string(), m.sequence)))
+                        .collect();
+                    sqlite_msgs.extend(new_from_iroh);
+                    sqlite_msgs.sort_by_key(|m| m.sequence);
+                }
+                Err(e) => {
+                    tracing::warn!(conv = %conv_id, "iroh-docs list_messages failed: {e}");
+                }
+            }
+        }
+
+        Ok(sqlite_msgs)
+    }
+
     /// `a3chat.chat.message.send` — save the envelope + emit a
     /// `chat.message.received` notification to the bus.
     pub async fn send_message(

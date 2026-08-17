@@ -1597,6 +1597,57 @@ pub(crate) fn im_message_from_chat_message(stored: &StoredMessage) -> a3net_chat
     }
 }
 
+/// Phase 5c reverse adapter: convert an `im::Message` from iroh-docs
+/// back into a domain `ChatMessage`.
+///
+/// This is the inverse of `im_message_from_chat_message`. Like that
+/// function, this is lossy — SQLite-only fields (attachments, read_at,
+/// edited_at, recalled_at) are set to their empty/absent defaults.
+///
+/// Returns `None` if the JSON body in the iroh message cannot be
+/// parsed as a `MessageBody` (corrupt remote entry). The caller
+/// filters these out, matching the DO-178C non-fatal error handling
+/// philosophy used throughout the iroh-docs bridge.
+#[cfg(feature = "iroh")]
+pub(crate) fn iroh_message_to_chat_message(
+    msg: a3net_chatstore::Message,
+    conversation_id: &ConversationId,
+) -> Option<ChatMessage> {
+    let body: MessageBody = serde_json::from_str(&msg.content).ok()?;
+        let receiver_id = msg
+            .receiver_id
+            .as_ref()
+            .map(|s| UserId::from(s.as_str()))
+            .unwrap_or_else(|| UserId::from(""));
+        // Re-derive MessageType from the body variant since iroh only
+        // stores the body JSON (not the original MessageType string).
+        // Encrypted bodies are indistinguishable from File/Text at this
+        // layer — the receiver decrypts first and then re-classifies.
+        let message_type = match &body {
+            MessageBody::Plain { .. } => MessageType::Text,
+            MessageBody::Encrypted { .. } => MessageType::Text,
+        };
+    Some(ChatMessage {
+        message_id: MessageId::from(msg.id.as_str()),
+        conversation_id: conversation_id.clone(),
+        sender_id: UserId::from(msg.sender_id.as_str()),
+        receiver_id,
+        message_type,
+        body,
+        attachments: vec![],
+        reply_to: msg.reply_to.as_ref().map(|s| MessageId::from(s.as_str())),
+        sequence: msg.sequence.unwrap_or(0),
+        timestamp: msg.timestamp.timestamp(),
+        read_at: None,
+        is_edited: msg.is_edited,
+        edited_at: msg.edited_at.as_ref().and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&chrono::Utc))
+        }),
+        integrity_hash: msg.integrity_hash,
+        recalled_at: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
