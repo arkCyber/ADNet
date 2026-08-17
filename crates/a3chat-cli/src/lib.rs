@@ -32,6 +32,7 @@ pub mod audit_report;
 pub mod cmd;
 pub mod config;
 pub mod error;
+pub mod lockfile;
 pub mod output;
 pub mod rpc_client;
 

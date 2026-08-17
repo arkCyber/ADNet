@@ -13,6 +13,11 @@ workspace = true
 # Workspace members --------------------------------------------------------
 a3net-types       = { workspace = true }
 a3net-reputation  = { workspace = true }
+a3chat-core        = { workspace = true }
+# `LinkBookmark` (and its related types / validation helpers) live in
+# `a3chat-core` so the same record is reused at every layer. The
+# storage crate re-exports the type verbatim; only the SQLite row
+# mapper is local.
 
 # Async runtime / utilities -----------------------------------------------
 tokio       = { workspace = true }
@@ -65,7 +70,15 @@ iroh-gossip = { version = "=0.101.0", default-features = false, features = ["net
 iroh-docs = { version = "=0.101.0", default-features = false }
 
 [features]
-default = []
+# iroh-docs backed message sync is ON by default. Phase 5a:
+# replaces the messages-table sync path with an `iroh-docs::Doc` per
+# conversation. Friendships, group membership, user accounts,
+# pending messages, and read receipts continue to use SQLite.
+#
+# Disable for slim builds: `cargo build -p a3net-chatstore
+# --no-default-features`. The chatstore lib keeps compiling when
+# the feature is off, it just doesn't export `docs_bridge`.
+default = ["iroh"]
 # Phase 5a: replace messages-table sync with iroh-docs::Doc.
 iroh = [
     "dep:iroh-docs",
