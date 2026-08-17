@@ -25,7 +25,8 @@ pub const MAX_MENTIONS: usize = 64;
 pub const MAX_PREVIEW_LEN: usize = 256;
 
 /// Validate that `name` is non-empty, ≤ [`MAX_NAME_LEN`], and contains
-/// no control characters.
+/// no control characters or visually-ambiguous unicode (zero-width
+/// / RTL-override / BOM).
 pub fn validate_name(field: &str, name: &str) -> Result<(), A3chatError> {
     if name.is_empty() {
         return Err(A3chatError::InvalidInput(format!("{field}: empty name")));
@@ -36,15 +37,17 @@ pub fn validate_name(field: &str, name: &str) -> Result<(), A3chatError> {
             name.len()
         )));
     }
-    if name.chars().any(|c| c.is_control()) {
+    if let Some(c) = name.chars().find(|c| is_dangerous_char(*c)) {
         return Err(A3chatError::InvalidInput(format!(
-            "{field}: contains control characters"
+            "{field}: contains forbidden character (U+{:04X})",
+            u32::from(c)
         )));
     }
     Ok(())
 }
 
-/// Validate message content — non-empty, ≤ [`MAX_CONTENT_LEN`].
+/// Validate message content — non-empty, ≤ [`MAX_CONTENT_LEN`], and
+/// free of `is_dangerous_char` codepoints.
 pub fn validate_content(field: &str, content: &str) -> Result<(), A3chatError> {
     if content.is_empty() {
         return Err(A3chatError::InvalidInput(format!("{field}: empty content")));
@@ -55,7 +58,38 @@ pub fn validate_content(field: &str, content: &str) -> Result<(), A3chatError> {
             content.len()
         )));
     }
+    if let Some(c) = content.chars().find(|c| is_dangerous_char(*c)) {
+        return Err(A3chatError::InvalidInput(format!(
+            "{field}: contains forbidden character (U+{:04X})",
+            u32::from(c)
+        )));
+    }
     Ok(())
+}
+
+/// Audit issue #12: classify a character as "dangerous" for chat
+/// purposes. The set covers:
+///
+/// - **C0 control chars** (U+0000..=U+001F) — non-printable, can
+///   break terminals and inject log noise.
+/// - **DEL** (U+007F) — also a control char, often used to
+///   obscure filenames.
+/// - **Zero-width / joiner characters** (U+200B, U+200C, U+200D,
+///   U+FEFF) — invisible but legal, allowing two semantically
+///   different names to look identical in the UI.
+/// - **Bidirectional-override codepoints** (U+202A..=U+202E,
+///   U+2066..=U+2069) — used to spoof file extensions
+///   (`"<U+202E>txt.exe"` displays as `exe.txt`).
+/// - **Word-joiner / Mongolian variation separator** (U+2060,
+///   U+180E) — also invisible.
+fn is_dangerous_char(c: char) -> bool {
+    let cp = u32::from(c);
+    matches!(cp, 0x0000..=0x001F)
+        || cp == 0x007F
+        || matches!(cp, 0x200B | 0x200C | 0x200D | 0xFEFF)
+        || matches!(cp, 0x202A..=0x202E)
+        || matches!(cp, 0x2060 | 0x2066..=0x2069)
+        || cp == 0x180E
 }
 
 /// Validate that `earlier <= later`. Both inputs are RFC3339 strings
@@ -162,6 +196,37 @@ mod tests {
         assert!(validate_content("c", "").is_err());
         let huge = "x".repeat(MAX_CONTENT_LEN + 1);
         assert!(validate_content("c", &huge).is_err());
+    }
+
+    // Audit issue #12: zero-width, RTL-override, and BOM chars
+    // must be rejected in both names and content so that
+    // visually-spoofed strings (e.g. "exe.txt\u{202E}\u{202D}.exe")
+    // cannot be stored.
+    #[test]
+    fn content_validator_rejects_zero_width_and_rtl_chars() {
+        let zero_width_space = "hello\u{200B}world";
+        assert!(validate_content("c", zero_width_space).is_err());
+        let rtl_override = "fake.exe\u{202E}txt.exe";
+        assert!(validate_content("c", rtl_override).is_err());
+        let bom = "\u{FEFF}leading-bom";
+        assert!(validate_content("c", bom).is_err());
+        let word_joiner = "ab\u{2060}cd";
+        assert!(validate_content("c", word_joiner).is_err());
+    }
+
+    #[test]
+    fn name_validator_rejects_zero_width_chars() {
+        let spoof = "Alice\u{200B}Imposter";
+        assert!(validate_name("n", spoof).is_err());
+    }
+
+    #[test]
+    fn content_validator_accepts_normal_unicode() {
+        // Real non-ASCII non-dangerous characters (CJK, emoji, etc.)
+        // must still pass.
+        assert!(validate_content("c", "你好世界").is_ok());
+        assert!(validate_content("c", "🇨🇳沿海城市").is_ok());
+        assert!(validate_content("c", "café").is_ok());
     }
 
     #[test]

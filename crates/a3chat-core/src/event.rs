@@ -7,6 +7,7 @@ use crate::group::{GroupInvitation, GroupMember};
 use crate::id::{ConversationId, MessageId, UserId};
 use crate::link_bookmark::LinkBookmark;
 use crate::message::ChatMessage;
+use crate::notification_settings::DndSettings;
 use crate::presence::{PresenceEvent, PresenceStatus};
 
 /// Notification kind tag — clients subscribe to one or more kinds
@@ -15,6 +16,13 @@ pub const NOTIFICATION_KIND_CHAT: &str = "chat.message.received";
 pub const NOTIFICATION_KIND_PRESENCE: &str = "presence.changed";
 pub const NOTIFICATION_KIND_TYPING: &str = "chat.typing";
 pub const NOTIFICATION_KIND_CONTACT: &str = "contact.request.received";
+pub const NOTIFICATION_KIND_CONTACT_ADDED: &str = "contact.added";
+pub const NOTIFICATION_KIND_CONTACT_REMOVED: &str = "contact.removed";
+pub const NOTIFICATION_KIND_CONTACT_UPDATED: &str = "contact.updated";
+pub const NOTIFICATION_KIND_CONTACT_BLOCKED: &str = "contact.blocked";
+pub const NOTIFICATION_KIND_CONTACT_UNBLOCKED: &str = "contact.unblocked";
+pub const NOTIFICATION_KIND_CONTACT_FAVORITE_TOGGLED: &str = "contact.favorite.toggled";
+pub const NOTIFICATION_KIND_CONTACT_REQUEST_ACCEPTED: &str = "contact.request.accepted";
 pub const NOTIFICATION_KIND_GROUP: &str = "group.member.joined";
 pub const NOTIFICATION_KIND_GROUP_MEMBER_REMOVED: &str = "group.member.removed";
 pub const NOTIFICATION_KIND_MESSAGE_RECALLED: &str = "chat.message.recalled";
@@ -25,6 +33,24 @@ pub const NOTIFICATION_KIND_GROUP_INVITATION: &str = "group.invitation.received"
 pub const NOTIFICATION_KIND_LINK_BOOKMARK_ADDED: &str = "link.bookmark.added";
 pub const NOTIFICATION_KIND_LINK_BOOKMARK_UPDATED: &str = "link.bookmark.updated";
 pub const NOTIFICATION_KIND_LINK_BOOKMARK_DELETED: &str = "link.bookmark.deleted";
+
+// Forward / Pin / Notification / Device events
+pub const NOTIFICATION_KIND_CONVERSATION_PIN_CHANGED: &str = "conversation.pin.changed";
+pub const NOTIFICATION_KIND_NOTIFICATION_SETTINGS_CHANGED: &str = "notification.settings.changed";
+pub const NOTIFICATION_KIND_MESSAGE_FORWARDED: &str = "chat.message.forwarded";
+pub const NOTIFICATION_KIND_DEVICE_REGISTERED: &str = "device.registered";
+pub const NOTIFICATION_KIND_DEVICE_REVOKED: &str = "device.revoked";
+pub const NOTIFICATION_KIND_DEVICE_PRIMARY_CHANGED: &str = "device.primary.changed";
+pub const NOTIFICATION_KIND_GROUP_ANNOUNCEMENT_CHANGED: &str = "group.announcement.changed";
+pub const NOTIFICATION_KIND_GROUP_DISSOLVED: &str = "group.dissolved";
+pub const NOTIFICATION_KIND_GROUP_ROLE_CHANGED: &str = "group.member.role.changed";
+pub const NOTIFICATION_KIND_GROUP_MUTE_CHANGED: &str = "group.mute.changed";
+pub const NOTIFICATION_KIND_GROUP_NICKNAME_CHANGED: &str = "group.nickname.changed";
+
+// Pairing (P2P device linking)
+pub const NOTIFICATION_KIND_PAIRING_INVITATION_CREATED: &str = "pairing.invitation.created";
+pub const NOTIFICATION_KIND_PAIRING_TRUSTED_ADDED: &str = "pairing.trusted.added";
+pub const NOTIFICATION_KIND_PAIRING_TRUSTED_REVOKED: &str = "pairing.trusted.revoked";
 
 // Moments / 朋友圈 (F-05). The `kind` strings are what SSE subscribers
 // match against when deciding to refresh their timeline; keeping them
@@ -62,6 +88,27 @@ pub enum A3chatEvent {
 
     /// A friend request was received.
     ContactRequestReceived { request_id: String },
+
+    /// A contact was added to the roster.
+    ContactAdded { contact_id: String },
+
+    /// A contact was removed from the roster.
+    ContactRemoved { contact_id: String },
+
+    /// A contact was updated (name, notes, tags, etc.).
+    ContactUpdated { contact_id: String },
+
+    /// A contact was blocked.
+    ContactBlocked { user_id: UserId },
+
+    /// A contact was unblocked.
+    ContactUnblocked { user_id: UserId },
+
+    /// A contact's favorite status was toggled.
+    ContactFavoriteToggled { contact_id: String, is_favorite: bool },
+
+    /// A friend request was accepted and a contact was created.
+    ContactRequestAccepted { request_id: String, contact_id: String },
 
     /// Group membership changed.
     GroupMemberJoined {
@@ -175,6 +222,142 @@ pub enum A3chatEvent {
         reaction_type: String,
         is_added: bool,
     },
+
+    /// A reaction was added or removed from a chat message.
+    ChatMessageReactionToggled {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        reactor_id: UserId,
+        reaction_type: String,
+        is_added: bool,
+    },
+
+    /// A conversation's pinned state changed.
+    ConversationPinChanged {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        pinned: bool,
+    },
+
+    /// Notification settings changed (global DND or per-conversation).
+    NotificationSettingsChanged {
+        user_id: UserId,
+        conversation_id: Option<ConversationId>,
+        global_dnd: Option<DndSettings>,
+    },
+
+    /// A new device was registered.
+    DeviceRegistered {
+        user_id: UserId,
+        device_id: String,
+    },
+
+    /// A device was revoked.
+    DeviceRevoked {
+        user_id: UserId,
+        device_id: String,
+    },
+
+    /// A device was promoted to or demoted from primary.
+    DevicePrimaryChanged {
+        user_id: UserId,
+        device_id: String,
+    },
+
+    /// A group's pinned announcement was created, updated, or cleared.
+    /// Emitted by the group service so SSE subscribers refresh the
+    /// banner.
+    GroupAnnouncementChanged {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        /// `None` clears the announcement (an empty-string write is
+        /// the canonical "clear" signal).
+        text: Option<String>,
+        actor_user_id: UserId,
+    },
+
+    /// A group was permanently dissolved by its owner. Members
+    /// listening on SSE should drop the conversation from their UI.
+    GroupDissolved {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        actor_user_id: UserId,
+        dissolved_at_unix: i64,
+    },
+
+    /// A member's role within a group was changed (e.g. promoted
+    /// to admin). The role string mirrors the canonical
+    /// [`crate::group::MemberRole::as_str`] values.
+    GroupMemberRoleChanged {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        member_user_id: UserId,
+        new_role: String,
+        actor_user_id: UserId,
+    },
+
+    /// Per-member mute state changed inside a group. `is_muted =
+    /// false` means the mute was lifted.
+    GroupMuteChanged {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        muted_user_id: UserId,
+        is_muted: bool,
+        /// Unix seconds at which the mute auto-lifts. `None` means
+        /// "indefinite / until manually cleared".
+        muted_until_unix: Option<i64>,
+        actor_user_id: UserId,
+    },
+
+    /// The whole group was muted (`is_muted = true`) or un-muted.
+    GroupMuteAllChanged {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        is_muted: bool,
+        actor_user_id: UserId,
+    },
+
+    /// A member's per-group nickname was set or updated. `None`
+    /// clears the override.
+    GroupNicknameChanged {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        member_user_id: UserId,
+        nickname: Option<String>,
+        actor_user_id: UserId,
+    },
+
+    /// A pairing invitation was created locally and signed by the
+    /// issuer's wallet. SSE subscribers should surface it to the
+    /// user (e.g. show a QR code) so the invitee can scan it.
+    PairingInvitationCreated {
+        user_id: UserId,
+        issuer_node_id: String,
+        expires_at_unix: i64,
+    },
+
+    /// A trusted-device record was added to the local store. This
+    /// fires on both `issuer` and `invitee` sides of a pairing so
+    /// that UIs can refresh their device list without polling.
+    PairingTrustedDeviceAdded {
+        user_id: UserId,
+        credential_id: String,
+        /// Either `"issuer"` or `"invitee"`.
+        role: String,
+        device_name: String,
+    },
+
+    /// A trusted-device record was revoked. SSE subscribers should
+    /// remove the device from any UI lists and immediately drop any
+    /// cached Noise sessions associated with the revoked
+    /// credential_id (the next handshake will fail anyway, but a
+    /// clean drop avoids confusing "I sent a message that bounced"
+    /// behaviour in the UI).
+    PairingTrustedDeviceRevoked {
+        user_id: UserId,
+        credential_id: String,
+    },
 }
 
 impl A3chatEvent {
@@ -184,6 +367,13 @@ impl A3chatEvent {
             A3chatEvent::PresenceChanged { .. } => NOTIFICATION_KIND_PRESENCE,
             A3chatEvent::ChatTyping { .. } => NOTIFICATION_KIND_TYPING,
             A3chatEvent::ContactRequestReceived { .. } => NOTIFICATION_KIND_CONTACT,
+            A3chatEvent::ContactAdded { .. } => NOTIFICATION_KIND_CONTACT_ADDED,
+            A3chatEvent::ContactRemoved { .. } => NOTIFICATION_KIND_CONTACT_REMOVED,
+            A3chatEvent::ContactUpdated { .. } => NOTIFICATION_KIND_CONTACT_UPDATED,
+            A3chatEvent::ContactBlocked { .. } => NOTIFICATION_KIND_CONTACT_BLOCKED,
+            A3chatEvent::ContactUnblocked { .. } => NOTIFICATION_KIND_CONTACT_UNBLOCKED,
+            A3chatEvent::ContactFavoriteToggled { .. } => NOTIFICATION_KIND_CONTACT_FAVORITE_TOGGLED,
+            A3chatEvent::ContactRequestAccepted { .. } => NOTIFICATION_KIND_CONTACT_REQUEST_ACCEPTED,
             A3chatEvent::GroupMemberJoined { .. } => NOTIFICATION_KIND_GROUP,
             A3chatEvent::GroupMemberRemoved { .. } => NOTIFICATION_KIND_GROUP_MEMBER_REMOVED,
             A3chatEvent::ChatMessageRecalled { .. } => NOTIFICATION_KIND_MESSAGE_RECALLED,
@@ -198,6 +388,21 @@ impl A3chatEvent {
             A3chatEvent::MomentsPostDeleted { .. } => NOTIFICATION_KIND_MOMENTS_POST_DELETED,
             A3chatEvent::MomentsCommentAdded { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_ADDED,
             A3chatEvent::MomentsReactionToggled { .. } => NOTIFICATION_KIND_MOMENTS_REACTION_TOGGLED,
+            A3chatEvent::ChatMessageReactionToggled { .. } => "chat.message.reaction.toggled",
+            A3chatEvent::ConversationPinChanged { .. } => NOTIFICATION_KIND_CONVERSATION_PIN_CHANGED,
+            A3chatEvent::NotificationSettingsChanged { .. } => NOTIFICATION_KIND_NOTIFICATION_SETTINGS_CHANGED,
+            A3chatEvent::DeviceRegistered { .. } => NOTIFICATION_KIND_DEVICE_REGISTERED,
+            A3chatEvent::DeviceRevoked { .. } => NOTIFICATION_KIND_DEVICE_REVOKED,
+            A3chatEvent::DevicePrimaryChanged { .. } => NOTIFICATION_KIND_DEVICE_PRIMARY_CHANGED,
+            A3chatEvent::GroupAnnouncementChanged { .. } => NOTIFICATION_KIND_GROUP_ANNOUNCEMENT_CHANGED,
+            A3chatEvent::GroupDissolved { .. } => NOTIFICATION_KIND_GROUP_DISSOLVED,
+            A3chatEvent::GroupMemberRoleChanged { .. } => NOTIFICATION_KIND_GROUP_ROLE_CHANGED,
+            A3chatEvent::GroupMuteChanged { .. } => NOTIFICATION_KIND_GROUP_MUTE_CHANGED,
+            A3chatEvent::GroupMuteAllChanged { .. } => NOTIFICATION_KIND_GROUP_MUTE_CHANGED,
+            A3chatEvent::GroupNicknameChanged { .. } => NOTIFICATION_KIND_GROUP_NICKNAME_CHANGED,
+            A3chatEvent::PairingInvitationCreated { .. } => NOTIFICATION_KIND_PAIRING_INVITATION_CREATED,
+            A3chatEvent::PairingTrustedDeviceAdded { .. } => NOTIFICATION_KIND_PAIRING_TRUSTED_ADDED,
+            A3chatEvent::PairingTrustedDeviceRevoked { .. } => NOTIFICATION_KIND_PAIRING_TRUSTED_REVOKED,
         }
     }
 

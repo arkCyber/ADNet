@@ -29,6 +29,7 @@ pub mod group;
 pub mod id;
 pub mod link_bookmark;
 pub mod message;
+pub mod notification_settings;
 pub mod presence;
 pub mod rpc;
 pub mod schema;
@@ -55,9 +56,10 @@ pub use link_bookmark::{
     MAX_TAGS_PER_BOOKMARK, MAX_TITLE_LEN, UpsertLinkBookmarkRequest, compute_bookmark_id,
     normalize_tag, normalize_tags, validate_folder,
 };
+pub use notification_settings::DndSettings;
 pub use message::{
     Attachment, AttachmentKind, ChatMessage, MAX_PREVIEW_LEN, MessageBody, MessageEnvelope,
-    MessageType, truncate_preview,
+    MessageReaction, MessageType, ReactionType, truncate_preview,
 };
 pub use presence::{Presence, PresenceEvent, PresenceStatus};
 pub use rpc::{A3chatRpcMethod, RpcClient};

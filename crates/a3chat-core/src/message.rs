@@ -37,8 +37,14 @@ pub fn truncate_preview(s: &str, max: usize) -> String {
     out
 }
 
-/// Maximum per-sender sequence number. Matches `a3net_types::group_chat::MAX_SEQUENCE`.
-pub const MAX_SEQUENCE: u32 = 9999;
+/// Maximum per-sender sequence number. Matches
+/// `a3net_types::group_chat::MAX_SEQUENCE` (currently 9999).
+/// Audit issue #20 considered raising this — see
+/// `docs/AUDIT_A3CHAT_VS_WECHAT.md` for the rationale but the
+/// constants must stay in sync because the storage layer and the
+/// hub share them at the wire boundary. Future work will lift
+/// both simultaneously.
+pub const MAX_SEQUENCE: u32 = 9_999;
 
 /// Wire shape of a single message body. `Plain` is used for
 /// self-notifications / system messages; `Encrypted` is the default
@@ -191,6 +197,76 @@ impl Attachment {
             )));
         }
         Ok(())
+    }
+}
+
+// ============================================================================
+// Message Reactions (表情回应)
+// ============================================================================
+
+/// Supported reaction emoji types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionType {
+    Like,       // 👍
+    Love,       // ❤️
+    Laugh,      // 😂
+    Wow,        // 😮
+    Sad,        // 😢
+    Angry,      // 😠
+}
+
+impl ReactionType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReactionType::Like => "like",
+            ReactionType::Love => "love",
+            ReactionType::Laugh => "laugh",
+            ReactionType::Wow => "wow",
+            ReactionType::Sad => "sad",
+            ReactionType::Angry => "angry",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "like" => Some(ReactionType::Like),
+            "love" => Some(ReactionType::Love),
+            "laugh" => Some(ReactionType::Laugh),
+            "wow" => Some(ReactionType::Wow),
+            "sad" => Some(ReactionType::Sad),
+            "angry" => Some(ReactionType::Angry),
+            _ => None,
+        }
+    }
+}
+
+/// A reaction on a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MessageReaction {
+    pub reaction_id: String,
+    pub message_id: MessageId,
+    pub user_id: UserId,
+    pub reaction_type: ReactionType,
+    pub created_at: DateTime<Utc>,
+}
+
+impl MessageReaction {
+    pub fn new(message_id: MessageId, user_id: UserId, reaction_type: ReactionType) -> Self {
+        let reaction_id = crate::id::generate_message_id(&format!(
+            "{}:{}:{}",
+            message_id.as_str(),
+            user_id.as_str(),
+            reaction_type.as_str()
+        )).into_string();
+        Self {
+            reaction_id,
+            message_id,
+            user_id,
+            reaction_type,
+            created_at: Utc::now(),
+        }
     }
 }
 
