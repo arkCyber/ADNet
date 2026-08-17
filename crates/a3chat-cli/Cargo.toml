@@ -51,6 +51,8 @@ reqwest                = { workspace = true }
 base64                 = { workspace = true }
 uuid                   = { workspace = true }
 eventsource-stream     = "0.2"
+# QR rendering for the `contact qr-invite-render` subcommand.
+a3net-qr               = { workspace = true }
 
 # Logging / observability
 tracing                = { workspace = true }

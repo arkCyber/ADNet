@@ -107,12 +107,17 @@ async fn main() {
 
     // Phase 5c: if `--enable-iroh`, construct the bridge and inject it
     // into ChatService *before* we hand the app off to the RPC server.
+    // The `with_iroh_docs_chat` method is feature-gated; the whole
+    // branch is gated too so the lean build does not error.
+    #[cfg(feature = "enable-iroh")]
     if enable_iroh {
         match try_enable_iroh(&storage_dir).await {
-            Ok(bridge) => {
-                let author = bridge.default_author().to_string();
-                app.with_iroh_docs_chat(std::sync::Arc::new(bridge)).await;
-                eprintln!("a3chatd: iroh-docs bridge ready (default author {author})");
+            Ok(Some(bridge)) => {
+                app.with_iroh_docs_chat(bridge).await;
+                eprintln!("a3chatd: iroh-docs bridge ready");
+            }
+            Ok(None) => {
+                eprintln!("a3chatd: iroh-docs bridge disabled (no bridge returned)");
             }
             Err(e) => {
                 eprintln!("a3chatd: --enable-iroh failed: {e}");
@@ -120,6 +125,8 @@ async fn main() {
             }
         }
     }
+    #[cfg(not(feature = "enable-iroh"))]
+    let _ = enable_iroh;
 
     let mut cfg = RpcServerConfig::new(bind);
     cfg.log_requests = log_requests;
@@ -226,10 +233,10 @@ OPTIONS:\n  \
 /// We guard the heavy `use` statements behind `#[cfg(feature =
 /// "enable-iroh")]` so the lean default build (no iroh, no
 /// iroh-blobs) still compiles.
-#[cfg_attr(not(feature = "enable-iroh"), allow(unused_variables))]
+#[cfg_attr(not(feature = "enable-iroh"), allow(dead_code))]
 async fn try_enable_iroh(
     storage_dir: &std::path::Path,
-) -> anyhow::Result<a3net_chatstore::IrohDocsChat> {
+) -> anyhow::Result<Option<a3chat_app::A3chatAppBridge>> {
     #[cfg(feature = "enable-iroh")]
     {
         use a3net_blobstore::IrohBlobStore;
@@ -250,7 +257,10 @@ async fn try_enable_iroh(
         // Phase 5c: return the bridge so the caller can inject it into
         // `A3chatApp` for dual-write.
         let bridge = IrohDocsChat::new(std::sync::Arc::new(api), blob_store).await?;
-        Ok(bridge)
+        // The bridge is feature-gated; we wrap it in a stable
+        // lookup if `a3chat-app` exposes one (out of scope for
+        // the slim build).
+        Ok(Some(a3chat_app::bridge_for_iroh_docs(bridge)))
     }
     #[cfg(not(feature = "enable-iroh"))]
     {
