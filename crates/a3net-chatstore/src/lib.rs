@@ -71,3 +71,7 @@ pub use iroh_docs::{AuthorId as IrohAuthorId, DocTicket as IrohDocTicket};
 
 #[cfg(test)]
 mod tests;
+
+/// Phase 5c — Test helpers for integration testing.
+#[cfg(feature = "iroh")]
+pub mod test_helpers;
