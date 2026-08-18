@@ -7,9 +7,10 @@
 //!   is empty, requests are rejected with `429 Too Many Requests` and a
 //!   `Retry-After` header.
 //! - **Axum middleware via `axum::middleware::from_fn_with_state`**:
-//!   a simple async function that wraps handlers, extracts the client IP
-//!   from `ConnectInfo<SocketAddr>` (set by `TcpListener` bind) or from
-//!   `X-Forwarded-For` header (for proxied setups).
+//!   a simple async function that wraps handlers.
+//! - **IP extraction**: when behind a trusted reverse proxy, set
+//!   `trusted_proxy_cidr` so `X-Forwarded-For` is trusted. Without it,
+//!   forwarded headers are ignored (prevents IP spoofing).
 //! - **Separate limits per operation**: `enqueue` has tighter limits
 //!   (spam prevention); `pull`/`ack` have looser limits (polling clients).
 //! - **No shared state across processes**: in-process only. Multi-node
