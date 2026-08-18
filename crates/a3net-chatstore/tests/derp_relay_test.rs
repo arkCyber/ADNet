@@ -413,7 +413,11 @@ async fn test_server_url_format() {
     let url = server.url();
 
     assert!(url.starts_with("http://127.0.0.1:"));
-    assert!(url.parse::<url::Url>().is_ok());
+    // Extract port and verify it's valid
+    if let Some(port_str) = url.strip_prefix("http://127.0.0.1:") {
+        let port: u16 = port_str.parse().expect("should be valid port");
+        assert!(port > 0);
+    }
 }
 
 /// Phase 5c: Test concurrent topology creation.
