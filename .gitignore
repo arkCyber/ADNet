@@ -50,10 +50,18 @@ Exodus@src-backup/
 # Flutter build / generated artefacts (mobile/)
 mobile/.dart_tool/
 mobile/.flutter-plugins-dependencies
+mobile/.flutter-plugins
 mobile/build/
+mobile/.DS_Store
+mobile/ios/.DS_Store
 mobile/ios/Flutter/ephemeral/
+mobile/ios/Flutter/flutter_export_environment.sh
+mobile/ios/Runner/GeneratedPluginRegistrant.h
+mobile/ios/Runner/GeneratedPluginRegistrant.m
 mobile/macos/Flutter/ephemeral/
 mobile/linux/flutter/generated_plugin_registrant.*
 mobile/linux/flutter/generated_plugins.cmake
+mobile/linux/flutter/ephemeral/
 mobile/android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
 mobile/android/local.properties
+mobile/android/.gradle/

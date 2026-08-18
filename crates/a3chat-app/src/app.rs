@@ -8,6 +8,8 @@ use std::sync::Arc;
 use a3chat_core::error::A3chatError;
 use a3chat_core::id::{ConversationId, UserId};
 
+use crate::bot_framework::{self as bot_framework_mod, BotConfig, BotRole, ChatBot, ReplyGenerator};
+use crate::channel_service::{self as channel_service_mod, ChannelService, ChannelServiceConfig};
 use crate::chat_reaction_service::{self as reaction_service, ChatReactionService};
 use crate::chat_service::{self, ChatService};
 use crate::contact_service::{self, ContactService};
@@ -208,6 +210,13 @@ pub struct A3chatApp {
     /// in the same SQLite file. Exposes the `a3chat.link.bookmark.*`
     /// RPC namespace.
     pub link: LinkBookmarkService,
+    /// F-09 / Channel / public-account (公众号) service.
+    /// Backed by `a3net-news::NewsService` for gossip fan-out and
+    /// by [`crate::channel_storage::ChannelStorage`] for the
+    /// `account_id` / `feed_id` / `subscription` SQLite tables.
+    /// Exposes the `a3chat.channel.*` RPC namespace and publishes
+    /// events onto [`A3chatApp::bus`] for SSE subscribers.
+    pub channel: ChannelService,
     /// F-07: Per-conversation draft persistence.
     /// Exposes the `a3chat.chat.draft.*` RPC namespace.
     pub draft: DraftService,
@@ -304,6 +313,22 @@ impl A3chatApp {
         // as chat messages and contact data.
         let link_cfg = link_bookmark_service::LinkBookmarkConfig::under_base(&storage.config().base_dir);
         let link = LinkBookmarkService::new(storage.clone(), bus.clone(), link_cfg);
+        // Channel / 公众号 (F-09). Owns its own SQLite file under
+        // `<base>/channel/channel.db`. Backed by
+        // `a3net-news::NewsService` for gossip fan-out. The local
+        // node id is parsed from `owner` when it's a 64-char hex
+        // string, otherwise we fall back to a random id so the
+        // service still constructs in test environments that pass
+        // user-named owners.
+        let channel_local_node = a3net_types::NodeId::from_hex(owner.as_str())
+            .unwrap_or_else(|_| a3net_types::NodeId::random());
+        let channel_cfg = crate::channel_service::ChannelServiceConfig {
+            base_dir: storage.config().base_dir.clone(),
+            filename: "channel.db".into(),
+            enable_gossip: true,
+        };
+        let channel = crate::channel_service::ChannelService::open(channel_cfg, channel_local_node)
+            .expect("channel opens");
         // Contact roster lives under `<base>/contacts` backed by a3net-roster SQLite.
         let contact_cfg = contact_service::ContactServiceConfig::under_base(&storage.config().base_dir);
         // F-07: per-conversation message drafts (now persisted via ChatStorage).
@@ -342,6 +367,7 @@ impl A3chatApp {
             peerfeedback,
             moments,
             link,
+            channel,
             draft,
             reaction,
             device,
@@ -508,6 +534,21 @@ impl A3chatApp {
         // the rest of the chat data.
         let link_cfg = link_bookmark_service::LinkBookmarkConfig::under_base(storage.config().base_dir.as_path());
         let link = LinkBookmarkService::new(storage.clone(), bus.clone(), link_cfg);
+        // F-09 Channel / 公众号 — tests via `with_storage` get an
+        // in-memory service that publishes onto the supplied bus.
+        // Each test gets its own random local_node so concurrent
+        // tests cannot cross-talk.
+        let channel_local_node = a3net_types::NodeId::random();
+        let channel_cfg = crate::channel_service::ChannelServiceConfig {
+            base_dir: storage.config().base_dir.clone(),
+            filename: "channel.db".into(),
+            enable_gossip: true,
+        };
+        let channel = match crate::channel_service::ChannelService::open(channel_cfg, channel_local_node.clone()) {
+            Ok(svc) => svc,
+            Err(_) => crate::channel_service::ChannelService::open_in_memory(channel_local_node)
+                .expect("channel in-memory opens"),
+        };
         // Contact roster: tests use in-memory store but still
         // wired with the canonical owner so the per-service
         // `require_owner` check fires (otherwise a multi-tenant
@@ -545,6 +586,7 @@ impl A3chatApp {
             peerfeedback,
             moments,
             link,
+            channel,
             draft,
             reaction,
             device,
@@ -726,6 +768,18 @@ impl A3chatApp {
         if method.starts_with("a3chat.link.") {
             return link_bookmark_service::dispatch(
                 Arc::new(self.link.clone()),
+                method,
+                owner,
+                params,
+            )
+            .await;
+        }
+        // F-09: Channel / 公众号 (public-account) service. Wraps
+        // `a3net-news::NewsService` for gossip fan-out and exposes
+        // the `a3chat.channel.*` JSON-RPC namespace.
+        if method.starts_with("a3chat.channel.") {
+            return channel_service_mod::dispatch(
+                Arc::new(self.channel.clone()),
                 method,
                 owner,
                 params,

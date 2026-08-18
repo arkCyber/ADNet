@@ -1,0 +1,11 @@
+{
+    "name": "A3Net Mobile",
+    "short_name": "A3Net",
+    "start_url": ".",
+    "display": "standalone",
+    "background_color": "#FFFFFF",
+    "theme_color": "#1E88E5",
+    "description": "A3Net mobile companion — web build.",
+    "orientation": "portrait-primary",
+    "prefer_related_applications": false
+}

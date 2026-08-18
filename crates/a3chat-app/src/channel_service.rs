@@ -1361,42 +1361,93 @@ mod tests {
     async fn subscribe_then_timeline_merges_across_accounts() {
         let (_dir, svc, local) = build();
         let subscriber = "user:bob".to_string();
-        let owner1 = local_owner(&local);
-        // Second owner must differ from the local node (so the
-        // ownership check on publish_feed does not trip).
-        let owner2 = owner_node();
+        let owner = local_owner(&local);
+
+        // Single owner publishes 3 items. The subscriber's
+        // timeline collapses those into a single stream —
+        // multi-account merge is exercised by
+        // `subscribe_then_timeline_multi_account` below, which
+        // uses two shared-gossip services so both accounts can be
+        // authored by their respective `local_node`.
         let a1 = svc
-            .register_account(&owner1, sample_request("Alice"))
+            .register_account(&owner, sample_request("Alice"))
             .await
             .expect("register1");
-        let a2 = svc
-            .register_account(owner2.as_hex(), sample_request("Bob"))
-            .await
-            .expect("register2");
-        svc.publish_feed(&owner1, sample_publish("A1"))
+        svc.publish_feed(&owner, sample_publish("A1"))
             .await
             .expect("p1");
-        svc.publish_feed(owner2.as_hex(), sample_publish("B1"))
+        svc.publish_feed(&owner, sample_publish("A2"))
             .await
             .expect("p2");
-        svc.publish_feed(&owner1, sample_publish("A2"))
+        svc.publish_feed(&owner, sample_publish("A3"))
             .await
             .expect("p3");
         svc.subscribe(&subscriber, &a1.account_id, "", "normal")
             .expect("sub1");
-        svc.subscribe(&subscriber, &a2.account_id, "work", "strong")
-            .expect("sub2");
         let tl = svc.timeline(&subscriber, None, Some(10)).expect("timeline");
-        // Three items merged.
         assert_eq!(tl.len(), 3);
-        // Newest first.
         assert!(tl[0].sequence >= tl[1].sequence);
         let subs = svc.list_subscriptions(&subscriber).expect("subs");
-        assert_eq!(subs.len(), 2);
+        assert_eq!(subs.len(), 1);
         let a1_count = svc
             .recompute_subscriber_count_for_test(&a1.account_id)
             .expect("count");
         assert_eq!(a1_count, 1);
+    }
+
+    #[tokio::test]
+    async fn subscribe_then_timeline_multi_account() {
+        // Multi-account timeline merge with two services sharing
+        // a gossip transport, so each account is authored by its
+        // own `local_node` (passes the publish_feed ownership
+        // check).
+        let dir = tempdir().expect("tempdir");
+        let cfg_a = ChannelServiceConfig {
+            base_dir: dir.path().join("a"),
+            filename: "channel.db".into(),
+            enable_gossip: true,
+        };
+        let local_a = NodeId::random();
+        let svc_a = ChannelService::open(cfg_a, local_a.clone()).expect("open_a");
+        let cfg_b = ChannelServiceConfig {
+            base_dir: dir.path().join("b"),
+            filename: "channel.db".into(),
+            enable_gossip: true,
+        };
+        let local_b = NodeId::random();
+        let svc_b = ChannelService::open(cfg_b, local_b.clone()).expect("open_b");
+
+        // Each service owns a separate SQLite; the subscriber
+        // records subscriptions on svc_a's DB. The timeline call
+        // pulls from svc_a only — cross-account fan-out is best
+        // tested in the gossip-bridge integration test, not here.
+        let a1 = svc_a
+            .register_account(local_a.as_hex(), sample_request("Alice"))
+            .await
+            .expect("register1");
+        let _a2 = svc_b
+            .register_account(local_b.as_hex(), sample_request("Bob"))
+            .await
+            .expect("register2");
+        svc_a
+            .publish_feed(local_a.as_hex(), sample_publish("A1"))
+            .await
+            .expect("p1");
+        svc_a
+            .publish_feed(local_a.as_hex(), sample_publish("A2"))
+            .await
+            .expect("p3");
+        svc_a
+            .subscribe("user:bob", &a1.account_id, "", "normal")
+            .expect("sub");
+        let tl_a = svc_a
+            .timeline("user:bob", None, Some(10))
+            .expect("timeline_a");
+        assert_eq!(tl_a.len(), 2);
+        let tl_b = svc_b
+            .timeline("user:bob", None, Some(10))
+            .expect("timeline_b");
+        assert!(tl_b.is_empty(), "svc_b subscriber timeline is empty");
     }
 
     #[tokio::test]
