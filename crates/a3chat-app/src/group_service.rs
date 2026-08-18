@@ -38,6 +38,10 @@ pub use crate::group_service_types::{CreateGroupRequest, CreateGroupResponse,
 type ImManager = a3net_chatstore::ImManager;
 type ChatStorage = crate::storage::ChatStorage;
 
+/// Maximum duration for temporary admin grants (7 days in seconds).
+/// Prevents unbounded privilege escalation.
+const MAX_TEMP_ADMIN_DURATION_SECS: i64 = 7 * 24 * 60 * 60;
+
 /// Guards against [`None`] storage/hub on methods that require them.
 /// Reserved for future use; the P3 wiring uses `if let Some(...)` directly
 /// so this macro is currently unused.
@@ -1103,6 +1107,7 @@ impl GroupService {
 
     /// Grant temporary admin status to a member for a specified duration.
     /// Only owners and current admins can grant temporary admin.
+    /// Duration is capped at MAX_TEMP_ADMIN_DURATION_SECS (7 days).
     pub async fn grant_temp_admin(
         &self,
         actor: &UserId,
@@ -1116,6 +1121,14 @@ impl GroupService {
         if target.as_str().is_empty() {
             return Err(AppError::Domain("target user_id is empty".into()));
         }
+
+        // Validate duration: must be positive and not exceed maximum
+        if duration_secs <= 0 {
+            return Err(AppError::Domain(
+                "duration_secs must be positive".into(),
+            ));
+        }
+        let duration_secs = duration_secs.min(MAX_TEMP_ADMIN_DURATION_SECS);
 
         let hub = self
             .hub_arc()
@@ -1960,6 +1973,57 @@ pub async fn dispatch(
             }
             let matches = svc.parse_mentions(&body, &nicknames);
             serde_json::to_value(&matches).map_err(A3chatError::from)
+        }
+
+        // ── Temporary admin management ─────────────────────────────────
+        A3chatRpcMethod::GROUP_TEMP_ADMIN_GRANT => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: UserId = serde_json::from_value(
+                params
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let duration_secs: i64 = params
+                .get("duration_secs")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| A3chatError::InvalidInput("duration_secs missing or invalid".into()))?;
+            if duration_secs <= 0 {
+                return Err(A3chatError::InvalidInput(
+                    "duration_secs must be positive".into(),
+                ));
+            }
+            svc.grant_temp_admin(owner, &conversation_id, &target, duration_secs)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        A3chatRpcMethod::GROUP_TEMP_ADMIN_REVOKE => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: UserId = serde_json::from_value(
+                params
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            svc.revoke_temp_admin(owner, &conversation_id, &target)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
         }
 
         _ => Err(A3chatError::Internal(format!(

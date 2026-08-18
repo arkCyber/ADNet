@@ -314,6 +314,117 @@ async fn rpc_unknown_method_returns_internal_error() {
     ));
 }
 
+#[tokio::test]
+async fn rpc_temp_admin_grant_via_dispatch() {
+    use a3chat_app::group_service as gs;
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Alice grants temp admin to Bob via RPC
+    let resp = gs::dispatch(
+        svc.clone(),
+        a3chat_core::rpc::A3chatRpcMethod::GROUP_TEMP_ADMIN_GRANT,
+        &ids.alice(),
+        serde_json::json!({
+            "conversation_id": cid,
+            "user_id": ids.bob(),
+            "duration_secs": 3600
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(resp.get("ok").and_then(|v| v.as_bool()) == Some(true));
+}
+
+#[tokio::test]
+async fn rpc_temp_admin_revoke_via_dispatch() {
+    use a3chat_app::group_service as gs;
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Grant then revoke
+    svc.grant_temp_admin(&ids.alice(), &cid, &ids.bob(), 3600)
+        .await
+        .unwrap();
+
+    let resp = gs::dispatch(
+        svc,
+        a3chat_core::rpc::A3chatRpcMethod::GROUP_TEMP_ADMIN_REVOKE,
+        &ids.alice(),
+        serde_json::json!({
+            "conversation_id": cid,
+            "user_id": ids.bob()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(resp.get("ok").and_then(|v| v.as_bool()) == Some(true));
+}
+
+#[tokio::test]
+async fn rpc_temp_admin_rejects_invalid_duration() {
+    use a3chat_app::group_service as gs;
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Try with invalid duration (0)
+    let err = gs::dispatch(
+        svc,
+        a3chat_core::rpc::A3chatRpcMethod::GROUP_TEMP_ADMIN_GRANT,
+        &ids.alice(),
+        serde_json::json!({
+            "conversation_id": cid,
+            "user_id": ids.bob(),
+            "duration_secs": 0
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        a3chat_core::error::A3chatError::InvalidInput(_)
+    ));
+}
+
 // ── Offline / Presence Tracking Tests ────────────────────────────────────────
 
 #[tokio::test]

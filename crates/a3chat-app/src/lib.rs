@@ -26,6 +26,8 @@ pub mod group_service;
 pub mod group_service_types;
 pub mod group_invitation_service;
 pub mod group_mention;
+#[cfg(feature = "iroh")]
+pub mod group_sync_service;
 pub mod keyring;
 pub mod link_bookmark_service;
 pub mod media_service;

@@ -122,6 +122,8 @@ impl A3chatRpcMethod {
     pub const GROUP_NICKNAME_GET: &'static str = "a3chat.group.nickname.get";
     pub const GROUP_NICKNAME_LIST: &'static str = "a3chat.group.nickname.list";
     pub const GROUP_MENTION_PARSE: &'static str = "a3chat.group.mention.parse";
+    pub const GROUP_TEMP_ADMIN_GRANT: &'static str = "a3chat.group.temp_admin.grant";
+    pub const GROUP_TEMP_ADMIN_REVOKE: &'static str = "a3chat.group.temp_admin.revoke";
 
     // Sync
     pub const CHAT_SYNC_SNAPSHOT: &'static str = "a3chat.chat.sync.snapshot";
@@ -397,6 +399,8 @@ impl A3chatRpcMethod {
         Self::GROUP_NICKNAME_GET,
         Self::GROUP_NICKNAME_LIST,
         Self::GROUP_MENTION_PARSE,
+        Self::GROUP_TEMP_ADMIN_GRANT,
+        Self::GROUP_TEMP_ADMIN_REVOKE,
         Self::CHAT_SYNC_SNAPSHOT,
         Self::CHAT_SYNC_DELTA,
         Self::CHAT_SYNC_COMPRESSED,
