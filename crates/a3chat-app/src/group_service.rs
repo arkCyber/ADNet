@@ -1109,15 +1109,16 @@ impl GroupService {
                 .await
                 .map_err(AppError::from)?;
         }
-        // GB-16 — the previous implementation returned `Internal`
-        // ("avatar_url update not yet wired to hub"). Rename to
-        // `Domain` so the wire error code reflects "not implemented"
-        // rather than "internal failure". Production deployments
-        // can branch on this code to display an actionable message.
-        if req.avatar_url.is_some() {
-            return Err(AppError::Domain(
-                "avatar_url update not yet wired to hub".into(),
-            ));
+        // P0 fix: avatar_url is now wired to hub via set_group_avatar_url.
+        if let Some(ref avatar_url) = req.avatar_url {
+            hub.set_group_avatar_url(conversation_id.as_str(), Some(avatar_url.as_str()))
+                .await
+                .map_err(AppError::from)?;
+        } else {
+            // Explicit None means "clear avatar" — revert to default.
+            hub.set_group_avatar_url(conversation_id.as_str(), None)
+                .await
+                .map_err(AppError::from)?;
         }
 
         Ok(())
@@ -1193,6 +1194,10 @@ impl GroupService {
     /// propagated and the event is NOT published. Callers via the
     /// [`PresenceTouchGate`] typically ignore this error (`.ok()`) so
     /// presence updates don't block message sending.
+    ///
+    /// Note: Input validation is delegated to the storage layer for performance
+    /// (this is called on every group message). The storage layer validates
+    /// IDs and returns appropriate errors.
     pub async fn touch_member(
         &self,
         conversation_id: &ConversationId,
@@ -1257,6 +1262,13 @@ impl GroupService {
                     "temporary admins cannot grant temporary admin privileges".into(),
                 ));
             }
+        }
+
+        // SECURITY: Prevent self-promotion to temp admin
+        if actor.as_str() == target.as_str() {
+            return Err(AppError::Forbidden(
+                "cannot grant temporary admin to yourself".into(),
+            ));
         }
 
         if target.as_str().is_empty() {
@@ -2314,8 +2326,11 @@ pub async fn dispatch(
             .map_err(A3chatError::from)
         }
         A3chatRpcMethod::GROUP_TEMP_ADMIN_CLEANUP => {
-            // No parameters needed; this is an admin-only operation
-            // that clears all expired grants across all groups.
+            // SECURITY: This is an admin-only operation that clears all expired
+            // grants across ALL groups. In production, this RPC must be protected
+            // at the API gateway layer (e.g., require admin role in JWT claim).
+            // The service layer does NOT enforce authorization here to allow
+            // server-side cleanup tasks (cron jobs) to call this directly.
             let cleared = svc
                 .cleanup_expired_temp_admin()
                 .await

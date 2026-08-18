@@ -1340,3 +1340,67 @@ async fn cleanup_expired_temp_admin_clears_expired_grants() {
     let status = svc.get_temp_admin_status(&ids.alice(), &cid, &ids.bob()).await.unwrap();
     assert!(status.is_none());
 }
+
+// ── Security Edge Cases ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn grant_temp_admin_rejects_self_grant() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Alice (owner) tries to grant temp admin to herself - should fail
+    let err = svc
+        .grant_temp_admin(&ids.alice(), &cid, &ids.alice(), 3600)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, a3chat_app::error::AppError::Forbidden(_)));
+    assert!(err.to_string().contains("cannot grant temporary admin to yourself"));
+}
+
+#[tokio::test]
+async fn grant_temp_admin_rejects_temp_admin_chaining() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+    svc.add_member(&ids.alice(), &cid, &ids.carol()).await.unwrap();
+
+    // Alice grants temp admin to Bob
+    svc.grant_temp_admin(&ids.alice(), &cid, &ids.bob(), 3600)
+        .await
+        .unwrap();
+
+    // Bob tries to grant temp admin to Carol - should fail (temp admin chaining)
+    let err = svc
+        .grant_temp_admin(&ids.bob(), &cid, &ids.carol(), 3600)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, a3chat_app::error::AppError::Forbidden(_)));
+    assert!(err
+        .to_string()
+        .contains("temporary admins cannot grant temporary admin"));
+}
