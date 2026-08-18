@@ -42,12 +42,17 @@ parking_lot = { workspace = true }
 # contacting any chain. Settlement is out-of-band (see a3net-token docs).
 a3net-token = { workspace = true, optional = true }
 
+# Optional Redis support for distributed rate limiting.
+redis = { version = "0.27", optional = true }
+
 [features]
 # Default feature set keeps the mailbox *purely* a store-and-forward
 # service with signature-based authentication. Operators who want to
 # accept signed pledges (metered mailbox) opt in explicitly.
 default = []
 billing = ["dep:a3net-token"]
+# Aerospace-grade compliance tests (DO-178C).
+aerospace = ["dep:redis"]
 
 [[example]]
 name = "mailbox_local_demo"
