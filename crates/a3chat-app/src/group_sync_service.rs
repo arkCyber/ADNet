@@ -315,7 +315,6 @@ impl GroupSyncService {
         metrics: &SyncMetricsCollector,
     ) {
         let start = std::time::Instant::now();
-        let start = std::time::Instant::now();
         let states = sync_states.read().await;
         let active_count = states.values().filter(|s| s.is_subscribed).count();
         let conv_ids: Vec<_> = states
