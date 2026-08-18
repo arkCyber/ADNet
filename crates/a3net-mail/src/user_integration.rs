@@ -77,7 +77,7 @@ impl IdentityResolver {
         // Query user store for the user with this email.
         // Note: UserStore doesn't directly support email lookup, so we
         // scan profiles. In production, you'd add an email index.
-        let profiles = self.user_store.list_profiles().await
+        let profiles = self.user_store.list_profiles()
             .map_err(|e| MailError::Internal(format!("user store error: {e}")))?;
 
         for profile in profiles {
@@ -114,7 +114,7 @@ impl IdentityResolver {
         }
 
         // Query by address.
-        if let Some(profile) = self.user_store.get_profile(&addr_hex).await
+        if let Some(profile) = self.user_store.get_profile(&addr_hex)
             .map_err(|e| MailError::Internal(format!("user store error: {e}")))?
         {
             let identity = self.build_identity(&profile, "").await?;
@@ -130,7 +130,7 @@ impl IdentityResolver {
         user_id: &str,
         email: &str,
     ) -> Result<EmailIdentity> {
-        let profile = self.user_store.get_profile(user_id).await
+        let profile = self.user_store.get_profile(user_id)
             .map_err(|e| MailError::Internal(format!("user store error: {e}")))?
             .ok_or_else(|| MailError::Config("user not found".into()))?;
 
@@ -173,7 +173,7 @@ impl IdentityResolver {
     async fn get_encryption_key(&self, user_id: &str) -> Result<X25519PublicKey> {
         use base64::Engine as _;
 
-        let keys = self.user_store.list_public_keys(user_id).await
+        let keys = self.user_store.list_public_keys(user_id)
             .map_err(|e| MailError::Internal(format!("user store error: {e}")))?;
 
         for key in keys {
