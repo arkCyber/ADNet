@@ -34,6 +34,7 @@ prost-build = { version = "0.12", optional = true }
 serde_ipld_dagcbor = "0.7"
 ipld-core = "0.4"
 cid = "0.11"
+url  = { workspace = true, features = ["serde"] }
 
 [features]
 default = []

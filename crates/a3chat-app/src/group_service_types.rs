@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use a3chat_core::error::A3chatError;
 use a3chat_core::group::{Group, GroupMember};
 use a3chat_core::id::UserId;
+use a3net_types::invariants::validate_url;
 
 // ── Create ────────────────────────────────────────────────────────────────────
 
@@ -24,7 +25,7 @@ pub struct CreateGroupRequest {
 }
 
 impl CreateGroupRequest {
-    /// Validates name length (1–256) and description length (≤ 1024).
+    /// Validates name length (1–256), description length (≤ 1024), and avatar_url.
     pub fn validate(&self) -> Result<(), A3chatError> {
         if self.name.is_empty() {
             return Err(A3chatError::InvalidInput("group name is empty".into()));
@@ -40,6 +41,9 @@ impl CreateGroupRequest {
                 "description length {} exceeds 1024",
                 self.description.len()
             )));
+        }
+        if let Some(ref url) = self.avatar_url {
+            validate_url("avatar_url", url).map_err(|e| A3chatError::InvalidInput(e.to_string()))?;
         }
         Ok(())
     }
@@ -67,7 +71,7 @@ pub struct UpdateGroupMetadataRequest {
 }
 
 impl UpdateGroupMetadataRequest {
-    /// Validates optional name (if provided) and description (if provided).
+    /// Validates optional name (if provided), description (if provided), and avatar_url (if provided).
     pub fn validate(&self) -> Result<(), A3chatError> {
         if let Some(ref name) = self.name {
             if name.is_empty() {
@@ -87,6 +91,9 @@ impl UpdateGroupMetadataRequest {
                     desc.len()
                 )));
             }
+        }
+        if let Some(ref url) = self.avatar_url {
+            validate_url("avatar_url", url).map_err(|e| A3chatError::InvalidInput(e.to_string()))?;
         }
         Ok(())
     }

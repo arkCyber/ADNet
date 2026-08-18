@@ -181,8 +181,11 @@ pub fn validate_tag(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate a URL/avatar string. Permissive: must be valid UTF-8, no
-/// NULs, bounded.
+/// Validate a URL/avatar string. Checks:
+/// - Valid UTF-8, no NUL bytes
+/// - Bounded length
+/// - Parses as a `url::Url` with a valid scheme (http/https/data)
+/// - Host is non-empty (reject `file:`, bare paths, etc.)
 pub fn validate_url(field: &str, value: &str) -> Result<()> {
     if value.len() > MAX_NAME_LEN {
         return Err(AdnetError::Validation(format!(
@@ -191,6 +194,25 @@ pub fn validate_url(field: &str, value: &str) -> Result<()> {
     }
     if value.as_bytes().contains(&0) {
         return Err(AdnetError::Validation(format!("{field}: URL contains NUL")));
+    }
+    let parsed = url::Url::parse(value).map_err(|e| {
+        AdnetError::Validation(format!("{field}: not a valid URL: {e}"))
+    })?;
+    let scheme = parsed.scheme();
+    if scheme.is_empty() {
+        return Err(AdnetError::Validation(format!(
+            "{field}: URL has no scheme (e.g. https://)"
+        )));
+    }
+    if !matches!(scheme, "http" | "https" | "data") {
+        return Err(AdnetError::Validation(format!(
+            "{field}: unsupported scheme '{scheme}' (only http/https/data allowed)"
+        )));
+    }
+    if parsed.host().is_none() && scheme != "data" {
+        return Err(AdnetError::Validation(format!(
+            "{field}: URL has no host"
+        )));
     }
     Ok(())
 }
