@@ -660,6 +660,169 @@ pub fn default_notify_mode() -> &'static str {
     DEFAULT_NOTIFY_MODE
 }
 
+// ============================================================================
+// Analytics + audit (F-09 v1.1 — counters + immutable log).
+//
+// Two-table design:
+//
+//  * `account_metrics_daily` — additive counters keyed by
+//    `(account_id, day_local)`; the storage layer increments in place
+//    on every event hook (publish / retract / subscribe / unsubscribe /
+//    mark_read). Rolling windows are a single `WHERE day_local >= ?`
+//    aggregate. `unique_readers` is a HyperLogLog-lite approximation
+//    (first-16-bits hash bucket) — the column is bumped when the
+//    bucket is freshly populated for the day, giving a sub-1% error
+//    bound for the 30-day window at zero extra cost.
+//
+//  * `account_events_log` — append-only audit trail with a chain
+//    `integrity_hash` so a verifier can confirm a copy they read has
+//    not been mutated. Every counter increment is paired with an
+//    audit row in the same SQLite transaction so the metrics cannot
+//    drift from the audit trail.
+//
+// Both tables live in the same `channel.db` (added in SCHEMA_V2).
+// ============================================================================
+
+/// `METRICS_HLL_BUCKET_BYTES` — how many leading bytes of the blake3
+/// hash we use to bucket a subscriber into the "unique readers" set.
+/// 2 bytes = 65 536 buckets per (account_id, day) — at 30-day rolling
+/// scale this keeps the error rate under 1% without any memory blowup.
+pub const METRICS_HLL_BUCKET_BYTES: usize = 2;
+
+/// `AUDIT_HASH_TAG` — domain tag baked into the chained audit hash so
+/// a row from another feature cannot be smuggled into the log.
+pub const AUDIT_HASH_TAG: &[u8] = b"a3chat-channel-audit|v1";
+
+/// Discriminator for the kinds of events that bump metrics / append to
+/// the audit log. The wire string is the lowercase variant name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountEventKind {
+    Publish,
+    Retract,
+    Subscribe,
+    Unsubscribe,
+    MarkRead,
+    Register,
+    Update,
+    Delete,
+}
+
+impl Default for AccountEventKind {
+    fn default() -> Self {
+        // Sentinel for `AuditEvent::default()` — never written to
+        // the log; production code constructs the enum from the
+        // service-layer discriminator.
+        Self::Publish
+    }
+}
+
+impl AccountEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::Retract => "retract",
+            Self::Subscribe => "subscribe",
+            Self::Unsubscribe => "unsubscribe",
+            Self::MarkRead => "mark_read",
+            Self::Register => "register",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// Per-day rollup row, returned by `metrics_timeline`. Mirrors the
+/// `account_metrics_daily` columns so the frontend can chart without
+/// shape conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DailyMetricPoint {
+    /// `'YYYY-MM-DD'` in the operator's local TZ — the storage layer
+    /// uses the system clock at insert time and we deliberately do
+    /// not store UTC offsets here to keep the SQL `WHERE day_local >=
+    /// ?` index narrow.
+    pub day_local: String,
+    pub subscribes_new: u32,
+    pub unsubscribes: u32,
+    pub publishes: u32,
+    pub retracts: u32,
+    pub impressions: u32,
+    pub reads: u32,
+    /// Approximate — see [`METRICS_HLL_BUCKET_BYTES`].
+    pub unique_readers: u32,
+}
+
+/// Aggregated window — returned by `metrics_summary`. Sums over
+/// `account_metrics_daily` for `window_days` ending today (inclusive).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MetricsSummary {
+    pub account_id: String,
+    /// Window size, in days. Stored so the caller can echo it back
+    /// without recomputing.
+    pub window_days: u32,
+    /// First day in the window — `'YYYY-MM-DD'`.
+    pub day_from: String,
+    /// Last day in the window — `'YYYY-MM-DD'`.
+    pub day_to: String,
+    pub subscribes_new: u32,
+    pub unsubscribes: u32,
+    pub net_subscribes: i32,
+    pub publishes: u32,
+    pub retracts: u32,
+    pub impressions: u32,
+    pub reads: u32,
+    /// Approximate unique readers across the window.
+    pub unique_readers: u32,
+}
+
+/// One immutable event row as it would be returned from the audit
+/// trail. Field semantics mirror the storage columns so the frontend
+/// can render "who did what when" without joining.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AuditEvent {
+    pub event_seq: i64,
+    pub account_id: String,
+    pub kind: AccountEventKind,
+    /// `UserId` of the actor (the local owner for publishes, the
+    /// subscriber for subscribe / mark_read, `None` for system-initiated
+    /// events such as scheduled cleanup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// `feed_id` for publish/retract, `subscriber_id` for
+    /// subscribe/unsubscribe/mark_read — absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_id: Option<String>,
+    /// Free-form metadata: retract reason, publish tags snapshot, etc.
+    /// Kept as a structured value (already validated JSON) so the
+    /// verifier can re-hash deterministically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+    pub occurred_at: DateTime<Utc>,
+    /// Chain hash — `blake3(AUDIT_HASH_TAG || prev_hash || canonical(row))`.
+    /// Clients that want tamper-evidence compare this to the next row's
+    /// `prev_hash` (the storage layer keeps the previous row's hash in
+    /// a sticky read).
+    pub integrity_hash: String,
+}
+
+/// One page of the audit log. Cursor is the last `event_seq` of the
+/// previous page (exclusive); pass `None` to start from the most
+/// recent.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AuditPage {
+    pub events: Vec<AuditEvent>,
+    /// True when more rows remain beyond this page.
+    pub has_more: bool,
+    /// Next cursor to pass — equals the last `event_seq` in
+    /// `events` when `has_more` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,10 +8,10 @@
 //! | `whoami`           | Print the configured local owner identity |
 //! | `doctor`           | Probe the local daemon (HTTP /rpc/health, owner-aware) |
 //! | `conversation`     | `list` / `open` conversations |
-//! | `message`          | `send` / `ack` / `recall` / `edit` / `delete` / `search` / `typing` |
+//! | `message`          | `send` / `ack` / `recall` / `edit` / `delete` / `search` / `typing` / `forward` / `forward-merge` |
 //! | `sync`             | `snapshot` / `delta` / `compressed` (multi-device catch-up) |
 //! | `profile`          | profile / public-key / device / avatar operators |
-//! | `chat`             | interactive multi-turn conversation session (slash commands + SSE) |
+//! | `chat`             | interactive multi-turn conversation session (slash commands + SSE) — wraps `thread.list/get`, `chat.tap` |
 //! | `contact`          | friend / blocklist / QR-invite (13 sub-operations) |
 //! | `group`            | group creation, invitation, membership, mute, nickname (29 sub-ops) |
 //! | `moments`          | 朋友圈 post / comment / reaction / follow (15 sub-ops) |

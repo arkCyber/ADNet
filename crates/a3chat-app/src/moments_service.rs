@@ -430,6 +430,28 @@ impl MomentsService {
             comment_id: stored.comment_id.clone(),
             author_id: stored.author_id.clone(),
         });
+        // MN-07 — `@`-mention fan-out. For every distinct user_id
+        // listed in `comment.mentions`, publish a MomentsCommentMention
+        // event so the receiving client can render an `@you` banner.
+        // We dedupe + skip self-mentions so an `@-ing yourself`
+        // doesn't trigger a no-op banner.
+        let author = stored.author_id.clone();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for mentioned in stored.mentions.iter() {
+            if mentioned.is_empty() || mentioned == &author || !seen.insert(mentioned.clone()) {
+                continue;
+            }
+            // user_id is the *mentioned* user so a subscriber filtered
+            // on `MomentsCommentMention.user_id == me` receives only
+            // events aimed at them.
+            let user_id = UserId::from(mentioned.as_str());
+            self.bus.publish(A3chatEvent::MomentsCommentMention {
+                user_id,
+                post_id: stored.post_id.clone(),
+                comment_id: stored.comment_id.clone(),
+                author_id: author.clone(),
+            });
+        }
         Ok(stored)
     }
 

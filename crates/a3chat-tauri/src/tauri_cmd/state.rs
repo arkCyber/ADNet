@@ -49,6 +49,12 @@ pub enum Screen {
     /// metadata. Surfaces a dedicated "Favorites" screen on the
     /// desktop client.
     Favorites,
+    /// F-09 公众号 / Channel — public-account registration,
+    /// subscription, feed publish / retract / read, and analytics.
+    Channel,
+    /// F-10 Pairing & devices — multi-device pairing flow, trusted
+    /// peer list, device registration, and E2E handshake probes.
+    Pairing,
 }
 
 impl Screen {
@@ -72,6 +78,8 @@ impl Screen {
         Screen::PeerFeedback,
         Screen::Moments,
         Screen::Favorites,
+        Screen::Channel,
+        Screen::Pairing,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -95,6 +103,8 @@ impl Screen {
             Screen::PeerFeedback => "peerfeedback",
             Screen::Moments => "moments",
             Screen::Favorites => "favorites",
+            Screen::Channel => "channel",
+            Screen::Pairing => "pairing",
         }
     }
 }

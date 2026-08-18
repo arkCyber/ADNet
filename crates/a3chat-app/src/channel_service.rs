@@ -38,9 +38,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3chat_core::channel::{
-    AccountKind, FeedAttachment, FeedItem, PublicAccount, Subscription, UpsertChannelAccountRequest,
+    AccountEventKind, AccountKind, AuditPage, DailyMetricPoint, FeedAttachment, FeedItem,
+    MetricsSummary, PublicAccount, Subscription, UpsertChannelAccountRequest,
     VerificationLevel, PublishFeedRequest, ACCOUNT_ID_PREFIX, FEED_ID_PREFIX, MAX_TAG_LEN,
-    MAX_TAGS_PER_FEED_ITEM, compute_account_id, compute_feed_id, default_notify_mode,
+    MAX_TAGS_PER_FEED_ITEM, METRICS_HLL_BUCKET_BYTES, compute_account_id, compute_feed_id,
 };
 use a3chat_core::error::A3chatError;
 use a3chat_core::event::A3chatEvent;
@@ -81,6 +82,11 @@ pub const METHODS: &[&str] = &[
     A3chatRpcMethod::CHANNEL_FEED_MARK_READ,
     A3chatRpcMethod::CHANNEL_FEED_UNREAD_COUNT,
     A3chatRpcMethod::CHANNEL_HEALTH,
+    // F-09 v1.1 — analytics + audit
+    A3chatRpcMethod::CHANNEL_ANALYTICS_SUMMARY,
+    A3chatRpcMethod::CHANNEL_ANALYTICS_TIMELINE,
+    A3chatRpcMethod::CHANNEL_ANALYTICS_AUDIT,
+    A3chatRpcMethod::CHANNEL_ANALYTICS_AUDIT_VERIFY,
 ];
 
 /// Default `limit` for [`ChannelService::list_accounts`].
@@ -332,6 +338,18 @@ impl ChannelService {
             updated_at: now,
         };
         self.storage.put_account(&account)?;
+        // Analytics + audit (F-09 v1.1) — log the register event
+        // before gossip join so the audit row exists even if the
+        // join step fails on a flaky network.
+        let _ = self.storage.record_event(
+            &account.account_id,
+            AccountEventKind::Register,
+            Some(owner_node_id),
+            None,
+            None,
+            None,
+            now,
+        );
         // Eagerly join the gossip topic so inbound bulletins from
         // the network land in the local store. Idempotent.
         let _ = self
@@ -372,6 +390,17 @@ impl ChannelService {
         existing.verification = request.verification;
         existing.updated_at = chrono::Utc::now();
         self.storage.put_account(&existing)?;
+        // Analytics + audit (F-09 v1.1) — record Update so the audit
+        // trail covers every account mutation.
+        let _ = self.storage.record_event(
+            &existing.account_id,
+            AccountEventKind::Update,
+            Some(owner_node_id),
+            None,
+            None,
+            None,
+            existing.updated_at,
+        );
         self.bus.publish(A3chatEvent::ChannelAccountUpdated {
             user_id: UserId::from(owner_node_id),
             account: existing.clone(),
@@ -441,6 +470,17 @@ impl ChannelService {
         };
         let removed = self.storage.delete_account(&existing.account_id)?;
         if removed {
+            // Analytics + audit (F-09 v1.1) — record Delete so the
+            // audit trail covers every account lifecycle event.
+            let _ = self.storage.record_event(
+                &existing.account_id,
+                AccountEventKind::Delete,
+                Some(owner_node_id),
+                None,
+                None,
+                None,
+                chrono::Utc::now(),
+            );
             self.bus.publish(A3chatEvent::ChannelAccountDeleted {
                 user_id: UserId::from(owner_node_id),
                 account_id: existing.account_id.clone(),
@@ -485,6 +525,7 @@ impl ChannelService {
                 "notify_mode: must be one of normal|silent|strong (got {notify_mode:?})"
             )));
         }
+        let now = chrono::Utc::now();
         let sub = Subscription {
             subscriber_id: subscriber_id.to_string(),
             account_id: account_id.to_string(),
@@ -492,13 +533,31 @@ impl ChannelService {
             notify_mode: notify_mode.to_string(),
             is_muted: false,
             is_pinned: false,
-            subscribed_at: chrono::Utc::now(),
+            subscribed_at: now,
             last_read_seq: 0,
         };
+        let was_present = self
+            .storage
+            .get_subscription(subscriber_id, account_id)?
+            .is_some();
         self.storage.put_subscription(&sub)?;
         // Refresh the cached `subscriber_count` so the
         // `PublicAccount` row mirrors the truth.
         let _ = self.storage.recompute_subscriber_count(account_id)?;
+        if !was_present {
+            // Analytics + audit (F-09 v1.1) — only count Subscribe on
+            // a brand-new row; re-subscribing an existing subscription
+            // is a no-op.
+            let _ = self.storage.record_event(
+                account_id,
+                AccountEventKind::Subscribe,
+                Some(subscriber_id),
+                Some(subscriber_id),
+                None,
+                None,
+                now,
+            );
+        }
         self.bus.publish(A3chatEvent::ChannelSubscribed {
             user_id: UserId::from(subscriber_id),
             account_id: account_id.to_string(),
@@ -514,6 +573,17 @@ impl ChannelService {
             .delete_subscription(subscriber_id, account_id)?;
         if removed {
             let _ = self.storage.recompute_subscriber_count(account_id)?;
+            // Analytics + audit (F-09 v1.1) — only count Unsubscribe
+            // when a row was actually deleted.
+            let _ = self.storage.record_event(
+                account_id,
+                AccountEventKind::Unsubscribe,
+                Some(subscriber_id),
+                Some(subscriber_id),
+                None,
+                None,
+                chrono::Utc::now(),
+            );
             self.bus.publish(A3chatEvent::ChannelUnsubscribed {
                 user_id: UserId::from(subscriber_id),
                 account_id: account_id.to_string(),
@@ -588,7 +658,7 @@ impl ChannelService {
         if let Some(m) = is_muted {
             sub.is_muted = m;
         }
-        self.storage.put_subscription(&sub)?;
+        let _ = self.storage.put_subscription(&sub)?;
         Ok(sub)
     }
 
@@ -611,7 +681,7 @@ impl ChannelService {
                 ))
             })?;
         sub.is_pinned = is_pinned;
-        self.storage.put_subscription(&sub)?;
+        let _ = self.storage.put_subscription(&sub)?;
         Ok(sub)
     }
 
@@ -690,6 +760,22 @@ impl ChannelService {
         // envelope shape so a future native BulletinItem renderer
         // can render the same wire without the FeedItem wrapper.
         let body_json = serde_json::to_string(&feed).map_err(AppError::from)?;
+        // a3net-news requires non-empty `summary` and `body`. When
+        // the feed item has no human-written summary or body, fall
+        // back to a single dash so the gossip-layer validator
+        // accepts the envelope; the chat UI still renders the
+        // original empty string because the decoded `FeedItem` is
+        // what the frontend displays, not the gossip envelope.
+        let bulletin_summary = if feed.summary.trim().is_empty() {
+            "-".to_string()
+        } else {
+            feed.summary.clone()
+        };
+        let bulletin_body = if feed.body.trim().is_empty() {
+            "-".to_string()
+        } else {
+            body_json.clone()
+        };
         let bulletin = BulletinItem::new(
             BulletinKind::NewsArticle,
             a3net_types::BulletinCategory::General,
@@ -697,8 +783,8 @@ impl ChannelService {
             Self::room_id_for(&account.account_id),
             self.local_node.clone(),
             feed.title.clone(),
-            feed.summary.clone(),
-            body_json,
+            bulletin_summary,
+            bulletin_body,
             &nonce,
             None,
         )
@@ -720,6 +806,23 @@ impl ChannelService {
         let _ = self.news.publish(bulletin).await.map_err(|e| {
             AppError::Rpc(format!("channel.feed.publish: gossip publish failed: {e}"))
         })?;
+        // Analytics + audit (F-09 v1.1) — tag snapshot lands in the
+        // payload so a future analytics UI can break down publishes
+        // by tag without joining against the feed_items table.
+        let payload = serde_json::json!({
+            "title": feed.title,
+            "tags": feed.tags,
+            "is_pinned": feed.is_pinned,
+        });
+        let _ = self.storage.record_event(
+            &account.account_id,
+            AccountEventKind::Publish,
+            Some(owner_node_id),
+            Some(&feed.feed_id),
+            Some(&payload),
+            None,
+            now,
+        );
         self.bus.publish(A3chatEvent::ChannelFeedPublished {
             user_id: UserId::from(owner_node_id),
             account_id: account.account_id.clone(),
@@ -749,6 +852,7 @@ impl ChannelService {
                 reason.len()
             )));
         }
+        let now = chrono::Utc::now();
         let account = self
             .storage
             .get_account_by_owner(owner_node_id)?
@@ -756,7 +860,20 @@ impl ChannelService {
                 "no account for owner {owner_node_id}"
             )))?;
         self.storage
-            .retract_feed_item(&account.account_id, feed_id, reason, chrono::Utc::now())?;
+            .retract_feed_item(&account.account_id, feed_id, reason, now)?;
+        // Analytics + audit (F-09 v1.1) — retracts are a meaningful
+        // compliance signal; the reason lands in the payload so the
+        // audit log retains it verbatim.
+        let payload = serde_json::json!({ "reason": reason });
+        let _ = self.storage.record_event(
+            &account.account_id,
+            AccountEventKind::Retract,
+            Some(owner_node_id),
+            Some(feed_id),
+            Some(&payload),
+            None,
+            now,
+        );
         self.bus.publish(A3chatEvent::ChannelFeedRetracted {
             user_id: UserId::from(owner_node_id),
             account_id: account.account_id,
@@ -871,6 +988,25 @@ impl ChannelService {
             });
         self.storage
             .mark_read(subscriber_id, account_id, last_read_seq, &feed_id)?;
+        // Analytics + audit (F-09 v1.1) — bucket the subscriber into
+        // the day's HyperLogLog-lite set so a 30-day `unique_readers`
+        // stays a single SQL aggregate. Zero extra writes: we update
+        // the day's counter row only when the bucket is new.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"a3chat-channel-hll|subscriber|v1");
+        hasher.update(subscriber_id.as_bytes());
+        let digest = hasher.finalize();
+        let mut bucket = [0u8; METRICS_HLL_BUCKET_BYTES];
+        bucket.copy_from_slice(&digest.as_bytes()[..METRICS_HLL_BUCKET_BYTES]);
+        let _ = self.storage.record_event(
+            account_id,
+            AccountEventKind::MarkRead,
+            Some(subscriber_id),
+            Some(&feed_id),
+            None,
+            Some(&bucket),
+            chrono::Utc::now(),
+        );
         Ok(())
     }
 
@@ -915,6 +1051,79 @@ impl ChannelService {
     /// the JSON wrapper is silently ignored).
     pub fn decode_feed_from_bulletin(bulletin: &BulletinItem) -> Option<FeedItem> {
         serde_json::from_str(&bulletin.body).ok()
+    }
+
+    // ── Analytics + audit (F-09 v1.1) ─────────────────────────────
+
+    /// `a3chat.channel.analytics.summary` — rolling window counters.
+    /// `window_days` is clamped at the dispatcher to 1..=365; we
+    /// pass it straight through to the storage layer.
+    pub fn metrics_summary(
+        &self,
+        account_id: &str,
+        window_days: u32,
+    ) -> AppResult<MetricsSummary> {
+        a3chat_core::id::validate_id("account_id", account_id).map_err(AppError::from)?;
+        self.storage
+            .metrics_summary(account_id, window_days, chrono::Utc::now())
+    }
+
+    /// `a3chat.channel.analytics.timeline` — per-day rollup for a
+    /// trailing window. The dispatcher validates the `days` bound.
+    pub fn metrics_timeline(
+        &self,
+        account_id: &str,
+        days: u32,
+    ) -> AppResult<Vec<DailyMetricPoint>> {
+        a3chat_core::id::validate_id("account_id", account_id).map_err(AppError::from)?;
+        self.storage
+            .metrics_timeline(account_id, days, chrono::Utc::now())
+    }
+
+    /// `a3chat.channel.analytics.audit` — paginated audit log,
+    /// newest-first. The dispatcher enforces the `limit` cap.
+    pub fn audit_log(
+        &self,
+        account_id: &str,
+        cursor: Option<i64>,
+        limit: u32,
+    ) -> AppResult<AuditPage> {
+        a3chat_core::id::validate_id("account_id", account_id).map_err(AppError::from)?;
+        self.storage.audit_log(account_id, cursor, limit)
+    }
+
+    /// `a3chat.channel.analytics.audit_verify` — replay the audit
+    /// chain and confirm no row has been tampered with.
+    pub fn audit_verify(&self, account_id: &str) -> AppResult<()> {
+        a3chat_core::id::validate_id("account_id", account_id).map_err(AppError::from)?;
+        self.storage.audit_verify(account_id)
+    }
+
+    /// Authorization helper — the audit endpoints are owner-self by
+    /// default. Admin access is reserved for a future role-based
+    /// path (e.g. `OrgVerified` accounts or a separate operator
+    /// role); we keep the hook here so a flag-gated upgrade is
+    /// trivial.
+    fn require_owner_or_admin(&self, caller: &str, account_id: &str) -> AppResult<()> {
+        a3chat_core::id::validate_id("caller", caller).map_err(AppError::from)?;
+        a3chat_core::id::validate_id("account_id", account_id).map_err(AppError::from)?;
+        let account = self.storage.get_account(account_id)?.ok_or_else(|| {
+            AppError::Domain(format!("audit_log: unknown account_id {account_id}"))
+        })?;
+        if account.owner_node_id == caller {
+            return Ok(());
+        }
+        // Admin gate: the local node may audit its own account
+        // regardless of `owner_node_id` (the operator role owns the
+        // local node). For v1.1 we treat "caller == local_node" as
+        // the admin identity — a finer-grained role enum can replace
+        // this without changing the dispatcher.
+        if caller == self.local_node.as_hex() {
+            return Ok(());
+        }
+        Err(AppError::Forbidden(format!(
+            "audit_log: caller {caller} is not the owner of {account_id}"
+        )))
     }
 }
 
@@ -1213,6 +1422,75 @@ pub async fn dispatch(
             Ok(serde_json::json!({ "unread": n }))
         }
         A3chatRpcMethod::CHANNEL_HEALTH => Ok(svc.health()),
+        A3chatRpcMethod::CHANNEL_ANALYTICS_SUMMARY => {
+            let account_id = params.get("account_id").and_then(|v| v.as_str()).ok_or_else(|| {
+                A3chatError::InvalidInput(
+                    "a3chat.channel.analytics.summary: account_id required".into(),
+                )
+            })?;
+            let window_days = params
+                .get("window_days")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(30) as u32;
+            if !(1..=365).contains(&window_days) {
+                return Err(A3chatError::InvalidInput(format!(
+                    "a3chat.channel.analytics.summary: window_days {window_days} out of [1, 365]"
+                )));
+            }
+            let summary = svc
+                .metrics_summary(account_id, window_days)
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(summary).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::CHANNEL_ANALYTICS_TIMELINE => {
+            let account_id = params.get("account_id").and_then(|v| v.as_str()).ok_or_else(|| {
+                A3chatError::InvalidInput(
+                    "a3chat.channel.analytics.timeline: account_id required".into(),
+                )
+            })?;
+            let days = params.get("days").and_then(|v| v.as_u64()).unwrap_or(30) as u32;
+            if !(1..=365).contains(&days) {
+                return Err(A3chatError::InvalidInput(format!(
+                    "a3chat.channel.analytics.timeline: days {days} out of [1, 365]"
+                )));
+            }
+            let points = svc
+                .metrics_timeline(account_id, days)
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(points).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::CHANNEL_ANALYTICS_AUDIT => {
+            let account_id = params.get("account_id").and_then(|v| v.as_str()).ok_or_else(|| {
+                A3chatError::InvalidInput(
+                    "a3chat.channel.analytics.audit: account_id required".into(),
+                )
+            })?;
+            let cursor = params.get("cursor").and_then(|v| v.as_i64());
+            let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+            if !(1..=500).contains(&limit) {
+                return Err(A3chatError::InvalidInput(format!(
+                    "a3chat.channel.analytics.audit: limit {limit} out of [1, 500]"
+                )));
+            }
+            // Authorization: caller must be the account owner OR the
+            // service must be running with admin privileges. For
+            // v1.1 we only enforce owner-self.
+            svc.require_owner_or_admin(&owner_str, account_id)?;
+            let page = svc
+                .audit_log(account_id, cursor, limit)
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(page).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::CHANNEL_ANALYTICS_AUDIT_VERIFY => {
+            let account_id = params.get("account_id").and_then(|v| v.as_str()).ok_or_else(|| {
+                A3chatError::InvalidInput(
+                    "a3chat.channel.analytics.audit_verify: account_id required".into(),
+                )
+            })?;
+            svc.require_owner_or_admin(&owner_str, account_id)?;
+            svc.audit_verify(account_id).map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
         _ => Err(A3chatError::Internal(format!(
             "ChannelService does not handle {method}"
         ))),

@@ -25,8 +25,14 @@ impl A3chatRpcMethod {
     pub const CHAT_MESSAGE_EDIT: &'static str = "a3chat.chat.message.edit";
     pub const CHAT_MESSAGE_DELETE: &'static str = "a3chat.chat.message.delete";
     pub const CHAT_MESSAGE_FORWARD: &'static str = "a3chat.chat.message.forward";
+    pub const CHAT_MESSAGE_FORWARD_MERGE: &'static str = "a3chat.chat.message.forward.merge";
     pub const CHAT_SEARCH: &'static str = "a3chat.chat.search";
     pub const CHAT_TYPING: &'static str = "a3chat.chat.typing";
+    pub const CHAT_THREAD_LIST: &'static str = "a3chat.chat.thread.list";
+    pub const CHAT_THREAD_GET: &'static str = "a3chat.chat.thread.get";
+    pub const CHAT_TAP: &'static str = "a3chat.chat.tap";
+    pub const CHAT_MESSAGE_SEND_LOCATION: &'static str = "a3chat.chat.message.send_location";
+    pub const CHAT_MESSAGE_SEND_CONTACT_CARD: &'static str = "a3chat.chat.message.send_contact_card";
 
     // Conversation pin
     pub const CHAT_CONVERSATION_PIN: &'static str = "a3chat.chat.conversation.pin";
@@ -249,6 +255,16 @@ impl A3chatRpcMethod {
     pub const CHANNEL_FEED_UNREAD_COUNT: &'static str = "a3chat.channel.feed.unread_count";
     pub const CHANNEL_HEALTH: &'static str = "a3chat.channel.health";
 
+    // -- Analytics + audit (F-09 v1.1) -----------------------------------
+    pub const CHANNEL_ANALYTICS_SUMMARY: &'static str =
+        "a3chat.channel.analytics.summary";
+    pub const CHANNEL_ANALYTICS_TIMELINE: &'static str =
+        "a3chat.channel.analytics.timeline";
+    pub const CHANNEL_ANALYTICS_AUDIT: &'static str =
+        "a3chat.channel.analytics.audit";
+    pub const CHANNEL_ANALYTICS_AUDIT_VERIFY: &'static str =
+        "a3chat.channel.analytics.audit_verify";
+
     // SSE notification event names (emitted on `/rpc/stream`).
     // The frontend subscribes to these via EventSource.
     pub const NOTIFICATION_CHAT_MESSAGE_RECEIVED: &'static str = "a3chat.chat.message.received";
@@ -305,8 +321,14 @@ impl A3chatRpcMethod {
         Self::CHAT_MESSAGE_EDIT,
         Self::CHAT_MESSAGE_DELETE,
         Self::CHAT_MESSAGE_FORWARD,
+        Self::CHAT_MESSAGE_FORWARD_MERGE,
         Self::CHAT_SEARCH,
         Self::CHAT_TYPING,
+        Self::CHAT_THREAD_LIST,
+        Self::CHAT_THREAD_GET,
+        Self::CHAT_TAP,
+        Self::CHAT_MESSAGE_SEND_LOCATION,
+        Self::CHAT_MESSAGE_SEND_CONTACT_CARD,
         Self::CHAT_CONVERSATION_PIN,
         Self::CHAT_CONVERSATION_UNPIN,
         Self::CHAT_CONVERSATION_TOGGLE_PIN,
@@ -474,6 +496,11 @@ impl A3chatRpcMethod {
         Self::CHANNEL_FEED_MARK_READ,
         Self::CHANNEL_FEED_UNREAD_COUNT,
         Self::CHANNEL_HEALTH,
+        // F-09 v1.1 analytics + audit
+        Self::CHANNEL_ANALYTICS_SUMMARY,
+        Self::CHANNEL_ANALYTICS_TIMELINE,
+        Self::CHANNEL_ANALYTICS_AUDIT,
+        Self::CHANNEL_ANALYTICS_AUDIT_VERIFY,
         // F-07 newly wired
         Self::CHAT_DRAFT_SAVE,
         Self::CHAT_DRAFT_GET,

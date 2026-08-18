@@ -297,6 +297,211 @@ impl ForwardService {
             .map_err(|e| AppError::Domain(format!("malformed forward request: {e}")))?;
         self.forward_message(owner, &request).await
     }
+
+    /// F-13 — "Merge forward" (`chat.message.forward.merge`).
+    ///
+    /// Collects up to 50 source messages from a single conversation
+    /// and ships them as **one** outbound message whose body is a
+    /// newline-joined text snippet of every source's plaintext body
+    /// plus a small metadata header. Attachments are *not* preserved
+    /// in merge mode — the spec is plain-text only (WeChat parity).
+    pub async fn merge_forward_from_json(
+        &self,
+        owner: &UserId,
+        params: serde_json::Value,
+    ) -> AppResult<ForwardResult> {
+        let req: MergeForwardRequest = serde_json::from_value(params)
+            .map_err(|e| AppError::Domain(format!("malformed merge-forward request: {e}")))?;
+        self.merge_forward(owner, req).await
+    }
+
+    pub async fn merge_forward(
+        &self,
+        owner: &UserId,
+        req: MergeForwardRequest,
+    ) -> AppResult<ForwardResult> {
+        req.validate().map_err(AppError::from)?;
+
+        // Owner must have access to all targets.
+        for target_id in &req.target_conversation_ids {
+            let conv = self.storage.open_conversation(owner, target_id).await?;
+            if conv.is_none() {
+                return Err(AppError::Forbidden(format!(
+                    "owner does not have access to conversation {}",
+                    target_id.as_str()
+                )));
+            }
+        }
+
+        // Fetch the source messages (oldest first — WeChat parity).
+        let mut sources: Vec<ChatMessage> = Vec::with_capacity(req.source_message_ids.len());
+        for src_id in &req.source_message_ids {
+            let m = self
+                .storage
+                .get_message(owner, src_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Domain(format!("source message {} not found", src_id.as_str()))
+                })?;
+            if m.recalled_at.is_some() {
+                return Err(AppError::Domain(format!(
+                    "source message {} has been recalled and cannot be forwarded",
+                    src_id.as_str()
+                )));
+            }
+            sources.push(m);
+        }
+
+        // Build the merged plain-text body. We keep non-text payloads
+        // (image / voice / file) out of merge mode (explicit WeChat
+        // semantics) and just show their message_type label. We also
+        // can't use newlines — the content validator forbids U+000A,
+        // so we use ` | ` as a line separator (it's compact in the
+        // rendered preview and still readable).
+        let mut lines: Vec<String> = Vec::with_capacity(sources.len() + 1);
+        let sep = " | ";
+        lines.push(format!("[Merged {} messages]", sources.len()));
+        for (i, m) in sources.iter().enumerate() {
+            let who = m.sender_id.as_str();
+            let body = match &m.body {
+                MessageBody::Plain { content } => content.clone(),
+                _ => format!("[{:?}]", m.message_type),
+            };
+            // Avoid blowing past the 4 KiB envelope limit on huge
+            // merges; truncate at ~4 KiB of total payload.
+            let snippet = if body.len() > 400 {
+                let mut end = 400;
+                while !body.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &body[..end])
+            } else {
+                body
+            };
+            lines.push(format!("{}: {}", who, snippet));
+            if lines.join(sep).len() > 4000 {
+                lines.truncate(i + 2);
+                lines.push(format!("…(truncated, {} more)", sources.len() - i - 1));
+                break;
+            }
+        }
+
+        let now = Utc::now().timestamp();
+        let mut results = Vec::with_capacity(req.target_conversation_ids.len());
+        for (i, target_id) in req.target_conversation_ids.iter().enumerate() {
+            // Reuse the same body across targets but allocate per-target
+            // timestamps + sequence numbers so they don't collide.
+            let envelope = MessageEnvelope {
+                conversation_id: target_id.clone(),
+                receiver_id: open_conversation_receiver_id(&self.storage, owner, target_id).await?,
+                message_type: a3chat_core::message::MessageType::Text,
+                body: MessageBody::Plain {
+                    content: lines.join(sep),
+                },
+                attachments: Vec::new(),
+                reply_to: if i == 0 { req.reply_to.clone() } else { None },
+                sequence: 0, // storage will allocate
+                timestamp: now + i as i64,
+            };
+
+            let stored = self.storage.save_outbound(owner, &envelope).await?;
+            self.bus.publish(a3chat_core::event::A3chatEvent::ChatMessageReceived {
+                user_id: envelope.receiver_id.clone(),
+                conversation_id: target_id.clone(),
+                message: stored.message.clone(),
+            });
+
+            results.push(ForwardTargetResult {
+                conversation_id: target_id.clone(),
+                stored_message: stored,
+            });
+        }
+
+        Ok(ForwardResult {
+            source_message_id: sources
+                .first()
+                .map(|m| m.message_id.clone())
+                .unwrap_or_else(|| MessageId::from("")),
+            original_sender_id: sources
+                .first()
+                .map(|m| m.sender_id.clone())
+                .unwrap_or_else(|| owner.clone()),
+            targets: results,
+        })
+    }
+}
+
+/// Resolve a `receiver_id` for an envelope given the owner's view of
+/// the conversation. Falls back to the owner itself if the conversation
+/// is a self-note (rare, but cheap to handle).
+async fn open_conversation_receiver_id(
+    storage: &ChatStorage,
+    owner: &UserId,
+    cid: &ConversationId,
+) -> AppResult<UserId> {
+    let conv = storage.open_conversation(owner, cid).await?;
+    Ok(conv
+        .and_then(|c| c.meta.peer_user_id)
+        .unwrap_or_else(|| owner.clone()))
+}
+
+/// Request shape for `chat.message.forward.merge` (F-13).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MergeForwardRequest {
+    /// Source messages in the order they should appear in the merge.
+    /// Caller responsibility: usually oldest-first.
+    pub source_message_ids: Vec<MessageId>,
+    /// One or more target conversations (max 10 — same as single
+    /// forward).
+    pub target_conversation_ids: Vec<ConversationId>,
+    /// Optional reply-to on the first target only.
+    pub reply_to: Option<MessageId>,
+}
+
+impl MergeForwardRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.source_message_ids.is_empty() {
+            return Err(AppError::Domain(
+                "merge-forward request needs at least one source".into(),
+            ));
+        }
+        if self.source_message_ids.len() > 50 {
+            return Err(AppError::Domain(
+                "merge-forward supports at most 50 source messages".into(),
+            ));
+        }
+        if self.target_conversation_ids.is_empty() {
+            return Err(AppError::Domain(
+                "merge-forward request needs at least one target".into(),
+            ));
+        }
+        if self.target_conversation_ids.len() > 10 {
+            return Err(AppError::Domain(
+                "merge-forward supports at most 10 target conversations".into(),
+            ));
+        }
+        for src in &self.source_message_ids {
+            a3chat_core::id::validate_id("source_message_id", src.as_str())
+                .map_err(|e| AppError::Domain(e.to_string()))?;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for tgt in &self.target_conversation_ids {
+            a3chat_core::id::validate_id("target_conversation_id", tgt.as_str())
+                .map_err(|e| AppError::Domain(e.to_string()))?;
+            if !seen.insert(tgt.as_str().to_string()) {
+                return Err(AppError::Domain(format!(
+                    "duplicate target conversation {}",
+                    tgt.as_str()
+                )));
+            }
+        }
+        if let Some(rt) = &self.reply_to {
+            a3chat_core::id::validate_id("reply_to", rt.as_str())
+                .map_err(|e| AppError::Domain(e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 /// Dispatcher entry point used by `a3chat-app::app::A3chatApp::dispatch`.
@@ -310,6 +515,13 @@ pub async fn dispatch(
         "a3chat.chat.message.forward" => {
             let result = svc
                 .forward_from_json(owner, params)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(result).map_err(A3chatError::from)
+        }
+        "a3chat.chat.message.forward.merge" => {
+            let result = svc
+                .merge_forward_from_json(owner, params)
                 .await
                 .map_err(A3chatError::from)?;
             serde_json::to_value(result).map_err(A3chatError::from)
@@ -775,5 +987,101 @@ mod tests {
             reply_to: Some(MessageId::from("reply-id")),
         };
         assert!(req.validate().is_ok());
+    }
+
+    // F-13 — merge-forward validation.
+    #[test]
+    fn merge_forward_rejects_empty_sources() {
+        let r = MergeForwardRequest {
+            source_message_ids: vec![],
+            target_conversation_ids: vec![ConversationId::from("dm:a:b")],
+            reply_to: None,
+        };
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn merge_forward_rejects_too_many_sources() {
+        let r = MergeForwardRequest {
+            source_message_ids: (0..51).map(|i| MessageId::from(format!("id{i}"))).collect(),
+            target_conversation_ids: vec![ConversationId::from("dm:a:b")],
+            reply_to: None,
+        };
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn merge_forward_rejects_too_many_targets() {
+        let r = MergeForwardRequest {
+            source_message_ids: vec![MessageId::from("m1")],
+            target_conversation_ids: (0..11).map(|i| ConversationId::from(format!("t{i}"))).collect(),
+            reply_to: None,
+        };
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn merge_forward_accepts_valid_input() {
+        let r = MergeForwardRequest {
+            source_message_ids: vec![MessageId::from("m1"), MessageId::from("m2")],
+            target_conversation_ids: vec![ConversationId::from("dm:a:b")],
+            reply_to: None,
+        };
+        assert!(r.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn merge_forward_packs_multiple_sources_into_one_message() {
+        let (_tmp, svc) = fresh_svc().await;
+
+        // Three source messages from Bob to Alice.
+        let mut src_ids: Vec<MessageId> = Vec::new();
+        for body in ["hello", "world", "!"].iter() {
+            let env = MessageEnvelope {
+                conversation_id: ConversationId::from("dm:alice:bob"),
+                receiver_id: owner(),
+                message_type: MessageType::Text,
+                body: MessageBody::Plain { content: body.to_string() },
+                attachments: vec![],
+                reply_to: None,
+                sequence: (src_ids.len() as u32) + 1,
+                timestamp: 1_700_000_000 + src_ids.len() as i64,
+            };
+            let st = svc.storage.save_outbound(&owner(), &env).await.unwrap();
+            src_ids.push(st.message.message_id);
+        }
+
+        // Target conversation must exist before the merge.
+        let target_conv = ConversationMeta {
+            conversation_id: ConversationId::from("dm:alice:carol"),
+            kind: a3chat_core::conversation::ConversationKind::Dm,
+            title: "Carol".into(),
+            peer_user_id: Some(carol()),
+            unread_count: 0,
+            last_message_preview: "".into(),
+            last_activity: chrono::Utc::now().timestamp(),
+            message_count: 0,
+            peer_online: false,
+            muted: false,
+            pinned: false,
+        };
+        svc.storage.upsert_conversation(&owner(), &target_conv).await.unwrap();
+
+        let req = MergeForwardRequest {
+            source_message_ids: src_ids,
+            target_conversation_ids: vec![target_conv.conversation_id.clone()],
+            reply_to: None,
+        };
+        let result = svc.merge_forward(&owner(), req).await.unwrap();
+        assert_eq!(result.targets.len(), 1);
+        // Body should contain the [Merged] header plus each source text.
+        match &result.targets[0].stored_message.message.body {
+            MessageBody::Plain { content } => {
+                assert!(content.contains("[Merged 3 messages]"));
+                assert!(content.contains("hello"));
+                assert!(content.contains("world"));
+            }
+            _ => panic!("merge forward should produce a plain text body"),
+        }
     }
 }

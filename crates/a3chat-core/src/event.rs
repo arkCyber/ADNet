@@ -31,6 +31,7 @@ pub const NOTIFICATION_KIND_MESSAGE_RECALLED: &str = "chat.message.recalled";
 pub const NOTIFICATION_KIND_MESSAGE_READ: &str = "chat.message.read";
 pub const NOTIFICATION_KIND_MESSAGE_EDITED: &str = "chat.message.edited";
 pub const NOTIFICATION_KIND_MESSAGE_DELETED: &str = "chat.message.deleted";
+pub const NOTIFICATION_KIND_CHAT_TAP: &str = "chat.tap";
 pub const NOTIFICATION_KIND_GROUP_INVITATION: &str = "group.invitation.received";
 pub const NOTIFICATION_KIND_LINK_BOOKMARK_ADDED: &str = "link.bookmark.added";
 pub const NOTIFICATION_KIND_LINK_BOOKMARK_UPDATED: &str = "link.bookmark.updated";
@@ -62,6 +63,9 @@ pub const NOTIFICATION_KIND_MOMENTS_POST_DELETED: &str = "moments.post.deleted";
 pub const NOTIFICATION_KIND_MOMENTS_COMMENT_ADDED: &str = "moments.comment.added";
 pub const NOTIFICATION_KIND_MOMENTS_COMMENT_EDITED: &str = "moments.comment.edited";
 pub const NOTIFICATION_KIND_MOMENTS_COMMENT_DELETED: &str = "moments.comment.deleted";
+/// MN-07 — `@`-mention fan-out. Wire string is the same shape as
+/// `chat.message.mention` so a single UI banner handler covers both.
+pub const NOTIFICATION_KIND_MOMENTS_COMMENT_MENTION: &str = "moments.comment.mention";
 pub const NOTIFICATION_KIND_MOMENTS_REACTION_TOGGLED: &str = "moments.reaction.toggled";
 pub const NOTIFICATION_KIND_MOMENTS_POST_SHARED: &str = "moments.post.shared";
 pub const NOTIFICATION_KIND_MOMENTS_POST_REPORTED: &str = "moments.post.reported";
@@ -181,6 +185,18 @@ pub enum A3chatEvent {
         message_id: MessageId,
     },
 
+    /// F-14 — "拍一拍" tap-to-nudge. The actor lightly pokes the
+    /// chat (optionally targeting a specific user). Does NOT
+    /// produce a persisted message; the receiving UI is expected
+    /// to render an animation on the latest bubble.
+    ChatTap {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        /// `None` means the tap is directed at the whole conversation.
+        target_user_id: Option<UserId>,
+        actor_user_id: UserId,
+    },
+
     /// A new group invitation was received.
     GroupInvitationReceived { invitation: GroupInvitation },
 
@@ -231,6 +247,19 @@ pub enum A3chatEvent {
     },
 
     MomentsCommentAdded {
+        user_id: UserId,
+        post_id: String,
+        comment_id: String,
+        author_id: String,
+    },
+
+    /// A comment was posted that mentions a user (MN-07 — `@`-mention
+    /// fan-out). The receiving client checks its own
+    /// `notification_settings::MentionsOnly` flag to decide whether
+    /// to render a banner. The `user_id` field is the **mentioned**
+    /// user (not the commenter), so subscribers filtered on `user_id`
+    /// get one event per `@`.
+    MomentsCommentMention {
         user_id: UserId,
         post_id: String,
         comment_id: String,
@@ -494,6 +523,7 @@ impl A3chatEvent {
             A3chatEvent::ChatMessageRead { .. } => NOTIFICATION_KIND_MESSAGE_READ,
             A3chatEvent::ChatMessageEdited { .. } => NOTIFICATION_KIND_MESSAGE_EDITED,
             A3chatEvent::ChatMessageDeleted { .. } => NOTIFICATION_KIND_MESSAGE_DELETED,
+            A3chatEvent::ChatTap { .. } => NOTIFICATION_KIND_CHAT_TAP,
             A3chatEvent::GroupInvitationReceived { .. } => NOTIFICATION_KIND_GROUP_INVITATION,
             A3chatEvent::LinkBookmarkAdded { .. } => NOTIFICATION_KIND_LINK_BOOKMARK_ADDED,
             A3chatEvent::LinkBookmarkUpdated { .. } => NOTIFICATION_KIND_LINK_BOOKMARK_UPDATED,
@@ -501,6 +531,7 @@ impl A3chatEvent {
             A3chatEvent::MomentsPostCreated { .. } => NOTIFICATION_KIND_MOMENTS_POST_CREATED,
             A3chatEvent::MomentsPostDeleted { .. } => NOTIFICATION_KIND_MOMENTS_POST_DELETED,
             A3chatEvent::MomentsCommentAdded { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_ADDED,
+            A3chatEvent::MomentsCommentMention { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_MENTION,
             A3chatEvent::MomentsReactionToggled { .. } => NOTIFICATION_KIND_MOMENTS_REACTION_TOGGLED,
             A3chatEvent::MomentsCommentEdited { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_EDITED,
             A3chatEvent::MomentsCommentDeleted { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_DELETED,

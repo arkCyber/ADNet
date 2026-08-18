@@ -522,6 +522,25 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
                 "by_user_id": by_user_id,
             }),
         ),
+        // F-14 — explicit arm for "拍一拍" so the SSE name mirrors
+        // `A3chatEvent::kind()` (`chat.tap`) instead of leaking the
+        // generic `a3chat.event.chat_tap` from the catch-all. The
+        // payload is the small set of fields a client needs to
+        // render the bubble animation.
+        A3chatEvent::ChatTap {
+            user_id,
+            conversation_id,
+            target_user_id,
+            actor_user_id,
+        } => (
+            "chat.tap",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "target_user_id": target_user_id,
+                "actor_user_id": actor_user_id,
+            }),
+        ),
         // Forward-compatible catch-all for any *future* event variants
         // that this dispatcher has not yet been taught about. Today
         // every variant is enumerated explicitly above, so this arm
@@ -599,6 +618,7 @@ fn event_variant_name(event: &a3chat_core::event::A3chatEvent) -> &'static str {
         A3chatEvent::MomentsPostCreated { .. } => "moments_post_created",
         A3chatEvent::MomentsPostDeleted { .. } => "moments_post_deleted",
         A3chatEvent::MomentsCommentAdded { .. } => "moments_comment_added",
+        A3chatEvent::MomentsCommentMention { .. } => "moments_comment_mention",
         A3chatEvent::MomentsReactionToggled { .. } => "moments_reaction_toggled",
         A3chatEvent::LinkBookmarkAdded { .. } => "link_bookmark_added",
         A3chatEvent::LinkBookmarkUpdated { .. } => "link_bookmark_updated",
@@ -628,6 +648,7 @@ fn event_variant_name(event: &a3chat_core::event::A3chatEvent) -> &'static str {
         A3chatEvent::ChannelUnsubscribed { .. } => "channel_unsubscribed",
         A3chatEvent::ChannelFeedPublished { .. } => "channel_feed_published",
         A3chatEvent::ChannelFeedRetracted { .. } => "channel_feed_retracted",
+        A3chatEvent::ChatTap { .. } => "chat_tap",
     }
 }
 

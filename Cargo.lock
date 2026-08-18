@@ -174,6 +174,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "parking_lot",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -796,6 +797,39 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "a3net-mailbox"
+version = "0.1.0"
+dependencies = [
+ "a3net-identity",
+ "a3net-observability",
+ "a3net-resilience",
+ "a3net-token",
+ "a3net-types",
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "chrono",
+ "dashmap 6.2.1",
+ "futures",
+ "hex",
+ "once_cell",
+ "proptest",
+ "rand 0.8.7",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

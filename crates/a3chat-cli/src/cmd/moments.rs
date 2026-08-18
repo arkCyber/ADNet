@@ -65,6 +65,15 @@ pub enum MomentsCmd {
     Timeline(TimelineArgs),
     /// Add a comment to a post.
     Comment(CommentArgs),
+    /// Edit an existing comment. Caller must be the comment author
+    /// or the author of the post it lives under (SR-MOMENTS-2).
+    CommentEdit(CommentEditArgs),
+    /// Delete a comment. Caller must be the comment author or the
+    /// author of the post it lives under.
+    CommentDelete {
+        /// id of the comment to delete.
+        comment_id: String,
+    },
     /// List comments on a post.
     Comments {
         /// id of the post whose comments to list.
@@ -72,6 +81,9 @@ pub enum MomentsCmd {
     },
     /// React (like / love / …) to a post or comment.
     React(ReactArgs),
+    /// Remove a reaction the owner previously placed on a target
+    /// (SR-MOMENTS-3: symmetric with `react`).
+    Unreact(UnreactArgs),
     /// List every reaction on a target (post or comment).
     Reactions {
         /// id of the post or comment.
@@ -88,10 +100,37 @@ pub enum MomentsCmd {
     },
     /// List every user the owner is currently following.
     Following,
+    /// List every user following `who` (defaults to the chat owner).
+    Followers {
+        /// 64-hex NodeId / user id. Defaults to the chat owner.
+        #[arg(long, default_value = "")]
+        user_id: String,
+    },
     /// Check whether the owner is following `who`.
     IsFollowing {
         who: String,
     },
+    /// Block another user — subsequent timeline fetches drop their
+    /// posts (SR-MOMENTS-7).
+    Block {
+        /// id of the user to block.
+        who: String,
+        /// Optional reason recorded in the blocklist row.
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+    /// Unblock a previously-blocked user. Idempotent.
+    Unblock {
+        who: String,
+    },
+    /// List every user the owner has blocked.
+    Blocklist,
+    /// Share / re-broadcast a post (or comment) authored by someone
+    /// else (SR-MOMENTS-5: idempotent on `(owner, target_id)`).
+    Share(ShareArgs),
+    /// Report a post or comment for moderation (SR-MOMENTS-6:
+    /// self-reports are rejected at the dispatcher).
+    Report(ReportArgs),
     /// Verify the integrity hash of a post JSON payload read from
     /// stdin (or `--file`). Useful for catching tampering when
     /// replaying gossip-received records.
@@ -200,6 +239,80 @@ pub struct ReactArgs {
     pub target_type: TargetArg,
 }
 
+/// Arguments for `moments comment-edit`.
+#[derive(Debug, Args)]
+pub struct CommentEditArgs {
+    /// id of the comment to edit. The caller must own it (or own
+    /// the post it lives under) — SR-MOMENTS-2.
+    pub comment_id: String,
+
+    /// id of the post the comment lives under (used to round-trip
+    /// the comment envelope through `comment.edit`).
+    #[arg(long, default_value = "")]
+    pub post_id: String,
+
+    /// Replacement comment body. Whitespace-joined.
+    pub text: Vec<String>,
+
+    /// Echo the JSON-RPC envelope without sending.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `moments unreact`. SR-MOMENTS-3 — symmetric with
+/// `react`; only the original reactor can remove their own reaction.
+#[derive(Debug, Args)]
+pub struct UnreactArgs {
+    /// id of the post or comment the reaction lives on.
+    pub target_id: String,
+
+    /// Target type — `post` (default) or `comment`.
+    #[arg(long, value_enum, default_value_t = TargetArg::Post)]
+    pub target_type: TargetArg,
+
+    /// Optional user id override. Defaults to the chat owner.
+    #[arg(long, default_value = "")]
+    pub user_id: String,
+}
+
+/// Arguments for `moments share`. SR-MOMENTS-5 — the share is
+/// idempotent on `(sharer_id, target_id, target_type)`; the dispatcher
+/// auto-mints `share_id` when blank.
+#[derive(Debug, Args)]
+pub struct ShareArgs {
+    /// id of the post (or comment) being shared.
+    pub target_id: String,
+
+    /// Target type — `post` (default) or `comment`.
+    #[arg(long, value_enum, default_value_t = TargetArg::Post)]
+    pub target_type: TargetArg,
+
+    /// Optional sharer-comment (≤ 1024 chars, mirrors `MAX_CONTENT_LEN`).
+    #[arg(long, default_value = "")]
+    pub comment: String,
+}
+
+/// Arguments for `moments report`. SR-MOMENTS-6 — self-reports are
+/// rejected at the dispatcher; `reason` is one of
+/// `spam|abuse|harassment|illegal|impersonation|other`.
+#[derive(Debug, Args)]
+pub struct ReportArgs {
+    /// id of the post (or comment) being reported.
+    pub target_id: String,
+
+    /// Target type — `post` (default) or `comment`.
+    #[arg(long, value_enum, default_value_t = TargetArg::Post)]
+    pub target_type: TargetArg,
+
+    /// Reason enum (`spam|abuse|harassment|illegal|impersonation|other`).
+    #[arg(long, default_value = "other")]
+    pub reason: String,
+
+    /// Free-form notes (≤ 512 chars).
+    #[arg(long, default_value = "")]
+    pub notes: String,
+}
+
 #[derive(Debug, Args)]
 pub struct VerifyArgs {
     /// Path to a JSON file containing the typed record. Use `-` for stdin.
@@ -303,13 +416,24 @@ pub async fn run(
         MomentsCmd::PostsBy { user_id } => posts_by(cfg, client, &user_id).await,
         MomentsCmd::Timeline(a) => timeline(cfg, client, a).await,
         MomentsCmd::Comment(c) => comment(cfg, client, c).await,
+        MomentsCmd::CommentEdit(c) => comment_edit(cfg, client, c).await,
+        MomentsCmd::CommentDelete { comment_id } => {
+            comment_delete(cfg, client, &comment_id).await
+        }
         MomentsCmd::Comments { post_id } => comments(cfg, client, &post_id).await,
         MomentsCmd::React(r) => react(cfg, client, r).await,
+        MomentsCmd::Unreact(u) => unreact(cfg, client, u).await,
         MomentsCmd::Reactions { target_id } => reactions(cfg, client, &target_id).await,
         MomentsCmd::Follow { who } => follow(cfg, client, &who).await,
         MomentsCmd::Unfollow { who } => unfollow(cfg, client, &who).await,
         MomentsCmd::Following => following(cfg, client).await,
+        MomentsCmd::Followers { user_id } => followers(cfg, client, &user_id).await,
         MomentsCmd::IsFollowing { who } => is_following(cfg, client, &who).await,
+        MomentsCmd::Block { who, reason } => block(cfg, client, &who, &reason).await,
+        MomentsCmd::Unblock { who } => unblock(cfg, client, &who).await,
+        MomentsCmd::Blocklist => blocklist(cfg, client).await,
+        MomentsCmd::Share(s) => share(cfg, client, s).await,
+        MomentsCmd::Report(r) => report(cfg, client, r).await,
         MomentsCmd::VerifyPost(a) => verify(cfg, client, A3chatRpcMethod::MOMENTS_VERIFY_POST, a).await,
         MomentsCmd::VerifyComment(a) => {
             verify(cfg, client, A3chatRpcMethod::MOMENTS_VERIFY_COMMENT, a).await
@@ -597,6 +721,27 @@ async fn react(
     output::print(cfg.effective_output(), &v)
 }
 
+async fn unreact(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    args: UnreactArgs,
+) -> CliResult<()> {
+    if args.target_id.is_empty() {
+        return Err(CliError::Usage("target_id is required".into()));
+    }
+    let v = client
+        .call_raw(
+            A3chatRpcMethod::MOMENTS_UNREACT,
+            json!({
+                "target_id": args.target_id,
+                "target_type": args.target_type.as_wire(),
+                "user_id": args.user_id,
+            }),
+        )
+        .await?;
+    output::print(cfg.effective_output(), &v)
+}
+
 async fn reactions(
     cfg: &CliConfig,
     client: &HttpRpcClient,
@@ -609,6 +754,73 @@ async fn reactions(
         .call_raw(
             A3chatRpcMethod::MOMENTS_REACTIONS_LIST,
             json!({ "target_id": target_id }),
+        )
+        .await?;
+    output::print(cfg.effective_output(), &v)
+}
+
+async fn comment_edit(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    args: CommentEditArgs,
+) -> CliResult<()> {
+    if args.comment_id.is_empty() {
+        return Err(CliError::Usage("comment_id is required".into()));
+    }
+    if args.post_id.is_empty() {
+        return Err(CliError::Usage(
+            "--post-id is required so the daemon can route the edit".into(),
+        ));
+    }
+    let text = args.text.join(" ");
+    if text.is_empty() {
+        return Err(CliError::Usage("comment body is empty".into()));
+    }
+    if text.len() > 1024 {
+        return Err(CliError::Usage("comment exceeds 1024 chars".into()));
+    }
+    // Build a minimal comment envelope. The daemon re-stamps
+    // `is_edited=true` + `edited_at` on its own; the CLI only has to
+    // supply (comment_id, post_id, content) so the dispatcher can
+    // locate the existing row and validate ownership.
+    let comment_obj = json!({
+        "comment_id": args.comment_id,
+        "post_id": args.post_id,
+        "author_id": "",
+        "author_name": "",
+        "author_avatar": null,
+        "content": text,
+        "parent_id": null,
+        "mentions": [],
+        "created_at": 0,
+        "updated_at": 0,
+        "like_count": 0,
+        "reply_count": 0,
+        "is_edited": true,
+        "edited_at": 0,
+    });
+    let params = json!({ "comment": comment_obj });
+    if args.dry_run {
+        return print_dry_run(cfg, A3chatRpcMethod::MOMENTS_COMMENT_EDIT, &params);
+    }
+    let v = client
+        .call_raw(A3chatRpcMethod::MOMENTS_COMMENT_EDIT, params)
+        .await?;
+    output::print(cfg.effective_output(), &v)
+}
+
+async fn comment_delete(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    comment_id: &str,
+) -> CliResult<()> {
+    if comment_id.is_empty() {
+        return Err(CliError::Usage("comment_id is required".into()));
+    }
+    let v = client
+        .call_raw(
+            A3chatRpcMethod::MOMENTS_COMMENT_DELETE,
+            json!({ "comment_id": comment_id }),
         )
         .await?;
     output::print(cfg.effective_output(), &v)
@@ -671,6 +883,119 @@ async fn is_following(
             A3chatRpcMethod::MOMENTS_FOLLOWING_CHECK,
             json!({ "following_id": who }),
         )
+        .await?;
+    output::print(cfg.effective_output(), &v)
+}
+
+async fn followers(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    user_id: &str,
+) -> CliResult<()> {
+    // `user_id == ""` → server defaults to the chat owner.
+    let params = if user_id.is_empty() {
+        json!({})
+    } else {
+        json!({ "user_id": user_id })
+    };
+    let v = client
+        .call_raw(A3chatRpcMethod::MOMENTS_FOLLOWERS_LIST, params)
+        .await?;
+    output::print(cfg.effective_output(), &v)
+}
+
+async fn block(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    who: &str,
+    reason: &str,
+) -> CliResult<()> {
+    if who.is_empty() {
+        return Err(CliError::Usage("who is required".into()));
+    }
+    let mut params = json!({ "blocked_user_id": who });
+    if !reason.is_empty() {
+        params["reason"] = json!(reason);
+    }
+    let v = client.call_raw(A3chatRpcMethod::MOMENTS_BLOCK, params).await?;
+    output::print(cfg.effective_output(), &v)
+}
+
+async fn unblock(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    who: &str,
+) -> CliResult<()> {
+    if who.is_empty() {
+        return Err(CliError::Usage("who is required".into()));
+    }
+    let v = client
+        .call_raw(
+            A3chatRpcMethod::MOMENTS_UNBLOCK,
+            json!({ "blocked_user_id": who }),
+        )
+        .await?;
+    output::print(cfg.effective_output(), &v)
+}
+
+async fn blocklist(cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
+    let v = client
+        .call_raw(A3chatRpcMethod::MOMENTS_BLOCKLIST_LIST, json!({}))
+        .await?;
+    output::print(cfg.effective_output(), &v)
+}
+
+async fn share(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    args: ShareArgs,
+) -> CliResult<()> {
+    if args.target_id.is_empty() {
+        return Err(CliError::Usage("target_id is required".into()));
+    }
+    if args.comment.len() > 1024 {
+        return Err(CliError::Usage("share comment exceeds 1024 chars".into()));
+    }
+    let params = json!({
+        "share": {
+            "share_id": "",
+            "target_id": args.target_id,
+            "target_type": args.target_type.as_wire(),
+            "sharer_id": "",
+            "sharer_name": "",
+            "comment": args.comment,
+            "created_at": 0,
+            "integrity_hash": null,
+        }
+    });
+    let v = client.call_raw(A3chatRpcMethod::MOMENTS_SHARE, params).await?;
+    output::print(cfg.effective_output(), &v)
+}
+
+async fn report(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    args: ReportArgs,
+) -> CliResult<()> {
+    if args.target_id.is_empty() {
+        return Err(CliError::Usage("target_id is required".into()));
+    }
+    if args.notes.len() > 512 {
+        return Err(CliError::Usage("report notes exceed 512 chars".into()));
+    }
+    let params = json!({
+        "report": {
+            "report_id": "",
+            "target_id": args.target_id,
+            "target_type": args.target_type.as_wire(),
+            "reporter_id": "",
+            "reason": args.reason,
+            "notes": args.notes,
+            "created_at": 0,
+        }
+    });
+    let v = client
+        .call_raw(A3chatRpcMethod::MOMENTS_REPORT, params)
         .await?;
     output::print(cfg.effective_output(), &v)
 }

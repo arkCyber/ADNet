@@ -536,9 +536,13 @@ impl A3chatApp {
         let link = LinkBookmarkService::new(storage.clone(), bus.clone(), link_cfg);
         // F-09 Channel / 公众号 — tests via `with_storage` get an
         // in-memory service that publishes onto the supplied bus.
-        // Each test gets its own random local_node so concurrent
-        // tests cannot cross-talk.
-        let channel_local_node = a3net_types::NodeId::random();
+        // We prefer `NodeId::from_hex(owner)` so a test rig that
+        // supplies a 64-hex owner (the conventional way to make
+        // `owner == local_node` hold across all services) gets the
+        // canonical node id; otherwise fall back to random so
+        // concurrent tests still have isolated nodes.
+        let channel_local_node = a3net_types::NodeId::from_hex(owner_for_contact.as_str())
+            .unwrap_or_else(|_| a3net_types::NodeId::random());
         let channel_cfg = crate::channel_service::ChannelServiceConfig {
             base_dir: storage.config().base_dir.clone(),
             filename: "channel.db".into(),

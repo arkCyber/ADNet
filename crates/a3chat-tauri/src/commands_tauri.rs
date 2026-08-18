@@ -881,6 +881,894 @@ pub async fn link_bookmark_count(state: tauri::State<'_, AppState>) -> TauriComm
     rcp::link_bookmark_count(state.inner().clone()).await
 }
 
+
+#[tauri::command]
+pub async fn chat_draft_save(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        body: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_draft_save(state.inner().clone(), conversation_id, body).await
+}
+
+#[tauri::command]
+pub async fn chat_draft_get(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_draft_get(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn chat_draft_delete(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_draft_delete(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn chat_draft_list(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_draft_list(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn chat_draft_clear(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_draft_clear(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn chat_reaction_add(
+    state: tauri::State<'_, AppState>,
+        message_id: String,
+        reaction: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_reaction_add(state.inner().clone(), message_id, reaction).await
+}
+
+#[tauri::command]
+pub async fn chat_reaction_remove(
+    state: tauri::State<'_, AppState>,
+        message_id: String,
+        reaction: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_reaction_remove(state.inner().clone(), message_id, reaction).await
+}
+
+#[tauri::command]
+pub async fn chat_reaction_get(
+    state: tauri::State<'_, AppState>,
+        message_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_reaction_get(state.inner().clone(), message_id).await
+}
+
+#[tauri::command]
+pub async fn chat_notification_set_dnd(
+    state: tauri::State<'_, AppState>,
+        enabled: bool,
+        until_unix: Option<i64>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_notification_set_dnd(state.inner().clone(), enabled, until_unix).await
+}
+
+#[tauri::command]
+pub async fn chat_notification_get_dnd(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_notification_get_dnd(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn chat_notification_set_conversation(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        muted: bool,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_notification_set_conversation(state.inner().clone(), conversation_id, muted).await
+}
+
+#[tauri::command]
+pub async fn chat_notification_get_conversation(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_notification_get_conversation(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn chat_notification_mute(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        until_unix: Option<i64>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_notification_mute(state.inner().clone(), conversation_id, until_unix).await
+}
+
+#[tauri::command]
+pub async fn chat_notification_unmute(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_notification_unmute(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn chat_notification_list_muted(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_notification_list_muted(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn chat_conversation_pin(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_conversation_pin(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn chat_conversation_unpin(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_conversation_unpin(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn chat_conversation_toggle_pin(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_conversation_toggle_pin(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn chat_conversation_create_direct(
+    state: tauri::State<'_, AppState>,
+        peer_user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_conversation_create_direct(state.inner().clone(), peer_user_id).await
+}
+
+#[tauri::command]
+pub async fn chat_message_forward(
+    state: tauri::State<'_, AppState>,
+        message_id: String,
+        target_conversation_ids: Vec<String>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_message_forward(state.inner().clone(), message_id, target_conversation_ids).await
+}
+
+#[tauri::command]
+pub async fn chat_message_forward_merge(
+    state: tauri::State<'_, AppState>,
+        message_ids: Vec<String>,
+        target_conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_message_forward_merge(state.inner().clone(), message_ids, target_conversation_id).await
+}
+
+#[tauri::command]
+pub async fn chat_tap(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        target_user_id: Option<String>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_tap(state.inner().clone(), conversation_id, target_user_id).await
+}
+
+#[tauri::command]
+pub async fn chat_thread_list(
+    state: tauri::State<'_, AppState>,
+        root_message_id: String,
+        limit: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_thread_list(state.inner().clone(), root_message_id, limit).await
+}
+
+#[tauri::command]
+pub async fn chat_thread_get(
+    state: tauri::State<'_, AppState>,
+        root_message_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::chat_thread_get(state.inner().clone(), root_message_id).await
+}
+
+#[tauri::command]
+pub async fn profile_avatar_upload(
+    state: tauri::State<'_, AppState>,
+        envelope: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::profile_avatar_upload(state.inner().clone(), envelope).await
+}
+
+#[tauri::command]
+pub async fn profile_avatar_get(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::profile_avatar_get(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn profile_avatar_remove(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::profile_avatar_remove(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn profile_public_key_label(
+    state: tauri::State<'_, AppState>,
+        key_id: String,
+        label: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::profile_public_key_label(state.inner().clone(), key_id, label).await
+}
+
+#[tauri::command]
+pub async fn profile_kind_get(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::profile_kind_get(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn profile_kind_set(
+    state: tauri::State<'_, AppState>,
+        kind: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::profile_kind_set(state.inner().clone(), kind).await
+}
+
+#[tauri::command]
+pub async fn contact_add(
+    state: tauri::State<'_, AppState>,
+        contact: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::contact_add(state.inner().clone(), contact).await
+}
+
+#[tauri::command]
+pub async fn contact_remove(
+    state: tauri::State<'_, AppState>,
+        user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::contact_remove(state.inner().clone(), user_id).await
+}
+
+#[tauri::command]
+pub async fn contact_get(
+    state: tauri::State<'_, AppState>,
+        user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::contact_get(state.inner().clone(), user_id).await
+}
+
+#[tauri::command]
+pub async fn contact_search(
+    state: tauri::State<'_, AppState>,
+        needle: String,
+        limit: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::contact_search(state.inner().clone(), needle, limit).await
+}
+
+#[tauri::command]
+pub async fn contact_toggle_favorite(
+    state: tauri::State<'_, AppState>,
+        user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::contact_toggle_favorite(state.inner().clone(), user_id).await
+}
+
+#[tauri::command]
+pub async fn contact_update(
+    state: tauri::State<'_, AppState>,
+        contact: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::contact_update(state.inner().clone(), contact).await
+}
+
+#[tauri::command]
+pub async fn group_list(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_list(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn group_members(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_members(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn group_member_get(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_member_get(state.inner().clone(), conversation_id, user_id).await
+}
+
+#[tauri::command]
+pub async fn group_metadata_update(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        request: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_metadata_update(state.inner().clone(), conversation_id, request).await
+}
+
+#[tauri::command]
+pub async fn group_transfer_ownership(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        new_owner_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_transfer_ownership(state.inner().clone(), conversation_id, new_owner_id).await
+}
+
+#[tauri::command]
+pub async fn group_dissolve(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_dissolve(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn group_leave(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_leave(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn group_mute_member(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        user_id: String,
+        muted_until_secs: i64,
+        reason: Option<String>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_mute_member(state.inner().clone(), conversation_id, user_id, muted_until_secs, reason).await
+}
+
+#[tauri::command]
+pub async fn group_unmute_member(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_unmute_member(state.inner().clone(), conversation_id, user_id).await
+}
+
+#[tauri::command]
+pub async fn group_mute_all(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_mute_all(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn group_unmute_all(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_unmute_all(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn group_list_muted(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_list_muted(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn group_nickname_set(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        user_id: String,
+        nickname: Option<String>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_nickname_set(state.inner().clone(), conversation_id, user_id, nickname).await
+}
+
+#[tauri::command]
+pub async fn group_nickname_get(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+        user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_nickname_get(state.inner().clone(), conversation_id, user_id).await
+}
+
+#[tauri::command]
+pub async fn group_nickname_list(
+    state: tauri::State<'_, AppState>,
+        conversation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_nickname_list(state.inner().clone(), conversation_id).await
+}
+
+#[tauri::command]
+pub async fn group_mention_parse(
+    state: tauri::State<'_, AppState>,
+        body: String,
+        nicknames: Option<serde_json::Value>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::group_mention_parse(state.inner().clone(), body, nicknames).await
+}
+
+#[tauri::command]
+pub async fn channel_account_register(
+    state: tauri::State<'_, AppState>,
+        request: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_account_register(state.inner().clone(), request).await
+}
+
+#[tauri::command]
+pub async fn channel_account_update(
+    state: tauri::State<'_, AppState>,
+        request: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_account_update(state.inner().clone(), request).await
+}
+
+#[tauri::command]
+pub async fn channel_account_get(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_account_get(state.inner().clone(), account_id).await
+}
+
+#[tauri::command]
+pub async fn channel_account_get_by_owner(
+    state: tauri::State<'_, AppState>,
+        owner_node_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_account_get_by_owner(state.inner().clone(), owner_node_id).await
+}
+
+#[tauri::command]
+pub async fn channel_account_list(
+    state: tauri::State<'_, AppState>,
+        limit: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_account_list(state.inner().clone(), limit).await
+}
+
+#[tauri::command]
+pub async fn channel_account_search(
+    state: tauri::State<'_, AppState>,
+        needle: String,
+        limit: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_account_search(state.inner().clone(), needle, limit).await
+}
+
+#[tauri::command]
+pub async fn channel_account_delete(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_account_delete(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn channel_subscribe(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        alias: Option<String>,
+        notify_mode: Option<String>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_subscribe(state.inner().clone(), account_id, alias, notify_mode).await
+}
+
+#[tauri::command]
+pub async fn channel_unsubscribe(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_unsubscribe(state.inner().clone(), account_id).await
+}
+
+#[tauri::command]
+pub async fn channel_subscriptions_list(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_subscriptions_list(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn channel_subscriptions_of_account(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_subscriptions_of_account(state.inner().clone(), account_id).await
+}
+
+#[tauri::command]
+pub async fn channel_subscription_set_notify(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        notify_mode: Option<String>,
+        is_muted: Option<bool>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_subscription_set_notify(state.inner().clone(), account_id, notify_mode, is_muted).await
+}
+
+#[tauri::command]
+pub async fn channel_subscription_set_pinned(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        is_pinned: bool,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_subscription_set_pinned(state.inner().clone(), account_id, is_pinned).await
+}
+
+#[tauri::command]
+pub async fn channel_feed_publish(
+    state: tauri::State<'_, AppState>,
+        request: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_feed_publish(state.inner().clone(), request).await
+}
+
+#[tauri::command]
+pub async fn channel_feed_retract(
+    state: tauri::State<'_, AppState>,
+        feed_id: String,
+        reason: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_feed_retract(state.inner().clone(), feed_id, reason).await
+}
+
+#[tauri::command]
+pub async fn channel_feed_get(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        feed_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_feed_get(state.inner().clone(), account_id, feed_id).await
+}
+
+#[tauri::command]
+pub async fn channel_feed_list(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        before_sequence: Option<u32>,
+        limit: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_feed_list(state.inner().clone(), account_id, before_sequence, limit).await
+}
+
+#[tauri::command]
+pub async fn channel_feed_timeline(
+    state: tauri::State<'_, AppState>,
+        before_sequence: Option<u32>,
+        limit: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_feed_timeline(state.inner().clone(), before_sequence, limit).await
+}
+
+#[tauri::command]
+pub async fn channel_feed_mark_read(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        last_read_seq: u32,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_feed_mark_read(state.inner().clone(), account_id, last_read_seq).await
+}
+
+#[tauri::command]
+pub async fn channel_feed_unread_count(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_feed_unread_count(state.inner().clone(), account_id).await
+}
+
+#[tauri::command]
+pub async fn channel_health(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_health(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn channel_analytics_summary(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        window_days: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_analytics_summary(state.inner().clone(), account_id, window_days).await
+}
+
+#[tauri::command]
+pub async fn channel_analytics_timeline(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        days: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_analytics_timeline(state.inner().clone(), account_id, days).await
+}
+
+#[tauri::command]
+pub async fn channel_analytics_audit(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+        cursor: Option<i64>,
+        limit: Option<u32>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_analytics_audit(state.inner().clone(), account_id, cursor, limit).await
+}
+
+#[tauri::command]
+pub async fn channel_analytics_audit_verify(
+    state: tauri::State<'_, AppState>,
+        account_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::channel_analytics_audit_verify(state.inner().clone(), account_id).await
+}
+
+#[tauri::command]
+pub async fn pairing_invitation_create(
+    state: tauri::State<'_, AppState>,
+        payload: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_invitation_create(state.inner().clone(), payload).await
+}
+
+#[tauri::command]
+pub async fn pairing_invitation_verify(
+    state: tauri::State<'_, AppState>,
+        payload: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_invitation_verify(state.inner().clone(), payload).await
+}
+
+#[tauri::command]
+pub async fn pairing_invitation_parse(
+    state: tauri::State<'_, AppState>,
+        invitation_code: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_invitation_parse(state.inner().clone(), invitation_code).await
+}
+
+#[tauri::command]
+pub async fn pairing_invitation_accept(
+    state: tauri::State<'_, AppState>,
+        payload: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_invitation_accept(state.inner().clone(), payload).await
+}
+
+#[tauri::command]
+pub async fn pairing_invitation_revoke(
+    state: tauri::State<'_, AppState>,
+        invitation_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_invitation_revoke(state.inner().clone(), invitation_id).await
+}
+
+#[tauri::command]
+pub async fn pairing_trusted_list(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_trusted_list(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn pairing_trusted_get(
+    state: tauri::State<'_, AppState>,
+        trusted_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_trusted_get(state.inner().clone(), trusted_id).await
+}
+
+#[tauri::command]
+pub async fn pairing_trusted_revoke(
+    state: tauri::State<'_, AppState>,
+        trusted_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_trusted_revoke(state.inner().clone(), trusted_id).await
+}
+
+#[tauri::command]
+pub async fn pairing_code_create(
+    state: tauri::State<'_, AppState>,
+        payload: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_code_create(state.inner().clone(), payload).await
+}
+
+#[tauri::command]
+pub async fn pairing_code_parse(
+    state: tauri::State<'_, AppState>,
+        code: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_code_parse(state.inner().clone(), code).await
+}
+
+#[tauri::command]
+pub async fn pairing_health(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::pairing_health(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn device_register(
+    state: tauri::State<'_, AppState>,
+        request: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::device_register(state.inner().clone(), request).await
+}
+
+#[tauri::command]
+pub async fn device_list(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::device_list(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn device_get(
+    state: tauri::State<'_, AppState>,
+        device_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::device_get(state.inner().clone(), device_id).await
+}
+
+#[tauri::command]
+pub async fn device_revoke(
+    state: tauri::State<'_, AppState>,
+        device_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::device_revoke(state.inner().clone(), device_id).await
+}
+
+#[tauri::command]
+pub async fn device_set_primary(
+    state: tauri::State<'_, AppState>,
+        device_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::device_set_primary(state.inner().clone(), device_id).await
+}
+
+#[tauri::command]
+pub async fn device_get_current(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::device_get_current(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn device_touch(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::device_touch(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn e2e_handshake_initiate(
+    state: tauri::State<'_, AppState>,
+        request: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::e2e_handshake_initiate(state.inner().clone(), request).await
+}
+
+#[tauri::command]
+pub async fn e2e_handshake_respond(
+    state: tauri::State<'_, AppState>,
+        request: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::e2e_handshake_respond(state.inner().clone(), request).await
+}
+
+#[tauri::command]
+pub async fn e2e_handshake_complete(
+    state: tauri::State<'_, AppState>,
+        request: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::e2e_handshake_complete(state.inner().clone(), request).await
+}
+
+#[tauri::command]
+pub async fn e2e_handshake_needs_rehandshake(
+    state: tauri::State<'_, AppState>,
+        peer_node_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::e2e_handshake_needs_rehandshake(state.inner().clone(), peer_node_id).await
+}
+
+#[tauri::command]
+pub async fn e2e_handshake_is_complete(
+    state: tauri::State<'_, AppState>,
+        peer_node_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::e2e_handshake_is_complete(state.inner().clone(), peer_node_id).await
+}
+
+#[tauri::command]
+pub async fn moments_comment_edit(
+    state: tauri::State<'_, AppState>,
+        comment: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::moments_comment_edit(state.inner().clone(), comment).await
+}
+
+#[tauri::command]
+pub async fn moments_comment_delete(
+    state: tauri::State<'_, AppState>,
+        comment_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::moments_comment_delete(state.inner().clone(), comment_id).await
+}
+
+#[tauri::command]
+pub async fn moments_unreact(
+    state: tauri::State<'_, AppState>,
+        reaction: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::moments_unreact(state.inner().clone(), reaction).await
+}
+
+#[tauri::command]
+pub async fn moments_block(
+    state: tauri::State<'_, AppState>,
+        target_user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::moments_block(state.inner().clone(), target_user_id).await
+}
+
+#[tauri::command]
+pub async fn moments_unblock(
+    state: tauri::State<'_, AppState>,
+        target_user_id: String,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::moments_unblock(state.inner().clone(), target_user_id).await
+}
+
+#[tauri::command]
+pub async fn moments_blocklist_list(
+    state: tauri::State<'_, AppState>,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::moments_blocklist_list(state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn moments_share(
+    state: tauri::State<'_, AppState>,
+        share: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::moments_share(state.inner().clone(), share).await
+}
+
+#[tauri::command]
+pub async fn moments_report(
+    state: tauri::State<'_, AppState>,
+        report: serde_json::Value,
+) -> TauriCommandResult<serde_json::Value> {
+    rcp::moments_report(state.inner().clone(), report).await
+}
+
+
 /// Returns every `tauri::command` exported by this module. The
 /// Tauri builder consumes this list verbatim via
 /// `.invoke_handler(tauri::generate_handler![all_commands!()])`.
@@ -995,6 +1883,114 @@ macro_rules! all_commands {
             $crate::commands_tauri::link_bookmark_tags,
             $crate::commands_tauri::link_bookmark_folders,
             $crate::commands_tauri::link_bookmark_count,
+            $crate::commands_tauri::channel_account_delete,
+            $crate::commands_tauri::channel_account_get,
+            $crate::commands_tauri::channel_account_get_by_owner,
+            $crate::commands_tauri::channel_account_list,
+            $crate::commands_tauri::channel_account_register,
+            $crate::commands_tauri::channel_account_search,
+            $crate::commands_tauri::channel_account_update,
+            $crate::commands_tauri::channel_analytics_audit,
+            $crate::commands_tauri::channel_analytics_audit_verify,
+            $crate::commands_tauri::channel_analytics_summary,
+            $crate::commands_tauri::channel_analytics_timeline,
+            $crate::commands_tauri::channel_feed_get,
+            $crate::commands_tauri::channel_feed_list,
+            $crate::commands_tauri::channel_feed_mark_read,
+            $crate::commands_tauri::channel_feed_publish,
+            $crate::commands_tauri::channel_feed_retract,
+            $crate::commands_tauri::channel_feed_timeline,
+            $crate::commands_tauri::channel_feed_unread_count,
+            $crate::commands_tauri::channel_health,
+            $crate::commands_tauri::channel_subscribe,
+            $crate::commands_tauri::channel_subscription_set_notify,
+            $crate::commands_tauri::channel_subscription_set_pinned,
+            $crate::commands_tauri::channel_subscriptions_list,
+            $crate::commands_tauri::channel_subscriptions_of_account,
+            $crate::commands_tauri::channel_unsubscribe,
+            $crate::commands_tauri::chat_conversation_create_direct,
+            $crate::commands_tauri::chat_conversation_pin,
+            $crate::commands_tauri::chat_conversation_toggle_pin,
+            $crate::commands_tauri::chat_conversation_unpin,
+            $crate::commands_tauri::chat_draft_clear,
+            $crate::commands_tauri::chat_draft_delete,
+            $crate::commands_tauri::chat_draft_get,
+            $crate::commands_tauri::chat_draft_list,
+            $crate::commands_tauri::chat_draft_save,
+            $crate::commands_tauri::chat_message_forward,
+            $crate::commands_tauri::chat_message_forward_merge,
+            $crate::commands_tauri::chat_notification_get_conversation,
+            $crate::commands_tauri::chat_notification_get_dnd,
+            $crate::commands_tauri::chat_notification_list_muted,
+            $crate::commands_tauri::chat_notification_mute,
+            $crate::commands_tauri::chat_notification_set_conversation,
+            $crate::commands_tauri::chat_notification_set_dnd,
+            $crate::commands_tauri::chat_notification_unmute,
+            $crate::commands_tauri::chat_reaction_add,
+            $crate::commands_tauri::chat_reaction_get,
+            $crate::commands_tauri::chat_reaction_remove,
+            $crate::commands_tauri::chat_tap,
+            $crate::commands_tauri::chat_thread_get,
+            $crate::commands_tauri::chat_thread_list,
+            $crate::commands_tauri::contact_add,
+            $crate::commands_tauri::contact_get,
+            $crate::commands_tauri::contact_remove,
+            $crate::commands_tauri::contact_search,
+            $crate::commands_tauri::contact_toggle_favorite,
+            $crate::commands_tauri::contact_update,
+            $crate::commands_tauri::device_get,
+            $crate::commands_tauri::device_get_current,
+            $crate::commands_tauri::device_list,
+            $crate::commands_tauri::device_register,
+            $crate::commands_tauri::device_revoke,
+            $crate::commands_tauri::device_set_primary,
+            $crate::commands_tauri::device_touch,
+            $crate::commands_tauri::e2e_handshake_complete,
+            $crate::commands_tauri::e2e_handshake_initiate,
+            $crate::commands_tauri::e2e_handshake_is_complete,
+            $crate::commands_tauri::e2e_handshake_needs_rehandshake,
+            $crate::commands_tauri::e2e_handshake_respond,
+            $crate::commands_tauri::group_dissolve,
+            $crate::commands_tauri::group_leave,
+            $crate::commands_tauri::group_list,
+            $crate::commands_tauri::group_list_muted,
+            $crate::commands_tauri::group_member_get,
+            $crate::commands_tauri::group_members,
+            $crate::commands_tauri::group_mention_parse,
+            $crate::commands_tauri::group_metadata_update,
+            $crate::commands_tauri::group_mute_all,
+            $crate::commands_tauri::group_mute_member,
+            $crate::commands_tauri::group_nickname_get,
+            $crate::commands_tauri::group_nickname_list,
+            $crate::commands_tauri::group_nickname_set,
+            $crate::commands_tauri::group_transfer_ownership,
+            $crate::commands_tauri::group_unmute_all,
+            $crate::commands_tauri::group_unmute_member,
+            $crate::commands_tauri::moments_block,
+            $crate::commands_tauri::moments_blocklist_list,
+            $crate::commands_tauri::moments_comment_delete,
+            $crate::commands_tauri::moments_comment_edit,
+            $crate::commands_tauri::moments_report,
+            $crate::commands_tauri::moments_share,
+            $crate::commands_tauri::moments_unblock,
+            $crate::commands_tauri::moments_unreact,
+            $crate::commands_tauri::pairing_code_create,
+            $crate::commands_tauri::pairing_code_parse,
+            $crate::commands_tauri::pairing_health,
+            $crate::commands_tauri::pairing_invitation_accept,
+            $crate::commands_tauri::pairing_invitation_create,
+            $crate::commands_tauri::pairing_invitation_parse,
+            $crate::commands_tauri::pairing_invitation_revoke,
+            $crate::commands_tauri::pairing_invitation_verify,
+            $crate::commands_tauri::pairing_trusted_get,
+            $crate::commands_tauri::pairing_trusted_list,
+            $crate::commands_tauri::pairing_trusted_revoke,
+            $crate::commands_tauri::profile_avatar_get,
+            $crate::commands_tauri::profile_avatar_remove,
+            $crate::commands_tauri::profile_avatar_upload,
+            $crate::commands_tauri::profile_kind_get,
+            $crate::commands_tauri::profile_kind_set,
+            $crate::commands_tauri::profile_public_key_label,
             // peer feedback
             $crate::commands_tauri::peerfeedback_set_trust,
             $crate::commands_tauri::peerfeedback_clear_trust,

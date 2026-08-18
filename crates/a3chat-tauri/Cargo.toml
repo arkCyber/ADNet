@@ -36,6 +36,11 @@ uuid                       = { workspace = true }
 # two-window builder compiles).
 tauri                      = { version = "2", features = [], optional = true }
 
+# Synchronisation primitives used by `tauri_cmd::state` to share the
+# app-wide `AppState` across windows. `parking_lot::RwLock` is the
+# non-async variant we want for a pure-data inner cell.
+parking_lot                = { workspace = true }
+
 [features]
 default   = []
 desktop   = ["dep:tauri"]

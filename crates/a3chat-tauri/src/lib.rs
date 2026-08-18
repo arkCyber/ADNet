@@ -28,5 +28,13 @@
 pub mod client;
 pub mod commands;
 
+/// Tauri command surface — RPC method wrappers, ops, catalog, error.
+///
+/// Gated on `desktop` so non-Tauri consumers (e.g. the React-less
+/// browser test harness, or the `client`-only backend harness) can
+/// still depend on `a3chat-tauri` for the HTTP RPC client.
+#[cfg(feature = "desktop")]
+pub mod tauri_cmd;
+
 pub use client::A3chatClient;
 pub use commands::{ChatsBootstrapPayload, LoginBootstrapPayload, run_minimal_two_window};

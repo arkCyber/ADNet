@@ -138,6 +138,7 @@ impl NotificationReceiver {
             (Some(_), A3chatEvent::ChatMessageRead { .. }) => true,
             (Some(uid), A3chatEvent::ChatMessageEdited { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::ChatMessageDeleted { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::ChatTap { user_id, .. }) => uid == user_id,
             // F-08 / B-06: each event carries the local owner's
             // user_id, so we route by that exactly like the chat
             // message events above. A None subscriber (catch-all)
@@ -156,6 +157,10 @@ impl NotificationReceiver {
             (Some(uid), A3chatEvent::MomentsPostCreated { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::MomentsPostDeleted { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::MomentsCommentAdded { user_id, .. }) => uid == user_id,
+            // MN-07 — `@`-mention fan-out is user-scoped to the
+            // *mentioned* user (so a client can filter on
+            // `mentioned == self`).
+            (Some(uid), A3chatEvent::MomentsCommentMention { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::MomentsReactionToggled { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::MomentsCommentEdited { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::MomentsCommentDeleted { user_id, .. }) => uid == user_id,

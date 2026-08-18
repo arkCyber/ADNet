@@ -701,6 +701,172 @@ pub async fn dispatch(
                 .map_err(A3chatError::from)?;
             serde_json::to_value(hits).map_err(A3chatError::from)
         }
+        A3chatRpcMethod::CHAT_THREAD_LIST => {
+            let root_id: MessageId = serde_json::from_value(
+                params
+                    .get("root_message_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("root_message_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let limit: u32 = params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.min(1000) as u32)
+                .unwrap_or(100);
+            let replies = svc
+                .storage()
+                .list_thread_replies(owner, &root_id, limit)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(replies).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::CHAT_THREAD_GET => {
+            let root_id: MessageId = serde_json::from_value(
+                params
+                    .get("root_message_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("root_message_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let root = svc
+                .storage()
+                .get_message(owner, &root_id)
+                .await
+                .map_err(A3chatError::from)?
+                .ok_or_else(|| A3chatError::NotFound(format!("root {} not found", root_id.as_str())))?;
+            let replies = svc
+                .storage()
+                .list_thread_replies(owner, &root_id, 1000)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({
+                "root": root,
+                "replies": replies,
+                "reply_count": replies.len(),
+            }))
+        }
+        A3chatRpcMethod::CHAT_TAP => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: Option<UserId> = params
+                .get("target_user_id")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            svc.bus.publish(a3chat_core::event::A3chatEvent::ChatTap {
+                user_id: owner.clone(),
+                conversation_id: conversation_id.clone(),
+                target_user_id: target.clone(),
+                actor_user_id: owner.clone(),
+            });
+            Ok(serde_json::json!({
+                "ok": true,
+                "conversation_id": conversation_id,
+                "target_user_id": target,
+            }))
+        }
+        A3chatRpcMethod::CHAT_MESSAGE_SEND_LOCATION => {
+            // F-15 — share a location card. The typed payload is
+            // validated (range check on lat/lon + content check on
+            // the label) and then embedded as a JSON document so the
+            // receiver's UI can render a map preview. The message
+            // type discriminator is `Location` so the UI doesn't
+            // mistake it for a normal text bubble.
+            let conversation_id: ConversationId = serde_json::from_value(
+                params.get("conversation_id").cloned().ok_or_else(|| {
+                    A3chatError::InvalidInput("conversation_id missing".into())
+                })?,
+            )
+            .map_err(A3chatError::from)?;
+            let payload: a3chat_core::message::LocationPayload =
+                serde_json::from_value(
+                    params
+                        .get("location")
+                        .cloned()
+                        .ok_or_else(|| A3chatError::InvalidInput("location missing".into()))?,
+                )
+                .map_err(A3chatError::from)?;
+            payload
+                .validate()
+                .map_err(|e| A3chatError::InvalidInput(e.to_string()))?;
+            let receiver_id: UserId = serde_json::from_value(
+                params
+                    .get("receiver_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("receiver_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let body_json = serde_json::to_string(&payload).map_err(A3chatError::from)?;
+            let envelope = MessageEnvelope {
+                conversation_id: conversation_id.clone(),
+                receiver_id: receiver_id.clone(),
+                message_type: a3chat_core::message::MessageType::Location,
+                body: MessageBody::Plain { content: body_json },
+                attachments: vec![],
+                reply_to: None,
+                sequence: 0,
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+            let stored = svc.send_message(owner, &envelope).await.map_err(A3chatError::from)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "message_id": stored.message.message_id,
+                "conversation_id": conversation_id,
+                "message_type": "location",
+            }))
+        }
+        A3chatRpcMethod::CHAT_MESSAGE_SEND_CONTACT_CARD => {
+            // F-16 — share a contact card. Same shape as the
+            // location RPC but with a ContactCardPayload.
+            let conversation_id: ConversationId = serde_json::from_value(
+                params.get("conversation_id").cloned().ok_or_else(|| {
+                    A3chatError::InvalidInput("conversation_id missing".into())
+                })?,
+            )
+            .map_err(A3chatError::from)?;
+            let payload: a3chat_core::message::ContactCardPayload =
+                serde_json::from_value(
+                    params
+                        .get("contact_card")
+                        .cloned()
+                        .ok_or_else(|| {
+                            A3chatError::InvalidInput("contact_card missing".into())
+                        })?,
+                )
+                .map_err(A3chatError::from)?;
+            payload
+                .validate()
+                .map_err(|e| A3chatError::InvalidInput(e.to_string()))?;
+            let receiver_id: UserId = serde_json::from_value(
+                params
+                    .get("receiver_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("receiver_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let body_json = serde_json::to_string(&payload).map_err(A3chatError::from)?;
+            let envelope = MessageEnvelope {
+                conversation_id: conversation_id.clone(),
+                receiver_id: receiver_id.clone(),
+                message_type: a3chat_core::message::MessageType::ContactCard,
+                body: MessageBody::Plain { content: body_json },
+                attachments: vec![],
+                reply_to: None,
+                sequence: 0,
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+            let stored = svc.send_message(owner, &envelope).await.map_err(A3chatError::from)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "message_id": stored.message.message_id,
+                "conversation_id": conversation_id,
+                "message_type": "contact_card",
+            }))
+        }
         _ => Err(A3chatError::Internal(format!(
             "ChatService does not handle {method}"
         ))),

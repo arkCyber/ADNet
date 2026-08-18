@@ -785,6 +785,47 @@ impl ChatStorage {
         Ok(got)
     }
 
+    /// F-12 — reply thread query. Returns every message that is a
+    /// direct or transitive reply to `root_id`, ordered oldest-first
+    /// by `sequence`. The root message itself is **not** included;
+    /// callers usually already have it from `get_message`. Results
+    /// are bounded by `limit` (auto-capped at 1000).
+    pub async fn list_thread_replies(
+        &self,
+        owner: &UserId,
+        root_id: &MessageId,
+        limit: u32,
+    ) -> AppResult<Vec<ChatMessage>> {
+        let conn_arc = self.connection(owner).await?;
+        let root_str = root_id.as_str().to_string();
+        let limit = limit.min(1000) as i64;
+        let rows: Vec<ChatMessage> =
+            tokio::task::spawn_blocking(move || -> AppResult<Vec<ChatMessage>> {
+                let guard = conn_arc.blocking_lock_owned();
+                // First-order replies: simpler and faster than a CTE
+                // — UI callers usually paginate this anyway. Mid-tier
+                // replies can be reached by passing the intermediate
+                // id as `root_id`.
+                let mut stmt = guard.prepare(
+                    "SELECT message_id, conversation_id, sender_id, receiver_id,
+                            message_type, body_json, attachments_json, reply_to,
+                            sequence, timestamp, read_at, is_edited, edited_at,
+                            integrity_hash, recalled_at
+                     FROM messages
+                     WHERE reply_to = ?1
+                     ORDER BY sequence ASC
+                     LIMIT ?2",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![root_str, limit], row_to_message)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("list_thread_replies join: {e}")))??;
+        Ok(rows)
+    }
+
     /// Mark `message_id` as read by `owner` and decrement the
     /// conversation's unread badge — all in one transaction. No-op
     /// if the message was already read by this user.
@@ -2843,6 +2884,123 @@ mod tests {
             .delete_message_for_me(&owner(), &MessageId::from("4".repeat(64)))
             .await;
         assert!(matches!(r, Err(AppError::Domain(_))));
+    }
+
+    // F-12 — thread list: reply_to links all replies back to the
+    // root. The list must be ordered by sequence (oldest first).
+    #[tokio::test]
+    async fn list_thread_replies_collects_all_replies_to_root() {
+        let (_dir, storage) = fresh_storage().await;
+        // Build a 3-message thread: root → reply1 → reply2.
+        let root = storage.save_outbound(&owner(), &envelope()).await.unwrap();
+        let root_id = root.message.message_id.clone();
+
+        // Save two more envelopes with strictly increasing
+        // timestamps so the subsequent UPDATE can patch their
+        // `reply_to` column in storage.
+        let mut reply1_env = envelope();
+        reply1_env.sequence = 2;
+        reply1_env.timestamp = envelope().timestamp + 1;
+        let r1 = storage.save_outbound(&owner(), &reply1_env).await.unwrap();
+        let r2_reply_to = r1.message.message_id.clone();
+        {
+            let conn = storage.connection_for(&owner()).await.unwrap();
+            let conn = tokio::task::spawn_blocking(move || conn.blocking_lock_owned())
+                .await
+                .unwrap();
+            conn.execute(
+                "UPDATE messages SET reply_to = ?1 WHERE message_id = ?2",
+                rusqlite::params![root_id.as_str(), r1.message.message_id.as_str()],
+            )
+            .unwrap();
+        }
+
+        let mut reply2_env = envelope();
+        reply2_env.sequence = 3;
+        reply2_env.timestamp = envelope().timestamp + 2;
+        let r2 = storage.save_outbound(&owner(), &reply2_env).await.unwrap();
+        {
+            let conn = storage.connection_for(&owner()).await.unwrap();
+            let conn = tokio::task::spawn_blocking(move || conn.blocking_lock_owned())
+                .await
+                .unwrap();
+            conn.execute(
+                "UPDATE messages SET reply_to = ?1 WHERE message_id = ?2",
+                rusqlite::params![r2_reply_to.as_str(), r2.message.message_id.as_str()],
+            )
+            .unwrap();
+        }
+
+        // First-order replies on the root.
+        let first_order = storage
+            .list_thread_replies(&owner(), &root_id, 100)
+            .await
+            .unwrap();
+        assert_eq!(first_order.len(), 1);
+        assert_eq!(
+            first_order[0].message_id.as_str(),
+            r1.message.message_id.as_str()
+        );
+
+        // Walking down through r1 surfaces r2.
+        let second = storage
+            .list_thread_replies(&owner(), &r1.message.message_id, 100)
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].message_id.as_str(),
+            r2.message.message_id.as_str()
+        );
+
+        // Sanity: root itself is not in its own reply list.
+        assert!(!first_order
+            .iter()
+            .any(|m| m.message_id.as_str() == root_id.as_str()));
+    }
+
+    // F-12 — empty thread (no replies yet) returns an empty vec.
+    #[tokio::test]
+    async fn list_thread_replies_empty_for_unanswered_root() {
+        let (_dir, storage) = fresh_storage().await;
+        let root = storage.save_outbound(&owner(), &envelope()).await.unwrap();
+        let replies = storage
+            .list_thread_replies(&owner(), &root.message.message_id, 100)
+            .await
+            .unwrap();
+        assert!(replies.is_empty());
+    }
+
+    // F-12 — limit caps the response size.
+    #[tokio::test]
+    async fn list_thread_replies_respects_limit() {
+        let (_dir, storage) = fresh_storage().await;
+        let root = storage.save_outbound(&owner(), &envelope()).await.unwrap();
+        let root_id = root.message.message_id.clone();
+
+        // Build 4 replies, all directly linked to root.
+        for i in 2..=5 {
+            let mut env = envelope();
+            env.sequence = i as u32;
+            env.timestamp = envelope().timestamp + i as i64;
+            let stored = storage.save_outbound(&owner(), &env).await.unwrap();
+            let sid = stored.message.message_id.clone();
+            let conn = storage.connection_for(&owner()).await.unwrap();
+            let conn = tokio::task::spawn_blocking(move || conn.blocking_lock_owned())
+                .await
+                .unwrap();
+            conn.execute(
+                "UPDATE messages SET reply_to = ?1 WHERE message_id = ?2",
+                rusqlite::params![root_id.as_str(), sid.as_str()],
+            )
+            .unwrap();
+        }
+
+        let limited = storage
+            .list_thread_replies(&owner(), &root_id, 2)
+            .await
+            .unwrap();
+        assert_eq!(limited.len(), 2);
     }
 
     #[tokio::test]
