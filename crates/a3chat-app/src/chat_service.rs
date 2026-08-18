@@ -131,6 +131,10 @@ pub type PresenceTouchGate = Arc<
 /// clock check.
 pub const RECALL_WINDOW_SECS: i64 = 120;
 
+/// Maximum number of results returned by search. Prevents unbounded
+/// queries that could lock the database.
+pub const MAX_SEARCH_RESULTS: u32 = 1000;
+
 impl ChatService {
     pub fn new(storage: ChatStorage, bus: NotificationBus) -> Self {
         Self {
@@ -577,6 +581,8 @@ impl ChatService {
         if needle.is_empty() {
             return Err(AppError::Domain("search needle is empty".into()));
         }
+        // Cap limit to prevent unbounded queries
+        let limit = limit.min(MAX_SEARCH_RESULTS);
         self.storage
             .search_messages(crate::storage::SearchQuery {
                 owner,
