@@ -465,3 +465,46 @@ fn test_derp_config_region_handling() {
     let default = DerpConfig::default();
     assert!(default.region.is_none());
 }
+
+/// Phase 5c: Test builder pattern chaining.
+#[test]
+fn test_derp_config_builder_chaining() {
+    let config = DerpConfig::local(8080)
+        .with_url("https://backup1.example.com")
+        .with_url("https://backup2.example.com")
+        .with_region("eu-central");
+
+    assert_eq!(config.urls.len(), 3);
+    assert_eq!(config.region, Some("eu-central".to_string()));
+    assert_eq!(config.urls[0], "http://127.0.0.1:8080");
+}
+
+/// Phase 5c: Test failure scenario descriptions.
+#[test]
+fn test_all_failure_scenarios() {
+    let scenarios = [
+        DerpFailureScenario::Unreachable,
+        DerpFailureScenario::HighLatency,
+        DerpFailureScenario::IntermittentDrop,
+        DerpFailureScenario::ServerError,
+    ];
+
+    for scenario in scenarios {
+        let desc = scenario.description();
+        assert!(!desc.is_empty());
+        assert!(desc.len() > 5);
+    }
+}
+
+/// Phase 5c: Test health check equality.
+#[test]
+fn test_derp_health_check_equality() {
+    let h1 = DerpHealthCheck::healthy(100);
+    let h2 = DerpHealthCheck::healthy(100);
+    let h3 = DerpHealthCheck::unhealthy("timeout");
+
+    assert_eq!(h1.reachable, h2.reachable);
+    assert_ne!(h1.reachable, h3.reachable);
+    assert_eq!(h1.latency_ms, h2.latency_ms);
+    assert_ne!(h1.latency_ms, h3.latency_ms);
+}

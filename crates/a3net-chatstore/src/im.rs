@@ -126,6 +126,8 @@ pub struct Conversation {
     pub description: String,
     /// Pinned announcement text. Empty string when none is set.
     pub announcement: String,
+    /// Group avatar URL. None when the group has no custom avatar.
+    pub avatar_url: Option<String>,
     /// True for invite-only groups.
     pub is_private: bool,
     /// True after the group was dissolved. Dissolved groups reject new messages.
@@ -440,8 +442,8 @@ impl ImManager {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO conversations
-             (id, chat_type, title, description, announcement, is_private, is_dissolved, created_at, updated_at, message_count, last_sequence)
-             VALUES (?1, ?2, ?3, '', '', ?4, 0, ?5, ?6, 0, 0)",
+             (id, chat_type, title, description, announcement, avatar_url, is_private, is_dissolved, created_at, updated_at, message_count, last_sequence)
+             VALUES (?1, ?2, ?3, '', '', NULL, ?4, 0, ?5, ?6, 0, 0)",
             params![
                 id,
                 chat_type.as_str(),
@@ -457,6 +459,7 @@ impl ImManager {
             title: title.to_string(),
             description: String::new(),
             announcement: String::new(),
+            avatar_url: None,
             is_private,
             is_dissolved: false,
             created_at: now,
@@ -471,7 +474,8 @@ impl ImManager {
         a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, chat_type, title, description, announcement, is_private, is_dissolved,
+            "SELECT id, chat_type, title, description, announcement, avatar_url,
+                    is_private, is_dissolved,
                     created_at, updated_at, message_count, last_sequence
              FROM conversations WHERE id = ?1",
         )?;
@@ -586,13 +590,49 @@ impl ImManager {
         Ok(())
     }
 
+    /// Set or clear the group avatar URL.
+    /// Pass `None` to remove the avatar (revert to default).
+    /// DO-178C §6.1: URL validation runs before the SQL write.
+    pub async fn set_group_avatar_url(
+        &self,
+        conversation_id: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+
+        // Validate URL if provided
+        if let Some(url) = avatar_url {
+            if url.is_empty() {
+                return Err(ChatStoreError::Validation(
+                    "avatar_url cannot be empty string; use None to clear".into(),
+                ));
+            }
+            a3net_types::invariants::validate_url("avatar_url", url)?;
+        }
+
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE conversations
+             SET avatar_url = ?1, updated_at = ?2
+             WHERE id = ?3 AND chat_type = 'group'",
+            params![avatar_url, now.to_rfc3339(), conversation_id],
+        )?;
+        if n == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "group conversation {conversation_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
     /// All conversations visible to `user_id` (every 1-to-1 chat
     /// plus every group the user is a member of).
     pub async fn list_user_conversations(&self, user_id: &str) -> Result<Vec<Conversation>> {
         a3net_types::invariants::validate_id("user_id", user_id)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.chat_type, c.title, c.description, c.announcement,
+            "SELECT c.id, c.chat_type, c.title, c.description, c.announcement, c.avatar_url,
                     c.is_private, c.is_dissolved,
                     c.created_at, c.updated_at, c.message_count, c.last_sequence
              FROM conversations c
@@ -1621,12 +1661,13 @@ fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         title: row.get(2)?,
         description: row.get(3)?,
         announcement: row.get(4)?,
-        is_private: row.get::<_, bool>(5)?,
-        is_dissolved: row.get::<_, bool>(6)?,
-        created_at: parse_dt(row.get::<_, String>(7)?)?,
-        updated_at: parse_dt(row.get::<_, String>(8)?)?,
-        message_count: row.get::<_, i64>(9)? as u32,
-        last_sequence: row.get::<_, i64>(10)? as u32,
+        avatar_url: row.get(5)?,
+        is_private: row.get::<_, bool>(6)?,
+        is_dissolved: row.get::<_, bool>(7)?,
+        created_at: parse_dt(row.get::<_, String>(8)?)?,
+        updated_at: parse_dt(row.get::<_, String>(9)?)?,
+        message_count: row.get::<_, i64>(10)? as u32,
+        last_sequence: row.get::<_, i64>(11)? as u32,
     })
 }
 

@@ -1437,3 +1437,201 @@ fn startup_rejects_newer_schema_version() {
         "expected SchemaVersion, got {err:?}"
     );
 }
+
+// ----------------------------------------------------------------------
+// Group avatar tests
+// ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn im_set_group_avatar_url_updates_conversation() {
+    let (_dir, mgr) = temp_im();
+    let alice = mgr.create_user("alice", "Alice").await.unwrap();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "team", false)
+        .await
+        .unwrap();
+
+    // Initially no avatar.
+    let fetched = mgr.get_conversation(&conv.id).await.unwrap().unwrap();
+    assert!(fetched.avatar_url.is_none());
+
+    // Set avatar URL.
+    let url = "https://example.com/avatar.png";
+    mgr.set_group_avatar_url(&conv.id, Some(url)).await.unwrap();
+
+    let fetched = mgr.get_conversation(&conv.id).await.unwrap().unwrap();
+    assert_eq!(fetched.avatar_url.as_deref(), Some(url));
+}
+
+#[tokio::test]
+async fn im_set_group_avatar_url_clears_avatar() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "team", false)
+        .await
+        .unwrap();
+
+    // Set then clear.
+    mgr.set_group_avatar_url(&conv.id, Some("https://example.com/a.png"))
+        .await
+        .unwrap();
+    mgr.set_group_avatar_url(&conv.id, None).await.unwrap();
+
+    let fetched = mgr.get_conversation(&conv.id).await.unwrap().unwrap();
+    assert!(fetched.avatar_url.is_none());
+}
+
+#[tokio::test]
+async fn im_set_group_avatar_url_rejects_empty_string() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "team", false)
+        .await
+        .unwrap();
+
+    let err = mgr.set_group_avatar_url(&conv.id, Some("")).await.unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::Validation(_)));
+}
+
+#[tokio::test]
+async fn im_set_group_avatar_url_rejects_invalid_url() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "team", false)
+        .await
+        .unwrap();
+
+    // validate_url checks length and NUL bytes, not URL format.
+    // Test with URL exceeding MAX_NAME_LEN (256 bytes).
+    let long_url = "https://example.com/".to_string() + &"x".repeat(300);
+    let err = mgr
+        .set_group_avatar_url(&conv.id, Some(&long_url))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::Validation(_)));
+}
+
+#[tokio::test]
+async fn im_set_group_avatar_url_rejects_nonexistent_conversation() {
+    let (_dir, mgr) = temp_im();
+    let err = mgr
+        .set_group_avatar_url("ghost", Some("https://example.com/a.png"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn im_list_conversations_includes_avatar_url() {
+    let (_dir, mgr) = temp_im();
+    let alice = mgr.create_user("alice", "Alice").await.unwrap();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "team", true)
+        .await
+        .unwrap();
+    mgr.add_group_member(&conv.id, &alice.id, "owner")
+        .await
+        .unwrap();
+    mgr.set_group_avatar_url(&conv.id, Some("https://example.com/team.png"))
+        .await
+        .unwrap();
+
+    let convs = mgr.list_user_conversations(&alice.id).await.unwrap();
+    assert_eq!(convs.len(), 1);
+    assert_eq!(convs[0].avatar_url.as_deref(), Some("https://example.com/team.png"));
+}
+
+#[tokio::test]
+async fn im_create_conversation_has_no_avatar() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "new-group", true)
+        .await
+        .unwrap();
+    assert!(conv.avatar_url.is_none());
+}
+
+// ----------------------------------------------------------------------
+// Group metadata tests (title, description, avatar)
+// ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn im_set_group_title_updates_conversation() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "original", false)
+        .await
+        .unwrap();
+
+    mgr.set_group_title(&conv.id, "updated").await.unwrap();
+
+    let fetched = mgr.get_conversation(&conv.id).await.unwrap().unwrap();
+    assert_eq!(fetched.title, "updated");
+}
+
+#[tokio::test]
+async fn im_set_group_title_rejects_too_long() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "team", false)
+        .await
+        .unwrap();
+
+    let long_name = "x".repeat(257);
+    let err = mgr.set_group_title(&conv.id, &long_name).await.unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::Validation(_)));
+}
+
+#[tokio::test]
+async fn im_set_group_description_updates_conversation() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "team", false)
+        .await
+        .unwrap();
+
+    mgr.set_group_description(&conv.id, "A great team")
+        .await
+        .unwrap();
+
+    let fetched = mgr.get_conversation(&conv.id).await.unwrap().unwrap();
+    assert_eq!(fetched.description, "A great team");
+}
+
+#[tokio::test]
+async fn im_set_group_description_rejects_too_long() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::Group, "team", false)
+        .await
+        .unwrap();
+
+    let long_desc = "x".repeat(1025);
+    let err = mgr.set_group_description(&conv.id, &long_desc).await.unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::Validation(_)));
+}
+
+#[tokio::test]
+async fn im_set_group_metadata_not_found_for_one_on_one() {
+    let (_dir, mgr) = temp_im();
+    let conv = mgr
+        .create_conversation(ChatType::OneOnOne, "dm", false)
+        .await
+        .unwrap();
+
+    // Title/description/avatar only apply to groups.
+    let err = mgr.set_group_title(&conv.id, "nope").await.unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::NotFound(_)));
+
+    let err = mgr
+        .set_group_description(&conv.id, "nope")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::NotFound(_)));
+
+    let err = mgr
+        .set_group_avatar_url(&conv.id, Some("https://x.png"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::NotFound(_)));
+}

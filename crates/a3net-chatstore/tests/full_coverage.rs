@@ -137,7 +137,8 @@ fn schema_version_constant_matches_documented() {
     // - migrate_to(3): Add chat_trust table
     // - migrate_to(4): Add group-metadata columns on conversations
     // - migrate_to(5): Add presence columns to group_members (last_seen, is_online, temp_admin_until)
-    assert_eq!(SCHEMA_VERSION, 5);
+    // - migrate_to(6): Add avatar_url column to conversations
+    assert_eq!(SCHEMA_VERSION, 6);
 }
 
 #[test]

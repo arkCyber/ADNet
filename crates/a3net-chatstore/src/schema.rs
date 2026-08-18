@@ -267,6 +267,36 @@ pub(super) const INDEX_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_folder ON link_bookmarks(owner_id, folder)",
     "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_pinned ON link_bookmarks(owner_id, is_pinned)",
     "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_archived ON link_bookmarks(owner_id, is_archived)",
+    // FTS5 virtual table for full-text search on direct messages.
+    // DO-178C §6.1: FTS5 provides O(1) lookup vs O(n) LIKE scans.
+    "CREATE VIRTUAL TABLE IF NOT EXISTS direct_messages_fts USING fts5(
+        message_id,
+        content,
+        content='direct_messages',
+        content_rowid='rowid'
+    )",
+    // Triggers to keep FTS5 in sync with direct_messages table.
+    // DO-178C §6.1: Ensures FTS index stays consistent with source data.
+    "CREATE TRIGGER IF NOT EXISTS direct_messages_fts_insert
+     AFTER INSERT ON direct_messages WHEN NEW.content IS NOT NULL
+     BEGIN
+         INSERT INTO direct_messages_fts(rowid, message_id, content)
+         VALUES (NEW.rowid, NEW.message_id, NEW.content);
+     END",
+    "CREATE TRIGGER IF NOT EXISTS direct_messages_fts_delete
+     AFTER DELETE ON direct_messages WHEN OLD.content IS NOT NULL
+     BEGIN
+         INSERT INTO direct_messages_fts(direct_messages_fts, rowid, message_id, content)
+         VALUES('delete', OLD.rowid, OLD.message_id, OLD.content);
+     END",
+    "CREATE TRIGGER IF NOT EXISTS direct_messages_fts_update
+     AFTER UPDATE ON direct_messages WHEN NEW.content IS NOT NULL
+     BEGIN
+         INSERT INTO direct_messages_fts(direct_messages_fts, rowid, message_id, content)
+         VALUES('delete', OLD.rowid, OLD.message_id, OLD.content);
+         INSERT INTO direct_messages_fts(rowid, message_id, content)
+         VALUES (NEW.rowid, NEW.message_id, NEW.content);
+     END",
 ];
 
 /// The `schema_version` table is created before everything else so
