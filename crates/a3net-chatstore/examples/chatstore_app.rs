@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open the hub database.
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("hub.db");
-    let mgr = ImManager::new(&db_path)?;
+    let mgr = ImManager::new(db_path)?;
 
     // 2. Two users. We also stash a fresh 12-digit id so the
     //    operator can see the format the hub server emits.

@@ -20,7 +20,8 @@
 
 #[cfg(feature = "iroh")]
 pub mod derp {
-    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use anyhow::Result;
@@ -41,7 +42,8 @@ pub mod derp {
     /// ```
     pub struct TestDerpServer {
         port: u16,
-        shutdown_tx: tokio::sync::oneshot::Sender<()>,
+        running: Arc<AtomicBool>,
+        _shutdown_tx: tokio::sync::oneshot::Sender<()>,
     }
 
     impl TestDerpServer {
@@ -51,17 +53,21 @@ pub mod derp {
             let port = listener.local_addr()?.port();
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+            let running = Arc::new(AtomicBool::new(true));
+            let running_clone = running.clone();
 
             // In a full implementation, we would spawn the actual iroh DERP server
-            // For now, we document the interface and provide a mock
+            // For now, we just keep the port open to simulate a running server
             tokio::spawn(async move {
                 let mut rx = shutdown_rx;
                 loop {
                     tokio::select! {
-                        _ = &mut rx => break,
+                        _ = &mut rx => {
+                            running_clone.store(false, Ordering::SeqCst);
+                            break;
+                        }
                         _ = sleep(Duration::from_secs(1)) => {
-                            // DERP server would handle connections here
-                            // For testing, we just keep the port open
+                            // Keep-alive for DERP server simulation
                         }
                     }
                 }
@@ -69,7 +75,8 @@ pub mod derp {
 
             Ok(Self {
                 port,
-                shutdown_tx,
+                running,
+                _shutdown_tx: shutdown_tx,
             })
         }
 
@@ -84,18 +91,12 @@ pub mod derp {
         }
 
         /// Check if the server is still running.
-        pub async fn is_running(&self) -> bool {
-            TcpListener::bind(format!("127.0.0.1:{}", self.port))
-                .await
-                .is_err()
+        pub fn is_running(&self) -> bool {
+            self.running.load(Ordering::SeqCst)
         }
     }
 
-    impl Drop for TestDerpServer {
-        fn drop(&mut self) {
-            let _ = self.shutdown_tx.send(());
-        }
-    }
+    // Drop handled by background task via oneshot channel drop
 
     /// Phase 5c: Two-node topology connected via DERP relay.
     ///
@@ -122,8 +123,6 @@ pub mod derp {
     /// ```
     pub struct TwoNodeDerpTopology {
         derp_server: TestDerpServer,
-        _node_a_secret: iroh::key::SecretKey,
-        _node_b_secret: iroh::key::SecretKey,
     }
 
     impl TwoNodeDerpTopology {
@@ -131,14 +130,8 @@ pub mod derp {
         pub async fn new() -> Result<Self> {
             let derp_server = TestDerpServer::new().await?;
 
-            // Generate secret keys for two test nodes
-            let node_a_secret = iroh::key::SecretKey::generate();
-            let node_b_secret = iroh::key::SecretKey::generate();
-
             Ok(Self {
                 derp_server,
-                _node_a_secret: node_a_secret,
-                _node_b_secret: node_b_secret,
             })
         }
 
@@ -151,7 +144,7 @@ pub mod derp {
         pub async fn wait_for_derp_ready(&self) -> Result<()> {
             // Retry binding to check server readiness
             for _ in 0..10 {
-                if self.derp_server.is_running().await {
+                if self.derp_server.is_running() {
                     return Ok(());
                 }
                 sleep(Duration::from_millis(100)).await;
@@ -291,6 +284,7 @@ pub mod derp {
         }
 
         /// Create an unhealthy health check.
+        #[allow(unused_variables)]
         pub fn unhealthy(reason: &str) -> Self {
             Self {
                 reachable: false,

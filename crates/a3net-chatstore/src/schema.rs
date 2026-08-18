@@ -238,6 +238,8 @@ pub(super) const INDEX_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_messages_conv_sequence    ON messages(conversation_id, sequence)",
     "CREATE INDEX IF NOT EXISTS idx_group_members_conv        ON group_members(conversation_id)",
     "CREATE INDEX IF NOT EXISTS idx_group_members_user        ON group_members(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_group_members_temp_admin  ON group_members(temp_admin_until)
+        WHERE temp_admin_until IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_user_sequences_user       ON user_sequences(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_hub_receipts_message      ON hub_message_receipts(message_id)",
     // ---- link bookmarks (per-user URL archive) -----------------------------
@@ -385,6 +387,14 @@ fn migrate_to(conn: &rusqlite::Transaction<'_>, target: u32) -> rusqlite::Result
             try_add_column(conn, "group_members", "last_seen", "TEXT")?;
             try_add_column(conn, "group_members", "is_online", "INTEGER NOT NULL DEFAULT 0")?;
             try_add_column(conn, "group_members", "temp_admin_until", "TEXT")?;
+
+            // Add partial index for efficient temp admin expiry queries
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_group_members_temp_admin
+                 ON group_members(temp_admin_until)
+                 WHERE temp_admin_until IS NOT NULL",
+                [],
+            )?;
         }
         _ => {
             // Unknown future version. Should be unreachable because

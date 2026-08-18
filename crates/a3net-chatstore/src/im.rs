@@ -794,6 +794,23 @@ impl ImManager {
         Ok(())
     }
 
+    /// Clear all expired temporary admin grants across all groups.
+    /// This is intended to be called periodically (e.g., by a background task)
+    /// to clean up stale data from expired grants.
+    ///
+    /// Returns the number of expired grants that were cleared.
+    pub async fn cleanup_expired_temp_admin_grants(&self) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let cleared = conn.execute(
+            "UPDATE group_members
+             SET temp_admin_until = NULL
+             WHERE temp_admin_until IS NOT NULL
+               AND datetime(temp_admin_until) < datetime('now')",
+            [],
+        )?;
+        Ok(cleared)
+    }
+
     /// All members of a group conversation, oldest-joined first.
     pub async fn get_group_members(&self, conversation_id: &str) -> Result<Vec<GroupMember>> {
         a3net_types::invariants::validate_id("conversation_id", conversation_id)?;

@@ -305,7 +305,7 @@ pub fn init_trust_schema(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema;
+    
     use rusqlite::Connection;
     use tempfile::tempdir;
 
