@@ -209,7 +209,17 @@ pub fn validate_url(field: &str, value: &str) -> Result<()> {
             "{field}: unsupported scheme '{scheme}' (only http/https/data allowed)"
         )));
     }
-    if parsed.host().is_none() && scheme != "data" {
+    // SECURITY: data: URLs must be image/* to prevent XSS / HTML injection.
+    // `data:text/html,<h1>` would bypass host check; lock it down here.
+    if scheme == "data" {
+        let mime_prefix = "data:image/";
+        if !value.starts_with(mime_prefix) {
+            return Err(AdnetError::Validation(format!(
+                "{field}: data: URLs must be image/* (e.g. data:image/png;base64,...)"
+            )));
+        }
+    }
+    if parsed.host().is_none() {
         return Err(AdnetError::Validation(format!(
             "{field}: URL has no host"
         )));
