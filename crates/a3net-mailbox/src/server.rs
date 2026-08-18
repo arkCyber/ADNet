@@ -396,7 +396,8 @@ pub struct EnqueueRequest {
 async fn enqueue_handler(
     State(state): State<ServerState>,
     Path(recipient_id): Path<String>,
-    headers: axum::http::HeaderMap,
+    #[cfg(feature = "billing")] headers: axum::http::HeaderMap,
+    #[cfg(not(feature = "billing"))] _headers: (),
     axum::Json(req): axum::Json<EnqueueRequest>,
 ) -> Response {
     let m = &state.metrics;

@@ -8,8 +8,7 @@ use std::sync::Arc;
 use a3chat_core::error::A3chatError;
 use a3chat_core::id::{ConversationId, UserId};
 
-use crate::bot_framework::{self as bot_framework_mod, BotConfig, BotRole, ChatBot, ReplyGenerator};
-use crate::channel_service::{self as channel_service_mod, ChannelService, ChannelServiceConfig};
+use crate::channel_service::{self as channel_service_mod, ChannelService};
 use crate::chat_reaction_service::{self as reaction_service, ChatReactionService};
 use crate::chat_service::{self, ChatService};
 use crate::contact_service::{self, ContactService};
@@ -20,7 +19,7 @@ use crate::e2e_encryption_service::{self as e2e_encryption_service_mod, E2eEncry
 use crate::error::{AppError, AppResult};
 use crate::forward_service::{self as forward_service_mod, ForwardService};
 use crate::group_service::{self, GroupService};
-use crate::group_invitation_service::{self as group_invitation_mod, GroupInvitationService};
+use crate::group_invitation_service::GroupInvitationService;
 #[cfg(feature = "iroh")]
 use crate::group_sync_service::{self as group_sync_service_mod, GroupSyncService};
 use crate::keyring::E2eKeyring;

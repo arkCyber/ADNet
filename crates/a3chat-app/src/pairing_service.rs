@@ -64,7 +64,7 @@ use std::sync::Arc;
 use a3net_identity::wallet::Wallet;
 use a3net_pairing::capability::CapabilitySet;
 use a3net_pairing::code::InvitationCode;
-use a3net_pairing::error::{PairingError, PairingResult};
+use a3net_pairing::error::PairingError;
 use a3net_pairing::invitation::SignedInvitation;
 use a3net_pairing::store::{TrustedDeviceStore, TrustedDeviceStoreConfig};
 use a3net_types::node::NodeId;

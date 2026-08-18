@@ -768,7 +768,7 @@ impl ContactService {
     /// operator can opt to skip the check in tests). Returns
     /// `Ok(false)` on `UserStore` errors — log and fail-open rather
     /// than block legitimate traffic on a transient store glitch.
-    pub async fn is_blocked(&self, owner: &UserId, user_id: &UserId) -> bool {
+    pub async fn is_blocked(&self, _owner: &UserId, user_id: &UserId) -> bool {
         let store_guard = self.store.read().await;
         let store = match store_guard.as_ref() {
             Some(s) => s,

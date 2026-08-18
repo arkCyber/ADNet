@@ -9,7 +9,6 @@ use a3chat_core::error::A3chatError;
 use a3chat_core::id::{ConversationId, MessageId, UserId};
 use a3chat_core::message::{ChatMessage, MessageBody, MessageEnvelope};
 use a3chat_core::rpc::A3chatRpcMethod;
-use tokio::sync::RwLock;
 
 use crate::error::{AppError, AppResult};
 use crate::moderation_service::ModerationService;
@@ -255,7 +254,7 @@ impl ChatService {
         limit: u32,
     ) -> AppResult<Vec<ChatMessage>> {
         // Primary: authoritative SQLite read.
-        let mut sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
+        let sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
 
         #[cfg(feature = "iroh")]
         if let Some(docs_chat) = self.iroh_docs_chat.read().await.as_ref() {

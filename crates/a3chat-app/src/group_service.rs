@@ -366,7 +366,7 @@ impl GroupService {
         user: &UserId,
         conversation_id: &ConversationId,
         _invitation_id: &str,
-        sync_ticket: Option<&str>,
+        _sync_ticket: Option<&str>,
     ) -> AppResult<GroupMember> {
         // GB-13 — extract the hub Arc before any `.await`.
         let hub = self
