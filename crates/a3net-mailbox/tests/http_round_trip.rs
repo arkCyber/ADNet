@@ -889,10 +889,11 @@ async fn ack_with_distinct_msg_ids_succeeds() {
     let msg_id_a = "a".repeat(64);
     let msg_id_b = "b".repeat(64);
 
+    let client = reqwest::Client::new();
+
     // Enqueue two messages for Bob.
     for msg_id in [&msg_id_a, &msg_id_b] {
         let (req, _) = envelope_from(&bob_w, &bob, &bob, msg_id, b"test");
-        let client = reqwest::Client::new();
         let url = format!("{}/v1/inbox/{}", handle.base_url, bob);
         let resp = client.post(&url).json(&req).send().await.expect("enqueue");
         assert_eq!(resp.status(), 202);
@@ -915,7 +916,7 @@ async fn ack_with_distinct_msg_ids_succeeds() {
 }
 
 /// StaleSignature / InvalidTimestamp error codes and HTTP status are stable.
-#[tokio::test]
+#[test]
 fn new_error_codes_are_stable() {
     use a3net_mailbox::MailboxError;
 
@@ -929,7 +930,7 @@ fn new_error_codes_are_stable() {
 }
 
 /// RetentionPolicy: unknown recipient gets default TTL.
-#[tokio::test]
+#[test]
 fn retention_unknown_recipient_gets_default() {
     use a3net_mailbox::policy::RetentionPolicy;
 
@@ -940,7 +941,7 @@ fn retention_unknown_recipient_gets_default() {
 }
 
 /// RetentionPolicy: override clamped to max_ttl_secs.
-#[tokio::test]
+#[test]
 fn retention_override_clamped_to_max() {
     use a3net_mailbox::policy::{RecipientTtlOverride, RetentionPolicy};
 
@@ -956,7 +957,7 @@ fn retention_override_clamped_to_max() {
 }
 
 /// RetentionPolicy: override clamped to min_ttl_secs.
-#[tokio::test]
+#[test]
 fn retention_override_clamped_to_min() {
     use a3net_mailbox::policy::{RecipientTtlOverride, RetentionPolicy};
 

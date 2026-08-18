@@ -45,7 +45,7 @@ use tracing::{info, warn};
 use a3net_observability::prometheus::PrometheusExporter;
 use a3net_observability::registry::GLOBAL;
 use crate::rate_limit::{
-    rate_limit_middleware, RateLimitConfig, RateLimitRegistry, RateLimitState, TrustedProxy,
+    rate_limit_middleware, RateLimitRegistry, RateLimitState, TrustedProxy,
 };
 
 use crate::auth::{
@@ -293,7 +293,7 @@ impl MailboxServer {
         let port = bound.port();
         let bind_host = bound.ip().to_string();
 
-        let registry = rate_limit.unwrap_or_else(RateLimitRegistry::new);
+        let registry = rate_limit.unwrap_or_default();
         // Enqueue path: tight policy (60 req/min per IP).
         // TrustedProxy::Disabled: forwarded headers are ignored by default.
         // For deployments behind a trusted reverse proxy, replace with
@@ -301,7 +301,7 @@ impl MailboxServer {
         let rate_state = RateLimitState::enqueue(registry.clone(), TrustedProxy::Disabled);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut router = Router::new()
+        let router = Router::new()
             .route(
                 "/v1/inbox/:recipient_id",
                 post(enqueue_handler).get(pull_handler),
@@ -477,8 +477,8 @@ async fn enqueue_handler(
     // Step 5b: billing mandatory check (P3-3).
     // If billing is mandatory and no valid pledge was provided, reject.
     #[cfg(feature = "billing")]
-    if let Some(ref billing) = state.billing {
-        if billing.mandatory {
+    if let Some(ref billing) = state.billing
+        && billing.mandatory {
             let pledge_header = headers
                 .get("x-a3net-pledge")
                 .and_then(|v| v.to_str().ok());
@@ -489,7 +489,6 @@ async fn enqueue_handler(
                 ));
             }
         }
-    }
 
     // Step 6: build the envelope and check size + quota.
     // Use per-recipient TTL override if present (P3-8: RetentionPolicy).

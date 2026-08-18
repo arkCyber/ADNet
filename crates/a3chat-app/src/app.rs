@@ -21,6 +21,8 @@ use crate::error::{AppError, AppResult};
 use crate::forward_service::{self as forward_service_mod, ForwardService};
 use crate::group_service::{self, GroupService};
 use crate::group_invitation_service::{self as group_invitation_mod, GroupInvitationService};
+#[cfg(feature = "iroh")]
+use crate::group_sync_service::{self as group_sync_service_mod, GroupSyncService};
 use crate::keyring::E2eKeyring;
 use crate::link_bookmark_service::{self as link_bookmark_service, LinkBookmarkService};
 use crate::media_service::{self, MediaConfig, MediaService};
@@ -258,6 +260,10 @@ pub struct A3chatApp {
     /// `PairingService-not-configured` error.
     pub pairing: std::sync::Arc<std::sync::Mutex<Option<PairingService>>>,
     pub bus: NotificationBus,
+    /// Local device identity. Set in [`A3chatApp::new`] and used
+    /// to derive the keyring, channel node ID, and as the `owner`
+    /// argument when initialising services.
+    owner: UserId,
     pub keyring: E2eKeyring,
     /// Unix timestamp at which this app started serving requests.
     /// Used by [`A3chatApp::dispatch`] to answer `a3chat.healthz`.
@@ -269,6 +275,12 @@ pub struct A3chatApp {
     /// iroh-docs (best-effort fan-out).
     #[cfg(feature = "iroh")]
     pub iroh_docs_chat: Option<Arc<a3net_chatstore::IrohDocsChat>>,
+    /// Phase 5c: iroh-docs P2P group sync service.
+    /// Manages per-group sync subscriptions, backfills messages from iroh-docs
+    /// into SQLite, and notifies SSE subscribers. Initialise via
+    /// [`A3chatApp::with_group_sync_service`] after construction.
+    #[cfg(feature = "iroh")]
+    pub group_sync: Option<GroupSyncService>,
 }
 
 impl A3chatApp {
@@ -387,9 +399,12 @@ impl A3chatApp {
             pairing: std::sync::Arc::new(std::sync::Mutex::new(None)),
             bus,
             keyring,
+            owner: owner.clone(),
             bus_start_unix,
             #[cfg(feature = "iroh")]
             iroh_docs_chat: None,
+            #[cfg(feature = "iroh")]
+            group_sync: None,
         })
     }
 
@@ -514,6 +529,32 @@ impl A3chatApp {
         self.chat.with_iroh_docs_chat(bridge.inner.clone()).await;
     }
 
+    /// Phase 5c: install the iroh-docs P2P group sync service.
+    ///
+    /// Call this **after** `with_iroh_docs_chat` and **after**
+    /// `init_user`, so that the local `owner` UserId is known.
+    /// The `group_sync` service keeps per-conversation subscriptions
+    /// to iroh-docs docs and periodically backfills new messages
+    /// into SQLite.
+    ///
+    /// The `iroh_docs_chat` must be set before calling this.
+    #[cfg(feature = "iroh")]
+    pub fn with_group_sync_service(&self) -> &Self {
+        let Some(docs_chat) = &self.iroh_docs_chat else {
+            tracing::warn!("with_group_sync_service called but iroh_docs_chat is None — skipping");
+            return self;
+        };
+        let svc = GroupSyncService::new(
+            self.owner.clone(),
+            self.chat.storage().clone(),
+            (**docs_chat).clone(),
+            self.bus.clone(),
+        );
+        self.group_sync = Some(svc);
+        tracing::info!("GroupSyncService installed");
+        self
+    }
+
     /// Build the app from a pre-constructed [`ChatStorage`]
     /// (used by tests that want to share a storage instance with
     /// the RPC layer). The keyring is also derived from
@@ -523,7 +564,7 @@ impl A3chatApp {
         bus: NotificationBus,
         owner_key: UserId,
     ) -> Self {
-        let owner_for_contact = owner_key;
+        let owner_for_contact = owner_key.clone();
         let keyring = E2eKeyring::new(owner_for_contact.clone());
         // Open a media service in a tempdir so unit tests don't
         // try to write to the caller's cwd. This is safe because
@@ -597,10 +638,6 @@ impl A3chatApp {
             group: Arc::new(GroupService::new(bus.clone())),
             sync: SyncService::new(storage.clone()),
             presence: PresenceService::new(storage.clone(), bus.clone()),
-            // Tests that build via `with_storage` skip the
-            // ProfileService — the dispatcher still works
-            // because `a3chat.profile.*` methods return a
-            // stub error rather than panicking.
             profile: ProfileService::from_store(empty_test_store_arc()),
             media,
             moderation,
@@ -626,8 +663,11 @@ impl A3chatApp {
             // do not care about the wallet. Tests that need pairing
             // call `with_pairing` on the returned `A3chatApp`.
             pairing: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            owner: owner_key.clone(),
             #[cfg(feature = "iroh")]
             iroh_docs_chat: None,
+            #[cfg(feature = "iroh")]
+            group_sync: None,
         }
     }
 
@@ -731,6 +771,25 @@ impl A3chatApp {
         if method.starts_with("a3chat.group.") {
             return group_service::dispatch(self.group.clone(), method, owner, params)
                 .await;
+        }
+        // Phase 5c: iroh-docs P2P group sync. Routes through the
+        // optional `GroupSyncService`; if not configured returns NotImplemented.
+        #[cfg(feature = "iroh")]
+        if method.starts_with("a3chat.group.sync.") {
+            let Some(svc) = &self.group_sync else {
+                return Err(A3chatError::Internal(
+                    "GroupSyncService is not configured. \
+                     Ensure with_iroh_docs_chat and with_group_sync_service \
+                     were called during bootstrap.".into(),
+                ));
+            };
+            return group_sync_service_mod::dispatch(
+                Arc::new(svc.clone()),
+                method,
+                owner,
+                params,
+            )
+            .await;
         }
         if method.starts_with("a3chat.presence.") {
             return presence_service::dispatch(

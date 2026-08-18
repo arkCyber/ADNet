@@ -69,7 +69,7 @@ impl SqliteStore {
             .tempfile()?;
         let path = tmp.path().to_path_buf();
         let store =
-            Self::open(&path).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            Self::open(&path).map_err(std::io::Error::other)?;
         Ok((store, tmp.into_temp_path()))
     }
 

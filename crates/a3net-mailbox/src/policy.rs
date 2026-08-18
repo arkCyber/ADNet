@@ -15,7 +15,6 @@
 //!   retention settings. Enables operator-grade control over how long
 //!   specific users' messages are kept (premium tier: longer TTL).
 
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -242,7 +241,7 @@ impl RetentionPolicy {
     pub fn purge_expired_overrides(&mut self, now_unix: i64) -> usize {
         let before = self.overrides.len();
         self.overrides.retain(|_, v| {
-            v.expires_at_unix.map_or(true, |exp| exp > now_unix)
+            v.expires_at_unix.is_none_or(|exp| exp > now_unix)
         });
         before - self.overrides.len()
     }

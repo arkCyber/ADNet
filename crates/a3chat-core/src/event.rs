@@ -712,6 +712,7 @@ mod tests {
                 status: InvitationStatus::Pending,
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now() + chrono::Duration::days(7),
+                sync_ticket: None,
             },
         };
         assert_eq!(e.kind(), NOTIFICATION_KIND_GROUP_INVITATION);

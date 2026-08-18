@@ -435,9 +435,26 @@ impl GroupService {
         let expires_at = now_unix + crate::group_invitation_service::DEFAULT_INVITATION_TTL_SECS;
         let invitation_id = uuid::Uuid::new_v4().to_string();
 
-        // Phase 5c: Get sync ticket for P2P group message sync
+        // Phase 5c: Get sync ticket for P2P group message sync.
+        // If this fails, we create the invitation WITHOUT a sync ticket.
+        // The invitee can still join via out-of-band channel or request
+        // a new ticket later. This is a best-effort approach.
         #[cfg(feature = "iroh")]
-        let sync_ticket = self.get_sync_ticket(inviter, conversation_id).await.ok();
+        let sync_ticket = match self.get_sync_ticket(inviter, conversation_id).await {
+            Ok(ticket) => Some(ticket),
+            Err(e) => {
+                // SECURITY: Log the error so operators can detect misconfiguration.
+                // We do NOT fail the invitation because the invitee can still
+                // receive messages via other means (e.g., offline mail).
+                tracing::warn!(
+                    conv = %conversation_id,
+                    inviter = %inviter,
+                    err = %e,
+                    "failed to generate sync ticket for invitation; invitee cannot use P2P sync"
+                );
+                None
+            }
+        };
 
         let rec = crate::group_invitation_service::InvitationRecord {
             invitation_id: invitation_id.clone(),

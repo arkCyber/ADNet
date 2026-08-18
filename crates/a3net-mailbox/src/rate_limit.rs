@@ -17,19 +17,19 @@
 //!   deployments need a shared store (Redis / Memcached) — see P3-backlog.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+#[cfg(test)]
+use std::time::Duration;
 
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderValue, Request, StatusCode},
+    http::{Request, StatusCode},
     middleware::Next,
     response::Response,
 };
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use serde::Serialize;
-use tokio::time::sleep;
 
 /// Controls when `X-Forwarded-For` / `X-Real-IP` are trusted.
 ///
@@ -38,9 +38,11 @@ use tokio::time::sleep;
 /// If the server is directly internet-facing, keep this `Disabled`
 /// to prevent clients from spoofing their IP and bypassing rate limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TrustedProxy {
     /// Default. Never trust forwarded headers. IP is always derived from
     /// the direct TCP connection. Safe for internet-facing deployments.
+    #[default]
     Disabled,
     /// Trust forwarded headers only when the direct TCP peer IP matches
     /// this exact string (the proxy's IP, e.g. `"10.0.0.1"`).
@@ -51,11 +53,6 @@ pub enum TrustedProxy {
     AlwaysTrust,
 }
 
-impl Default for TrustedProxy {
-    fn default() -> Self {
-        Self::Disabled
-    }
-}
 
 /// Shared per-IP token-bucket registry.
 #[derive(Debug, Clone)]
@@ -189,7 +186,7 @@ pub fn client_ip(req: &Request<Body>, proxy: &TrustedProxy) -> String {
 
             if direct_ip == *expected_proxy_ip {
                 // Proxy is trusted — extract the actual client IP from headers.
-                first_forwarded_ip(req).unwrap_or_else(|| direct_ip)
+                first_forwarded_ip(req).unwrap_or(direct_ip)
             } else {
                 // Direct connection is not from the trusted proxy — don't trust headers.
                 direct_ip
@@ -206,34 +203,23 @@ pub fn client_ip(req: &Request<Body>, proxy: &TrustedProxy) -> String {
 /// Returns `None` if neither header is present or valid.
 fn first_forwarded_ip(req: &Request<Body>) -> Option<String> {
     // Try X-Real-IP first (higher priority).
-    if let Some(val) = req.headers().get("x-real-ip") {
-        if let Ok(ip) = val.to_str() {
+    if let Some(val) = req.headers().get("x-real-ip")
+        && let Ok(ip) = val.to_str() {
             let ip = ip.trim();
             if !ip.is_empty() && ip.len() < 48 {
                 return Some(ip.to_string());
             }
         }
-    }
     // Fall back to X-Forwarded-For (take first IP in the chain).
-    if let Some(val) = req.headers().get("x-forwarded-for") {
-        if let Ok(s) = val.to_str() {
-            if let Some(ip) = s.split(',').next() {
+    if let Some(val) = req.headers().get("x-forwarded-for")
+        && let Ok(s) = val.to_str()
+            && let Some(ip) = s.split(',').next() {
                 let ip = ip.trim();
                 if !ip.is_empty() {
                     return Some(ip.to_string());
                 }
             }
-        }
-    }
     None
-}
-
-/// JSON body for a rate-limit rejection.
-#[derive(Serialize)]
-struct RateLimitBody<'a> {
-    error: &'a str,
-    message: &'a str,
-    retry_after: u64,
 }
 
 /// Build a 429 response with JSON body and Retry-After header.
@@ -243,20 +229,19 @@ fn rate_limit_response(retry_after: u64) -> Response {
         "message": "too many requests from this IP",
         "retry_after": retry_after,
     });
-    let mut res = Response::builder()
+    
+    Response::builder()
         .status(StatusCode::TOO_MANY_REQUESTS)
         .header(axum::http::header::RETRY_AFTER, retry_after.to_string())
         .header(axum::http::header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::from(body.to_string()))
-        .unwrap();
-    res
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------
 // Axum middleware functions (to be used with `from_fn_with_state`)
 // ---------------------------------------------------------------------------
 
-use crate::error::MailboxError;
 
 /// State carried through the rate-limit middleware.
 #[derive(Clone)]
