@@ -37,7 +37,7 @@ use crate::error::{ChatStoreError, Result};
 
 /// Current schema version. Bump on every schema change and add a
 /// migration step in [`migrate_to`].
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// All `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
 /// statements bundled together so the bootstrap path is a single
@@ -395,6 +395,12 @@ fn migrate_to(conn: &rusqlite::Transaction<'_>, target: u32) -> rusqlite::Result
                  WHERE temp_admin_until IS NOT NULL",
                 [],
             )?;
+        }
+        6 => {
+            // Add avatar_url column to conversations table.
+            // This enables group avatar updates (previously returned Domain error).
+            // The try_add_column helper is idempotent.
+            try_add_column(conn, "conversations", "avatar_url", "TEXT")?;
         }
         _ => {
             // Unknown future version. Should be unreachable because
