@@ -1501,11 +1501,17 @@ async fn im_set_group_avatar_url_rejects_invalid_url() {
         .await
         .unwrap();
 
-    // validate_url checks length and NUL bytes, not URL format.
-    // Test with URL exceeding MAX_NAME_LEN (256 bytes).
+    // Test URL exceeding MAX_NAME_LEN (256 bytes).
     let long_url = "https://example.com/".to_string() + &"x".repeat(300);
     let err = mgr
         .set_group_avatar_url(&conv.id, Some(&long_url))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::error::ChatStoreError::Validation(_)));
+
+    // SECURITY: data:text/html (XSS vector) must be rejected.
+    let err = mgr
+        .set_group_avatar_url(&conv.id, Some("data:text/html,<h1>XSS</h1>"))
         .await
         .unwrap_err();
     assert!(matches!(err, crate::error::ChatStoreError::Validation(_)));
