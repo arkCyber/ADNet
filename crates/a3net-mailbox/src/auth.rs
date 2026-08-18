@@ -152,6 +152,11 @@ pub fn validate_msg_id(msg_id: &str) -> MailboxResult<()> {
 /// Default: 5 minutes. This is the "signature_max_age" in the audit doc.
 pub const DEFAULT_SIGNATURE_MAX_AGE_SECS: i64 = 300;
 
+/// Maximum clock skew tolerance: clients whose clocks are this many seconds
+/// ahead of the server are still accepted (catches clock drift / mobile
+/// devices with incorrect system time). Default: 60 seconds.
+pub const CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
+
 /// Build a canonical message for the `enqueue` envelope **without** a timestamp.
 /// Used by tests and for backwards-compatible signature computation.
 /// Prefer [`canonical_enqueue_with_timestamp`] in production.
@@ -273,17 +278,27 @@ pub fn verify_sender_signature_with_timestamp(
     let claimed = Address::from_hex(claimed_sender_id)
         .map_err(|e| MailboxError::InvalidRecipientId(e.to_string()))?;
 
-    // Staleness check: reject signatures older than the configured window.
+    // Step 1: validate timestamp.
+    //
+    // SECURITY: reject far-future timestamps (anti-replay). We allow
+    // CLOCK_SKEW_TOLERANCE_SECS of clock drift so honest clients with
+    // slightly fast clocks aren't rejected.
     let now = chrono::Utc::now().timestamp();
-    let age = now
-        .checked_sub(signed_at_unix)
-        .ok_or_else(|| MailboxError::InvalidTimestamp)?;
+    if signed_at_unix > now + CLOCK_SKEW_TOLERANCE_SECS {
+        return Err(MailboxError::InvalidTimestamp);
+    }
+
+    // Step 2: check staleness (anti-replay of old signatures).
+    // age is guaranteed non-negative here since signed_at <= now + tolerance.
+    let age = now - signed_at_unix;
     if age > signature_max_age_secs {
         return Err(MailboxError::StaleSignature {
             age_secs: age,
             max_age_secs: signature_max_age_secs,
         });
     }
+
+    // Step 3: verify cryptographic signature over the timestamped canonical message.
 
     let msg =
         canonical_enqueue_with_timestamp(recipient_id, msg_id, ciphertext, signed_at_unix);
