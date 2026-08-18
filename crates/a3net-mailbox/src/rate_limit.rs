@@ -31,6 +31,32 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::time::sleep;
 
+/// Controls when `X-Forwarded-For` / `X-Real-IP` are trusted.
+///
+/// **IMPORTANT**: Only enable these when the mailbox server is deployed
+/// behind a known-trusted reverse proxy (nginx, Cloudflare, etc.).
+/// If the server is directly internet-facing, keep this `Disabled`
+/// to prevent clients from spoofing their IP and bypassing rate limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustedProxy {
+    /// Default: do not trust forwarded headers. IP is always derived
+    /// from the direct TCP connection (the connection's `SocketAddr`).
+    /// This is the safe default when the server is internet-facing.
+    Disabled,
+    /// Trust forwarded headers only when the direct TCP connection
+    /// originates from this exact IP address (the proxy's IP).
+    Single(ipnetwork::IpNetwork),
+    /// Always trust forwarded headers (dangerous: only use in
+    /// fully controlled environments with no direct internet access).
+    AlwaysTrust,
+}
+
+impl Default for TrustedProxy {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
 /// Shared per-IP token-bucket registry.
 #[derive(Debug, Clone)]
 pub struct RateLimitRegistry {
