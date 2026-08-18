@@ -413,12 +413,18 @@ async fn enqueue_handler(
 
     // Step 5: verify sender signature.
     //
-    // If the request carries a `timestamp`, we use the EIP-712-style
-    // binding (`verify_sender_signature_with_timestamp`) which rejects
-    // signatures older than `signature_max_age_secs`. This prevents
-    // captured-replay attacks where an old valid signature is replayed.
-    // Without a timestamp, we fall back to the old verifier (backwards compat).
+    // **SECURITY**: if `req.timestamp` is provided, we use the EIP-712-style
+    // binding (`verify_sender_signature_with_timestamp`) which rejects signatures
+    // older than `signature_max_age_secs` or with invalid timestamps.
+    // If the timestamp check fails, the request is REJECTED — we do NOT fall
+    // through to the legacy no-timestamp path. This prevents a replay attack
+    // where the attacker sets a far-future `timestamp` to bypass replay protection.
+    //
+    // If `req.timestamp` is absent, we fall back to the old verifier (backwards
+    // compat for legacy clients that haven't adopted EIP-712 timestamp binding).
     let sig_ok = if let Some(signed_at) = req.timestamp {
+        // If timestamp is provided but validation fails, REJECT immediately.
+        // No fallthrough to the legacy path.
         verify_sender_signature_with_timestamp(
             &sender,
             &recipient,
