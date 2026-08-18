@@ -973,6 +973,7 @@ fn retention_override_clamped_to_min() {
 }
 
 /// BillingPolicy: try_grant_quota returns 0 when no pledge (free tier).
+#[cfg(feature = "billing")]
 #[test]
 fn billing_no_pledge_is_free_tier() {
     use a3net_mailbox::billing::BillingPolicy;
@@ -983,6 +984,7 @@ fn billing_no_pledge_is_free_tier() {
 }
 
 /// BillingPolicy: try_grant_quota returns 0 on invalid pledge (non-fatal).
+#[cfg(feature = "billing")]
 #[test]
 fn billing_invalid_pledge_is_non_fatal() {
     use a3net_mailbox::billing::BillingPolicy;
