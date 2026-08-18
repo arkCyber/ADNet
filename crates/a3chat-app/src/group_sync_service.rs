@@ -675,9 +675,53 @@ pub async fn dispatch(
             let groups = svc.list_synced_groups().await;
             serde_json::to_value(&groups).map_err(A3chatError::from)
         }
+        A3chatRpcMethod::GROUP_SYNC_METRICS => {
+            // Phase 5c: Expose sync metrics in Prometheus format.
+            // Also available via GET /rpc/metrics but this RPC allows per-user filtering.
+            let metrics = svc.metrics().await;
+            let out = MetricsPrometheusFormat(&metrics).to_string();
+            Ok(serde_json::json!({
+                "format": "prometheus",
+                "content": out
+            }))
+        }
         _ => Err(A3chatError::Internal(format!(
             "GroupSyncService does not handle {method}"
         ))),
+    }
+}
+
+/// Phase 5c: Prometheus exposition format for group sync metrics.
+struct MetricsPrometheusFormat<'a>(&'a SyncMetrics);
+
+impl<'a> std::fmt::Display for MetricsPrometheusFormat<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let m = self.0;
+        writeln!(f, "# HELP a3chat_group_sync_messages_total Messages synced from iroh to SQLite.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_messages_total counter")?;
+        writeln!(f, "a3chat_group_sync_messages_total {}", m.messages_synced_total)?;
+        writeln!(f, "# HELP a3chat_group_sync_errors_total Sync errors encountered.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_errors_total counter")?;
+        writeln!(f, "a3chat_group_sync_errors_total {}", m.sync_errors_total)?;
+        writeln!(f, "# HELP a3chat_group_sync_active_groups Number of groups with active sync.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_active_groups gauge")?;
+        writeln!(f, "a3chat_group_sync_active_groups {}", m.active_groups)?;
+        writeln!(f, "# HELP a3chat_group_sync_last_duration_ms Duration of last sync in ms.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_last_duration_ms gauge")?;
+        if let Some(d) = m.last_sync_duration_ms {
+            writeln!(f, "a3chat_group_sync_last_duration_ms {}", d)?;
+        } else {
+            writeln!(f, "a3chat_group_sync_last_duration_ms 0")?;
+        }
+        writeln!(f, "# HELP a3chat_group_sync_last_backfill_size Batch size of last backfill.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_last_backfill_size gauge")?;
+        writeln!(f, "a3chat_group_sync_last_backfill_size {}", m.last_backfill_size)?;
+        if let Some(ts) = m.last_sync_at {
+            writeln!(f, "# HELP a3chat_group_sync_last_timestamp_seconds Unix timestamp of last sync.")?;
+            writeln!(f, "# TYPE a3chat_group_sync_last_timestamp_seconds gauge")?;
+            writeln!(f, "a3chat_group_sync_last_timestamp_seconds {}", ts.timestamp())?;
+        }
+        Ok(())
     }
 }
 

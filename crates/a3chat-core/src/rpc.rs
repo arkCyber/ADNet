@@ -129,6 +129,7 @@ impl A3chatRpcMethod {
     pub const GROUP_SYNC_FORCE: &'static str = "a3chat.group.sync.force";
     pub const GROUP_SYNC_STATUS: &'static str = "a3chat.group.sync.status";
     pub const GROUP_SYNC_LIST: &'static str = "a3chat.group.sync.list";
+    pub const GROUP_SYNC_METRICS: &'static str = "a3chat.group.sync.metrics";
 
     // Sync
     pub const CHAT_SYNC_SNAPSHOT: &'static str = "a3chat.chat.sync.snapshot";
@@ -411,6 +412,7 @@ impl A3chatRpcMethod {
         Self::GROUP_SYNC_FORCE,
         Self::GROUP_SYNC_STATUS,
         Self::GROUP_SYNC_LIST,
+        Self::GROUP_SYNC_METRICS,
         Self::CHAT_SYNC_SNAPSHOT,
         Self::CHAT_SYNC_DELTA,
         Self::CHAT_SYNC_COMPRESSED,
