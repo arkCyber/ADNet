@@ -166,14 +166,27 @@ pub fn check_and_consume(
 /// SECURITY: forwarded headers (`X-Real-IP`, `X-Forwarded-For`) are only
 /// consulted when `proxy` is not `Disabled`. This prevents clients from
 /// spoofing their IP address to bypass rate limiting.
+///
+/// When `TrustedProxy::Disabled` (default), this function extracts the real
+/// socket IP from the request extensions (set by axum's `ConnectInfo` middleware)
+/// or falls back to `"unknown"` if no socket info is available. This ensures
+/// per-connection rate limiting even for direct internet-facing deployments.
 #[inline]
 pub fn client_ip(req: &Request<Body>, proxy: &TrustedProxy) -> String {
     match proxy {
         TrustedProxy::Disabled => {
-            // Never trust forwarded headers — derive IP from the direct connection.
-            // In production, the actual socket IP comes from the middleware that
-            // inserts ConnectInfo. Here we fall back to 0.0.0.0 (global rate-limit).
-            "0.0.0.0".to_string()
+            // Never trust forwarded headers — derive IP from the direct TCP connection.
+            // Extract real socket IP from axum extensions (set by ConnectInfo middleware).
+            // Fall back to "unknown" only if no socket info is available (test environment).
+            req.extensions()
+                .get::<std::net::SocketAddr>()
+                .map(|addr| addr.ip().to_string())
+                .unwrap_or_else(|| {
+                    tracing::debug!(
+                        "no socket address in request extensions; using 'unknown' for rate-limit"
+                    );
+                    "unknown".to_string()
+                })
         }
         TrustedProxy::FromProxy(expected_proxy_ip) => {
             // First, extract the direct TCP peer IP from extensions (set by TcpListener).
@@ -395,13 +408,44 @@ mod tests {
 
     #[tokio::test]
     async fn client_ip_disabled_ignores_forwarded_headers() {
+        // Set up request with socket address in extensions (simulates real deployment).
+        let socket_addr: std::net::SocketAddr = "198.51.100.42:8080".parse().unwrap();
         let mut req = Request::builder()
             .header("x-forwarded-for", "5.6.7.8, 10.0.0.1")
             .header("x-real-ip", "9.9.9.9")
             .body(Body::empty())
             .unwrap();
-        // With Disabled, forwarded headers are ignored — returns 0.0.0.0.
-        assert_eq!(client_ip(&req, &TrustedProxy::Disabled), "0.0.0.0");
+        req.extensions_mut().insert(socket_addr);
+
+        // With Disabled, forwarded headers are ignored — returns socket IP.
+        assert_eq!(client_ip(&req, &TrustedProxy::Disabled), "198.51.100.42");
+    }
+
+    #[tokio::test]
+    async fn client_ip_disabled_no_socket_returns_unknown() {
+        // Request without socket info (test environment fallback).
+        let req = Request::builder()
+            .header("x-forwarded-for", "5.6.7.8")
+            .header("x-real-ip", "9.9.9.9")
+            .body(Body::empty())
+            .unwrap();
+
+        // With Disabled but no socket info, returns "unknown" (not "0.0.0.0").
+        assert_eq!(client_ip(&req, &TrustedProxy::Disabled), "unknown");
+    }
+
+    #[tokio::test]
+    async fn client_ip_disabled_rejects_forwarded_for() {
+        // Attempt to bypass rate limit via X-Forwarded-For header.
+        let socket_addr: std::net::SocketAddr = "192.0.2.1:8080".parse().unwrap();
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "5.6.7.8")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(socket_addr);
+
+        // Even with X-Forwarded-For, Disabled mode ignores it.
+        assert_eq!(client_ip(&req, &TrustedProxy::Disabled), "192.0.2.1");
     }
 
     #[tokio::test]
@@ -428,6 +472,43 @@ mod tests {
     #[tokio::test]
     async fn client_ip_no_headers_returns_fallback() {
         let req = Request::builder().body(Body::empty()).unwrap();
-        assert_eq!(client_ip(&req, &TrustedProxy::Disabled), "0.0.0.0");
+        // No socket info either — should return "unknown" not "0.0.0.0".
+        assert_eq!(client_ip(&req, &TrustedProxy::Disabled), "unknown");
+    }
+
+    #[test]
+    fn rate_limit_per_real_ip_not_global() {
+        // Critical test: verifies that each distinct IP gets its own bucket.
+        let registry = RateLimitRegistry::new();
+        let policy = RateLimitConfig::enqueue();
+        
+        // Exhaust IP1's bucket.
+        for _ in 0..policy.capacity as usize {
+            let _ = check_and_consume(&registry, &policy, "198.51.100.42");
+        }
+        
+        // Verify IP1 is rejected.
+        let r1 = check_and_consume(&registry, &policy, "198.51.100.42");
+        assert!(matches!(r1, RateLimitResult::Rejected { .. }));
+        
+        // Verify IP2 is NOT affected (has its own independent bucket).
+        let r2 = check_and_consume(&registry, &policy, "203.0.113.1");
+        assert!(matches!(r2, RateLimitResult::Allowed(_)));
+    }
+
+    #[test]
+    fn unknown_ip_gets_own_bucket() {
+        // Verify "unknown" fallback gets its own bucket (test environments).
+        let registry = RateLimitRegistry::new();
+        let policy = RateLimitConfig::enqueue();
+        
+        // Consume tokens from "unknown" bucket.
+        for _ in 0..5 {
+            let _ = check_and_consume(&registry, &policy, "unknown");
+        }
+        
+        // "unknown" bucket should have fewer tokens now.
+        let r = check_and_consume(&registry, &policy, "unknown");
+        assert!(matches!(r, RateLimitResult::Allowed(v) if v < 55.0));
     }
 }

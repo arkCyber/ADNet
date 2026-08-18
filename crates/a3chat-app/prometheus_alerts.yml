@@ -113,6 +113,55 @@ groups:
             Last backfill was {{ $value }} messages.
             This may indicate a long offline period or initial sync.
 
+      # Phase 5c: High error rate (derived metric)
+      - alert: A3ChatGroupSyncHighErrorRateDerived
+        expr: |
+          a3chat_group_sync_error_rate_percent > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "High group sync error rate (derived)"
+          description: |
+            Derived error rate is {{ $value | printf "%.2f" }}%.
+            Consider investigating sync failures.
+
+      # Phase 5c: Low throughput warning
+      - alert: A3ChatGroupSyncLowThroughput
+        expr: |
+          a3chat_group_sync_throughput_msg_per_sec < 0.1
+          and a3chat_group_sync_active_groups > 0
+          and a3chat_uptime_secs > 60
+        for: 5m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "Low sync throughput"
+          description: |
+            Sync throughput is {{ $value | printf "%.2f" }} msg/s.
+            This may indicate sync issues or network latency.
+
+      # Phase 5c: Bytes sync stalled
+      - alert: A3ChatGroupSyncBytesStalled
+        expr: |
+          a3chat_group_sync_bytes_total == 0
+          and a3chat_group_sync_active_groups > 0
+          and a3chat_uptime_secs > 300
+        for: 10m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "No bytes synced despite active groups"
+          description: |
+            Despite {{ a3chat_group_sync_active_groups }} active groups,
+            no bytes have been synced in 5+ minutes.
+
   - name: a3chat_rpc_alerts
     rules:
       # High RPC error rate
