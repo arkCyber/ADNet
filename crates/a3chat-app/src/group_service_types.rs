@@ -101,14 +101,17 @@ impl UpdateGroupMetadataRequest {
 pub fn hub_member_to_core(hub: a3net_chatstore::GroupMember) -> GroupMember {
     use a3chat_core::group::MemberRole;
     use a3chat_core::id::UserId;
+    let user_id_str = hub.user_id.clone();
     let role = MemberRole::parse(&hub.role).unwrap_or(MemberRole::Member);
     GroupMember {
-        user_id: UserId::from(hub.user_id.clone()),
-        display_name: hub.user_id,
+        user_id: UserId::from(user_id_str.clone()),
+        display_name: user_id_str,
         role,
         joined_at: hub.joined_at,
-        last_seen: None,
-        is_online: false,
+        // Preserve presence and temp-admin data from hub
+        last_seen: hub.last_seen,
+        is_online: hub.is_online,
         nickname: None,
+        temp_admin_until: hub.temp_admin_until,
     }
 }

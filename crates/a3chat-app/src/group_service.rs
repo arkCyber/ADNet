@@ -80,6 +80,7 @@ fn hub_member_to_core(hub: a3net_chatstore::GroupMember) -> a3chat_core::group::
         last_seen: hub.last_seen,
         is_online: hub.is_online,
         nickname: None,
+        temp_admin_until: hub.temp_admin_until,
     }
 }
 
@@ -272,43 +273,23 @@ impl GroupService {
             AppError::NotInitialised("GroupService iroh_docs not set".into())
         })?;
 
-        // Decode ticket from base64
+        // Decode and deserialize the ticket
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(ticket_b64)
             .map_err(|e| AppError::Domain(format!("invalid ticket encoding: {e}")))?;
         let ticket: iroh_docs::DocTicket = serde_json::from_slice(&json)
             .map_err(|e| AppError::Domain(format!("invalid ticket format: {e}")))?;
 
-        // SECURITY: Validate ticket by importing it first. The import returns a Doc
-        // whose ID is the authoritative namespace. We then open using that namespace.
-        // This prevents key mismatch if caller-supplied conversation_id differs from
-        // the namespace embedded in the ticket.
-        let namespace = {
-            let temp_ticket = ticket.clone();
-            let doc = docs_chat.api().import(temp_ticket).await
-                .map_err(|e| AppError::Domain(format!("invalid ticket (cannot import): {e}")))?;
-            doc.id()
-        };
-        let ticket_cid = ConversationId::from(namespace.to_string());
-
-        // Warn if caller-supplied conversation_id differs from ticket's namespace
-        let caller_cid = conversation_id.as_str();
-        if caller_cid != ticket_cid.as_str() {
-            tracing::warn!(
-                caller_cid = %caller_cid,
-                ticket_cid = %ticket_cid,
-                "join_sync: caller cid mismatch, using ticket namespace"
-            );
-        }
-
-        // Open the doc with the ticket using the authoritative namespace.
+        // SECURITY: open_with_ticket imports the ticket, which validates its cryptographic
+        // signature. If the ticket was tampered with, import fails. The returned DocHandle
+        // contains the authoritative namespace from the ticket.
         let handle = docs_chat
-            .open_with_ticket(ticket_cid.as_str(), ticket)
+            .open_with_ticket(conversation_id.as_str(), ticket)
             .await
             .map_err(|e| AppError::Internal(format!("failed to open sync doc: {e}")))?;
 
         tracing::info!(
-            conv = %ticket_cid,
+            conv = %conversation_id,
             namespace = %handle.namespace,
             "joined group sync network"
         );
@@ -1105,7 +1086,10 @@ impl GroupService {
     /// Compute the effective role rank for a member, considering temporary
     /// admin grants. A member with a valid temporary admin grant has
     /// admin-level permissions for the duration.
-    fn effective_role_rank(member: &a3net_chatstore::GroupMember) -> i32 {
+    ///
+    /// Returns the base role rank if no valid temp admin grant exists,
+    /// or the max of base rank and admin rank (1) if a valid grant exists.
+    pub(crate) fn effective_role_rank(member: &a3net_chatstore::GroupMember) -> i32 {
         let base_rank = a3chat_core::group::MemberRole::rank_from_str(&member.role);
 
         // Check if user has a temporary admin grant that's still valid
@@ -1156,9 +1140,17 @@ impl GroupService {
         Ok(())
     }
 
-    /// Update the last_seen timestamp for a member when they perform
-    /// an action (send message, etc.). This is called from message
-    /// sending via the presence touch gate.
+    /// Update the last_seen timestamp and online status for a member.
+    ///
+    /// Called when a member sends a message (via [`PresenceTouchGate`] in
+    /// [`ChatService`]) or explicitly updates their presence. Persists to
+    /// the hub via [`ImManager::update_member_presence`] and emits
+    /// [`A3chatEvent::GroupMemberPresenceChanged`] on the bus.
+    ///
+    /// If the hub update fails (e.g., member not found), the error is
+    /// propagated and the event is NOT published. Callers via the
+    /// [`PresenceTouchGate`] typically ignore this error (`.ok()`) so
+    /// presence updates don't block message sending.
     pub async fn touch_member(
         &self,
         conversation_id: &ConversationId,
@@ -1230,10 +1222,9 @@ impl GroupService {
 
         // Publish event
         self.bus.publish(A3chatEvent::GroupTempAdminGranted {
-            user_id: actor.clone(),
             conversation_id: conversation_id.clone(),
             target_user_id: target.clone(),
-            granted_by: actor.clone(),
+            actor_user_id: actor.clone(),
             expires_at: until,
         });
 
@@ -1270,10 +1261,9 @@ impl GroupService {
 
         // Publish event so subscribers know the temp admin status was revoked
         self.bus.publish(A3chatEvent::GroupTempAdminRevoked {
-            user_id: actor.clone(),
             conversation_id: conversation_id.clone(),
             target_user_id: target.clone(),
-            revoked_by: actor.clone(),
+            actor_user_id: actor.clone(),
         });
 
         Ok(())

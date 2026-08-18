@@ -742,6 +742,7 @@ impl ImManager {
     }
 
     /// Grant temporary admin status to a member until the specified time.
+    /// Returns `NotFound` if the member does not exist in the group.
     pub async fn set_temp_admin(
         &self,
         conversation_id: &str,
@@ -750,6 +751,14 @@ impl ImManager {
     ) -> Result<()> {
         a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
         a3net_types::invariants::validate_id("user_id", user_id)?;
+
+        // Reject past or immediate expiry times
+        if until <= Utc::now() {
+            return Err(ChatStoreError::Validation(
+                "temp admin expiry must be in the future".into(),
+            ));
+        }
+
         let conn = self.conn.lock().await;
         let updated = conn.execute(
             "UPDATE group_members
@@ -766,16 +775,22 @@ impl ImManager {
     }
 
     /// Clear temporary admin status for a member.
+    /// Returns `NotFound` if the member does not exist in the group.
     pub async fn clear_temp_admin(&self, conversation_id: &str, user_id: &str) -> Result<()> {
         a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
         a3net_types::invariants::validate_id("user_id", user_id)?;
         let conn = self.conn.lock().await;
-        conn.execute(
+        let updated = conn.execute(
             "UPDATE group_members
              SET temp_admin_until = NULL
              WHERE conversation_id = ?1 AND user_id = ?2",
             params![conversation_id, user_id],
         )?;
+        if updated == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "member {user_id} not found in group {conversation_id}"
+            )));
+        }
         Ok(())
     }
 

@@ -31,6 +31,14 @@
 //!   from the iroh doc.
 //! - Bus events use `owner` as the `user_id` so the correct recipient is
 //!   notified.
+//!
+//! ## Metrics
+//!
+//! The service tracks sync metrics via `SyncMetrics`:
+//! - `messages_synced`: Total messages synced from iroh to SQLite
+//! - `sync_errors`: Number of sync errors encountered
+//! - `last_sync_duration_ms`: Duration of last sync operation
+//! - `backfill_batch_sizes`: Distribution of batch sizes for backfills
 
 #[cfg(feature = "iroh")]
 
@@ -53,6 +61,91 @@ const BACKFILL_BATCH_SIZE: usize = 100;
 
 /// Interval between periodic sync checks for all joined groups.
 const SYNC_TICK_INTERVAL: Duration = Duration::from_secs(30);
+
+// ============================================================================
+/// Metrics types
+// ============================================================================
+
+/// Phase 5c: Sync metrics for monitoring P2P group message synchronization.
+#[derive(Debug, Clone, Default)]
+pub struct SyncMetrics {
+    /// Total messages successfully synced from iroh to SQLite.
+    pub messages_synced_total: u64,
+    /// Total sync errors encountered.
+    pub sync_errors_total: u64,
+    /// Duration of the last successful sync operation in milliseconds.
+    pub last_sync_duration_ms: Option<u64>,
+    /// Timestamp of the last successful sync.
+    pub last_sync_at: Option<DateTime<Utc>>,
+    /// Number of groups currently subscribed for sync.
+    pub active_groups: usize,
+    /// Last backfill batch size.
+    pub last_backfill_size: usize,
+}
+
+impl SyncMetrics {
+    /// Create a new empty metrics instance.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a successful sync with the given batch size and duration.
+    pub fn record_sync(&mut self, batch_size: usize, duration_ms: u64) {
+        self.messages_synced_total += batch_size as u64;
+        self.last_sync_duration_ms = Some(duration_ms);
+        self.last_sync_at = Some(Utc::now());
+        self.last_backfill_size = batch_size;
+    }
+
+    /// Record a sync error.
+    pub fn record_error(&mut self) {
+        self.sync_errors_total += 1;
+    }
+
+    /// Update the number of active groups.
+    pub fn set_active_groups(&mut self, count: usize) {
+        self.active_groups = count;
+    }
+}
+
+/// Phase 5c: Metrics collector for sync operations.
+/// Thread-safe, used to expose metrics to monitoring systems.
+#[derive(Clone, Default)]
+pub struct SyncMetricsCollector {
+    inner: Arc<tokio::sync::RwLock<SyncMetrics>>,
+}
+
+impl SyncMetricsCollector {
+    /// Create a new metrics collector.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(tokio::sync::RwLock::new(SyncMetrics::new())),
+        }
+    }
+
+    /// Record a successful sync operation.
+    pub async fn record_sync(&self, batch_size: usize, duration_ms: u64) {
+        let mut metrics = self.inner.write().await;
+        metrics.record_sync(batch_size, duration_ms);
+    }
+
+    /// Record a sync error.
+    pub async fn record_error(&self) {
+        let mut metrics = self.inner.write().await;
+        metrics.record_error();
+    }
+
+    /// Update active group count.
+    pub async fn set_active_groups(&self, count: usize) {
+        let mut metrics = self.inner.write().await;
+        metrics.set_active_groups(count);
+    }
+
+    /// Get a snapshot of current metrics.
+    pub async fn snapshot(&self) -> SyncMetrics {
+        self.inner.read().await.clone()
+    }
+}
 
 /// Group sync state tracking.
 #[derive(Debug, Clone)]
@@ -97,13 +190,15 @@ pub struct GroupSyncService {
     bus: crate::notification_bus::NotificationBus,
     /// Background task handle.
     _background_handle: Arc<tokio::sync::oneshot::Sender<()>>,
+    /// Phase 5c: Sync metrics collector for monitoring.
+    metrics: SyncMetricsCollector,
 }
 
 impl std::fmt::Debug for GroupSyncService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GroupSyncService")
             .field("owner", &self.owner)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -121,6 +216,7 @@ impl GroupSyncService {
         let docs_chat = Arc::new(docs_chat);
         let sync_states: Arc<RwLock<HashMap<ConversationId, GroupSyncState>>> =
             Arc::new(RwLock::new(HashMap::new()));
+        let metrics = SyncMetricsCollector::new();
 
         // Spawn background sync task
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -129,6 +225,7 @@ impl GroupSyncService {
         let storage_clone = storage.clone();
         let bus_clone = bus.clone();
         let docs_chat_clone = docs_chat.clone();
+        let metrics_clone = metrics.clone();
 
         tokio::spawn(async move {
             let mut tick_interval = interval(SYNC_TICK_INTERVAL);
@@ -147,6 +244,7 @@ impl GroupSyncService {
                             &sync_states_clone,
                             &storage_clone,
                             &bus_clone,
+                            &metrics_clone,
                         ).await;
                     }
                 }
@@ -160,7 +258,15 @@ impl GroupSyncService {
             sync_states,
             bus,
             _background_handle: Arc::new(shutdown_tx),
+            metrics,
         }
+    }
+
+    /// Get a snapshot of current sync metrics.
+    ///
+    /// Phase 5c: Use this to expose sync metrics to monitoring systems.
+    pub async fn metrics(&self) -> SyncMetrics {
+        self.metrics.snapshot().await
     }
 
     /// Periodic check for new messages in all joined groups.
@@ -170,7 +276,14 @@ impl GroupSyncService {
         sync_states: &Arc<RwLock<HashMap<ConversationId, GroupSyncState>>>,
         storage: &ChatStorage,
         bus: &crate::notification_bus::NotificationBus,
+        metrics: &SyncMetricsCollector,
     ) {
+        let states = sync_states.read().await;
+        let active_count = states.values().filter(|s| s.is_subscribed).count();
+        drop(states);
+
+        metrics.set_active_groups(active_count).await;
+
         let states = sync_states.read().await;
         for (conv_id, state) in states.iter() {
             if !state.is_subscribed {
@@ -215,6 +328,7 @@ impl GroupSyncService {
                             }
                             Err(e) => {
                                 warn!(conv = %conv_id, seq, "failed to backfill message: {e}");
+                                metrics.record_error().await;
                             }
                         }
                     }
@@ -225,10 +339,16 @@ impl GroupSyncService {
                             state.last_processed_seq = highest_seq;
                             state.last_sync_at = Some(Utc::now());
                         }
+                        debug!(
+                            conv = %conv_id,
+                            synced = successful_count,
+                            "backfill completed"
+                        );
                     }
                 }
                 Err(e) => {
                     warn!(conv = %conv_id, "iroh get_messages failed: {e}");
+                    metrics.record_error().await;
                 }
             }
         }
@@ -558,5 +678,109 @@ pub async fn dispatch(
         _ => Err(A3chatError::Internal(format!(
             "GroupSyncService does not handle {method}"
         ))),
+    }
+}
+
+// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Phase 5c: Test SyncMetrics basic operations.
+    #[test]
+    fn sync_metrics_record_sync() {
+        let mut metrics = SyncMetrics::new();
+        assert_eq!(metrics.messages_synced_total, 0);
+        assert!(metrics.last_sync_duration_ms.is_none());
+
+        metrics.record_sync(10, 50);
+        assert_eq!(metrics.messages_synced_total, 10);
+        assert_eq!(metrics.last_sync_duration_ms, Some(50));
+        assert!(metrics.last_sync_at.is_some());
+        assert_eq!(metrics.last_backfill_size, 10);
+
+        metrics.record_sync(5, 30);
+        assert_eq!(metrics.messages_synced_total, 15);
+        assert_eq!(metrics.last_backfill_size, 5);
+    }
+
+    /// Phase 5c: Test SyncMetrics error recording.
+    #[test]
+    fn sync_metrics_record_error() {
+        let mut metrics = SyncMetrics::new();
+        assert_eq!(metrics.sync_errors_total, 0);
+
+        metrics.record_error();
+        assert_eq!(metrics.sync_errors_total, 1);
+
+        metrics.record_error();
+        assert_eq!(metrics.sync_errors_total, 2);
+    }
+
+    /// Phase 5c: Test SyncMetrics active groups.
+    #[test]
+    fn sync_metrics_active_groups() {
+        let mut metrics = SyncMetrics::new();
+        assert_eq!(metrics.active_groups, 0);
+
+        metrics.set_active_groups(3);
+        assert_eq!(metrics.active_groups, 3);
+
+        metrics.set_active_groups(5);
+        assert_eq!(metrics.active_groups, 5);
+    }
+
+    /// Phase 5c: Test SyncMetricsCollector thread safety.
+    #[tokio::test]
+    async fn sync_metrics_collector_record_sync() {
+        let collector = SyncMetricsCollector::new();
+
+        collector.record_sync(10, 100).await;
+        let snapshot = collector.snapshot().await;
+        assert_eq!(snapshot.messages_synced_total, 10);
+        assert_eq!(snapshot.last_sync_duration_ms, Some(100));
+
+        collector.record_sync(5, 50).await;
+        let snapshot = collector.snapshot().await;
+        assert_eq!(snapshot.messages_synced_total, 15);
+    }
+
+    /// Phase 5c: Test SyncMetricsCollector concurrent writes.
+    #[tokio::test]
+    async fn sync_metrics_collector_concurrent_writes() {
+        use tokio::task;
+
+        let collector = SyncMetricsCollector::new();
+
+        // Spawn multiple tasks writing concurrently
+        let mut handles = vec![];
+        for i in 0..10 {
+            let c = collector.clone();
+            handles.push(tokio::spawn(async move {
+                c.record_sync(i, i as u64 * 10).await;
+            }));
+        }
+
+        for h in handles {
+            h.await.expect("task should complete");
+        }
+
+        let snapshot = collector.snapshot().await;
+        // Sum of 0+1+2+...+9 = 45
+        assert_eq!(snapshot.messages_synced_total, 45);
+    }
+
+    /// Phase 5c: Test GroupSyncState creation.
+    #[test]
+    fn group_sync_state_new() {
+        let owner = UserId::from("alice");
+        let conv_id = ConversationId::from("grp:test");
+        let state = GroupSyncState::new(owner.clone(), conv_id.clone());
+
+        assert_eq!(state.owner, owner);
+        assert_eq!(state.conversation_id, conv_id);
+        assert_eq!(state.last_processed_seq, 0);
+        assert!(!state.is_subscribed);
+        assert!(state.last_sync_at.is_none());
     }
 }

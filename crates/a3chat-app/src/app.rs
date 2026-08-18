@@ -539,7 +539,7 @@ impl A3chatApp {
     ///
     /// The `iroh_docs_chat` must be set before calling this.
     #[cfg(feature = "iroh")]
-    pub fn with_group_sync_service(&self) -> &Self {
+    pub fn with_group_sync_service(&mut self) -> &mut Self {
         let Some(docs_chat) = &self.iroh_docs_chat else {
             tracing::warn!("with_group_sync_service called but iroh_docs_chat is None — skipping");
             return self;
