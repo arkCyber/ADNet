@@ -32,6 +32,7 @@ pub const NOTIFICATION_KIND_MESSAGE_RECALLED: &str = "chat.message.recalled";
 pub const NOTIFICATION_KIND_MESSAGE_READ: &str = "chat.message.read";
 pub const NOTIFICATION_KIND_MESSAGE_EDITED: &str = "chat.message.edited";
 pub const NOTIFICATION_KIND_MESSAGE_DELETED: &str = "chat.message.deleted";
+pub const NOTIFICATION_KIND_CHAT_MESSAGE_REACTION_TOGGLED: &str = "chat.message.reaction.toggled";
 pub const NOTIFICATION_KIND_CHAT_TAP: &str = "chat.tap";
 pub const NOTIFICATION_KIND_GROUP_INVITATION: &str = "group.invitation.received";
 pub const NOTIFICATION_KIND_LINK_BOOKMARK_ADDED: &str = "link.bookmark.added";
@@ -569,7 +570,7 @@ impl A3chatEvent {
             A3chatEvent::MomentsPostShared { .. } => NOTIFICATION_KIND_MOMENTS_POST_SHARED,
             A3chatEvent::MomentsPostReported { .. } => NOTIFICATION_KIND_MOMENTS_POST_REPORTED,
             A3chatEvent::MomentsUserBlocked { .. } => NOTIFICATION_KIND_MOMENTS_USER_BLOCKED,
-            A3chatEvent::ChatMessageReactionToggled { .. } => "chat.message.reaction.toggled",
+            A3chatEvent::ChatMessageReactionToggled { .. } => NOTIFICATION_KIND_CHAT_MESSAGE_REACTION_TOGGLED,
             A3chatEvent::ConversationPinChanged { .. } => NOTIFICATION_KIND_CONVERSATION_PIN_CHANGED,
             A3chatEvent::NotificationSettingsChanged { .. } => NOTIFICATION_KIND_NOTIFICATION_SETTINGS_CHANGED,
             A3chatEvent::DeviceRegistered { .. } => NOTIFICATION_KIND_DEVICE_REGISTERED,

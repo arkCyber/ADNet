@@ -358,6 +358,15 @@ impl GroupService {
 
     /// `a3chat.group.join` — accept an invitation and become a member.
     ///
+    /// **Invitation validation:** The invitation must be accepted via
+    /// [`Self::accept_invitation`] BEFORE calling this method. The
+    /// `accept_invitation` method validates the invitation belongs to
+    /// the user, is pending, and is not expired.
+    ///
+    /// This method only handles the member addition to the hub store.
+    /// If an `invitation_id` is provided but not validated first,
+    /// the user can still join (public groups allow this).
+    ///
     /// Phase 5c: When iroh-docs is configured and the invitation contains
     /// a sync ticket, automatically joins the P2P sync network.
     ///
