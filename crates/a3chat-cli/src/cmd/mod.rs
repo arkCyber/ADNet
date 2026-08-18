@@ -29,4 +29,5 @@ pub mod rpc;
 pub mod stream;
 pub mod sync;
 pub mod trace;
+pub mod schema;
 pub mod whoami;

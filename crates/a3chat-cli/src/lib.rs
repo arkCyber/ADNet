@@ -172,6 +172,9 @@ pub enum Cmd {
     /// Config introspection.
     #[command(subcommand)]
     Config(cmd::config::ConfigCmd),
+    /// Dump the a3chat-core JSON Schema document (or one named definition).
+    /// Pure offline — does not talk to a daemon. Useful in CI for codegen.
+    Schema(cmd::schema::SchemaArgs),
 }
 
 /// Run the parsed CLI. Returns an exit code (0 success, 1 user error,
@@ -224,6 +227,7 @@ pub async fn run(cli: Cli) -> ExitCode {
         Cmd::Completions { shell } => cmd::completions::run(shell),
         Cmd::Audit(c) => cmd::audit::run(c, &cfg, &client).await,
         Cmd::Config(c) => cmd::config::run(c, &cfg),
+        Cmd::Schema(c) => cmd::schema::run(c),
     };
 
     match result {
