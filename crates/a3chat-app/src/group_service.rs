@@ -2401,4 +2401,93 @@ mod tests {
             .await;
         assert!(matches!(r, Err(AppError::Domain(_))));
     }
+
+    // ── G-02 — mute / unmute ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mute_member_rejects_empty_target() {
+        let svc = GroupService::new(NotificationBus::default());
+        let r = svc
+            .mute_member(
+                &UserId::from("alice"),
+                &ConversationId::from("grp:x"),
+                &UserId::from(""),
+                3600,
+                None,
+            )
+            .await;
+        assert!(matches!(r, Err(AppError::Domain(_))));
+        assert!(r.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn mute_member_rejects_zero_duration() {
+        let svc = GroupService::new(NotificationBus::default());
+        let r = svc
+            .mute_member(
+                &UserId::from("alice"),
+                &ConversationId::from("grp:x"),
+                &UserId::from("bob"),
+                0,
+                None,
+            )
+            .await;
+        assert!(matches!(r, Err(AppError::Domain(_))));
+        assert!(r.unwrap_err().to_string().contains("> 0"));
+    }
+
+    #[tokio::test]
+    async fn mute_member_rejects_negative_duration() {
+        let svc = GroupService::new(NotificationBus::default());
+        let r = svc
+            .mute_member(
+                &UserId::from("alice"),
+                &ConversationId::from("grp:x"),
+                &UserId::from("bob"),
+                -100,
+                None,
+            )
+            .await;
+        assert!(matches!(r, Err(AppError::Domain(_))));
+    }
+
+    #[tokio::test]
+    async fn unmute_member_requires_storage() {
+        // Without storage set, unmute_member should return NotInitialised.
+        let svc = GroupService::new(NotificationBus::default());
+        let r = svc
+            .unmute_member(
+                &UserId::from("alice"),
+                &ConversationId::from("grp:x"),
+                &UserId::from("bob"),
+            )
+            .await;
+        assert!(matches!(r, Err(AppError::NotInitialised(_))));
+    }
+
+    #[tokio::test]
+    async fn mute_all_requires_storage() {
+        // Without storage set, mute_all should return NotInitialised.
+        let svc = GroupService::new(NotificationBus::default());
+        let r = svc.mute_all(&UserId::from("alice"), &ConversationId::from("grp:x")).await;
+        assert!(matches!(r, Err(AppError::NotInitialised(_))));
+    }
+
+    #[tokio::test]
+    async fn unmute_all_requires_storage() {
+        // Without storage set, unmute_all should return NotInitialised.
+        let svc = GroupService::new(NotificationBus::default());
+        let r = svc.unmute_all(&UserId::from("alice"), &ConversationId::from("grp:x")).await;
+        assert!(matches!(r, Err(AppError::NotInitialised(_))));
+    }
+
+    #[tokio::test]
+    async fn is_member_muted_requires_storage() {
+        // Without storage set, is_member_muted should return NotInitialised.
+        let svc = GroupService::new(NotificationBus::default());
+        let r = svc
+            .is_member_muted(&ConversationId::from("grp:x"), &UserId::from("bob"))
+            .await;
+        assert!(matches!(r, Err(AppError::NotInitialised(_))));
+    }
 }
