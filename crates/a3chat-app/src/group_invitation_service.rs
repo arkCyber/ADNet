@@ -350,6 +350,24 @@ fn validate_record(rec: &InvitationRecord) -> AppResult<()> {
             "expires_at_unix must be after created_at_unix".into(),
         ));
     }
+    // SECURITY: Validate sync_ticket format if present
+    #[cfg(feature = "iroh")]
+    if let Some(ref ticket) = rec.sync_ticket {
+        use base64::Engine;
+        if ticket.len() < 10 {
+            return Err(AppError::Domain("sync_ticket too short".into()));
+        }
+        if ticket.len() > 10_000 {
+            return Err(AppError::Domain("sync_ticket too long".into()));
+        }
+        // Verify it's valid base64
+        if base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(ticket.as_bytes())
+            .is_err()
+        {
+            return Err(AppError::Domain("sync_ticket invalid base64 encoding".into()));
+        }
+    }
     Ok(())
 }
 

@@ -216,10 +216,13 @@ impl GroupSyncService {
             chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&chrono::Utc))
         });
 
+        // SECURITY: Extract actual sender from the message, not hardcoded "system"
+        let actual_sender = UserId::from(im_msg.sender_id.as_str());
+
         let chat_msg = a3chat_core::message::ChatMessage {
             message_id: a3chat_core::id::MessageId::from(im_msg.id.as_str()),
             conversation_id: conversation_id.clone(),
-            sender_id: UserId::from(im_msg.sender_id.as_str()),
+            sender_id: actual_sender.clone(),
             receiver_id: im_msg.receiver_id.as_ref().map(|r| UserId::from(r.as_str())).unwrap_or_else(|| UserId::from("")),
             message_type: a3chat_core::message::MessageType::Text,
             body: a3chat_core::message::MessageBody::Plain { content: im_msg.content.clone() },
@@ -234,19 +237,19 @@ impl GroupSyncService {
             recalled_at: None,
         };
 
-        // Check if message already exists (deduplication)
-        let existing = storage.get_message(&UserId::from("system"), &chat_msg.message_id).await?;
+        // SECURITY: Use actual sender for deduplication check
+        let existing = storage.get_message(&actual_sender, &chat_msg.message_id).await?;
         if existing.is_some() {
             debug!(msg_id = %chat_msg.message_id, "message already exists, skipping");
             return Ok(());
         }
 
-        // Store the message using record_inbound
-        storage.record_inbound(&UserId::from("system"), &chat_msg).await?;
+        // Store the message using record_inbound with actual sender
+        storage.record_inbound(&actual_sender, &chat_msg).await?;
 
-        // Publish notification for SSE subscribers
+        // Publish notification for SSE subscribers with actual sender
         bus.publish(A3chatEvent::ChatMessageReceived {
-            user_id: UserId::from("system"),
+            user_id: actual_sender,
             conversation_id: conversation_id.clone(),
             message: chat_msg,
         });

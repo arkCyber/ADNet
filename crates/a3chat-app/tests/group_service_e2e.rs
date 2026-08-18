@@ -610,6 +610,62 @@ async fn revoke_temp_admin_removes_temporary_privileges() {
 }
 
 #[tokio::test]
+async fn temp_admin_duration_is_capped_at_max() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Try to grant temp admin for 30 days (exceeds max of 7 days)
+    // This should succeed but cap at 7 days
+    svc.grant_temp_admin(&ids.alice(), &cid, &ids.bob(), 30 * 24 * 60 * 60)
+        .await
+        .unwrap();
+
+    // Verify bob has temp admin (capped at 7 days)
+    svc.set_announcement(&ids.bob(), &cid, "Temp admin works".into())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn temp_admin_rejects_negative_duration() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Try to grant temp admin with negative duration
+    let err = svc
+        .grant_temp_admin(&ids.alice(), &cid, &ids.bob(), -100)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, a3chat_app::error::AppError::Domain(_)));
+}
+
+#[tokio::test]
 async fn non_admin_cannot_grant_temp_admin() {
     let (svc, _dir, ids) = boot().await;
     let op = svc

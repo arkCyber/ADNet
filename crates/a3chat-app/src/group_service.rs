@@ -209,8 +209,18 @@ impl GroupService {
     ///
     /// Returns a base64-encoded ticket that can be shared with new members
     /// to join the group's P2P sync network.
+    ///
+    /// SECURITY: Requires admin/owner role to prevent unauthorized ticket generation.
     #[cfg(feature = "iroh")]
-    pub async fn get_sync_ticket(&self, conversation_id: &ConversationId) -> AppResult<String> {
+    pub async fn get_sync_ticket(
+        &self,
+        actor: &UserId,
+        conversation_id: &ConversationId,
+    ) -> AppResult<String> {
+        // SECURITY: Authorization check - only admins/owners can generate sync tickets
+        self.require_role(actor, conversation_id, MemberRole::Admin)
+            .await?;
+
         use base64::Engine;
         let docs_chat = self.iroh_docs_arc().ok_or_else(|| {
             AppError::NotInitialised("GroupService iroh_docs not set".into())
@@ -231,9 +241,22 @@ impl GroupService {
     ///
     /// Opens the iroh-docs doc for the conversation and starts receiving
     /// messages via the P2P sync network.
+    ///
+    /// SECURITY: Validates the ticket format before use. The ticket itself
+    /// is scoped to a specific namespace (doc ID) which provides access control.
     #[cfg(feature = "iroh")]
-    pub async fn join_sync(&self, conversation_id: &ConversationId, ticket_b64: &str) -> AppResult<()> {
+    pub async fn join_sync(&self, ticket_b64: &str) -> AppResult<ConversationId> {
         use base64::Engine;
+
+        // Input validation - prevent DoS via oversized tickets
+        let ticket_b64 = ticket_b64.trim();
+        if ticket_b64.is_empty() {
+            return Err(AppError::Domain("ticket cannot be empty".into()));
+        }
+        if ticket_b64.len() > 10_000 {
+            return Err(AppError::Domain("ticket too long".into()));
+        }
+
         let docs_chat = self.iroh_docs_arc().ok_or_else(|| {
             AppError::NotInitialised("GroupService iroh_docs not set".into())
         })?;
@@ -241,9 +264,15 @@ impl GroupService {
         // Decode ticket from base64
         let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(ticket_b64)
-            .map_err(|e| AppError::Internal(format!("invalid ticket encoding: {e}")))?;
+            .map_err(|e| AppError::Domain(format!("invalid ticket encoding: {e}")))?;
         let ticket: iroh_docs::DocTicket = serde_json::from_slice(&json)
-            .map_err(|e| AppError::Internal(format!("invalid ticket format: {e}")))?;
+            .map_err(|e| AppError::Domain(format!("invalid ticket format: {e}")))?;
+
+        // SECURITY: Extract namespace from ticket - this IS the conversation_id.
+        // The namespace is the unique identifier for the iroh-docs document.
+        // A ticket can only open its own namespace, providing inherent access control.
+        let namespace = ticket.namespace();
+        let conversation_id = ConversationId::from(namespace.to_string());
 
         // Open the doc with the ticket
         docs_chat
@@ -252,7 +281,7 @@ impl GroupService {
             .map_err(|e| AppError::Internal(format!("failed to open sync doc: {e}")))?;
 
         tracing::info!(conv = %conversation_id, "joined group sync network");
-        Ok(())
+        Ok(conversation_id)
     }
 
     /// `a3chat.group.create` — owner creates a group conversation.
@@ -317,6 +346,9 @@ impl GroupService {
     ///
     /// Phase 5c: When iroh-docs is configured and the invitation contains
     /// a sync ticket, automatically joins the P2P sync network.
+    ///
+    /// SECURITY: Sync join failures are propagated as errors to prevent
+    /// silent membership without P2P capability.
     pub async fn join(
         &self,
         user: &UserId,
@@ -335,11 +367,11 @@ impl GroupService {
             .map_err(AppError::from)?;
 
         // Phase 5c: Join P2P sync network if ticket is provided
+        // SECURITY: Propagate error instead of silent failure - user should
+        // not be in group without sync capability
         #[cfg(feature = "iroh")]
         if let Some(ticket) = sync_ticket {
-            if let Err(e) = self.join_sync(conversation_id, ticket).await {
-                tracing::warn!(conv = %conversation_id, "failed to join sync network: {e}");
-            }
+            self.join_sync(ticket).await?;
         }
 
         self.bus
@@ -374,7 +406,7 @@ impl GroupService {
 
         // Phase 5c: Get sync ticket for P2P group message sync
         #[cfg(feature = "iroh")]
-        let sync_ticket = self.get_sync_ticket(conversation_id).await.ok();
+        let sync_ticket = self.get_sync_ticket(inviter, conversation_id).await.ok();
 
         let rec = crate::group_invitation_service::InvitationRecord {
             invitation_id: invitation_id.clone(),
