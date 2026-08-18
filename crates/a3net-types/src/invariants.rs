@@ -219,7 +219,8 @@ pub fn validate_url(field: &str, value: &str) -> Result<()> {
             )));
         }
     }
-    if parsed.host().is_none() {
+    // data: URLs have no host; only require host for http/https.
+    if parsed.host().is_none() && scheme != "data" {
         return Err(AdnetError::Validation(format!(
             "{field}: URL has no host"
         )));

@@ -1405,10 +1405,13 @@ impl ChatStorage {
         let is_muted: bool = tokio::task::spawn_blocking(move || -> AppResult<bool> {
             let guard = conn_arc.blocking_lock_owned();
             let now = chrono::Utc::now().timestamp();
+            // Check both the per-member mute row AND the group-wide "mute all"
+            // sentinel (stored as `muted_user_id = "*all*"` in the same table).
             let row: Option<i64> = guard
                 .query_row(
-                    "SELECT muted_until_unix FROM group_member_mutes
-                     WHERE conversation_id = ?1 AND muted_user_id = ?2",
+                    "SELECT MAX(muted_until_unix) FROM group_member_mutes
+                     WHERE conversation_id = ?1
+                       AND (muted_user_id = ?2 OR muted_user_id = '*all*')",
                     rusqlite::params![conv, target_str],
                     |r| r.get(0),
                 )
