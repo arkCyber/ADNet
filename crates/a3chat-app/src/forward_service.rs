@@ -537,7 +537,7 @@ mod tests {
     use super::*;
     use a3chat_core::conversation::ConversationMeta;
     use a3chat_core::id::ConversationId;
-    use a3chat_core::message::{Attachment, AttachmentKind, ChatMessage, MessageBody, MessageType};
+    use a3chat_core::message::{Attachment, ChatMessage, MessageBody, MessageType};
     use crate::notification_bus::NotificationBus;
     use tempfile::tempdir;
 
@@ -699,7 +699,7 @@ mod tests {
         };
         let stored = svc.storage.save_outbound(&owner(), &envelope).await.unwrap();
         let source_msg_id = stored.message.message_id.clone();
-        let base_timestamp = 1_700_000_000;
+        let _base_timestamp = 1_700_000_000;
 
         // Create target conversations first.
         let carol_conv = ConversationMeta {
@@ -902,7 +902,7 @@ mod tests {
             sequence: 2,
             timestamp: 1_700_000_001,
         };
-        let stored2 = svc.storage.save_outbound(&owner(), &envelope2).await.unwrap();
+        let _stored2 = svc.storage.save_outbound(&owner(), &envelope2).await.unwrap();
 
         // Create target conversation.
         let carol_conv = ConversationMeta {

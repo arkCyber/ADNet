@@ -3,10 +3,12 @@
 //! These types bridge between the RPC wire format and the internal
 //! service methods.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use a3chat_core::error::A3chatError;
 use a3chat_core::group::{Group, GroupMember};
+use a3chat_core::id::UserId;
 
 // ── Create ────────────────────────────────────────────────────────────────────
 
@@ -114,4 +116,29 @@ pub fn hub_member_to_core(hub: a3net_chatstore::GroupMember) -> GroupMember {
         nickname: None,
         temp_admin_until: hub.temp_admin_until,
     }
+}
+
+/// Information about a member with temporary admin privileges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempAdminInfo {
+    pub user_id: UserId,
+    pub display_name: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Response for temp admin status query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempAdminStatusResponse {
+    pub user_id: UserId,
+    pub has_temp_admin: bool,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Response for listing temp admins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempAdminListResponse {
+    pub temp_admins: Vec<TempAdminInfo>,
 }

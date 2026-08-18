@@ -16,6 +16,9 @@ use crate::notification_bus::NotificationBus;
 use crate::storage::{ChatStorage, StoredMessage};
 
 #[cfg(feature = "iroh")]
+use tokio::sync::RwLock;
+
+#[cfg(feature = "iroh")]
 use a3net_chatstore::IrohDocsChat;
 
 /// The chat service. Cloning is cheap (`Arc`-wrapped state).
@@ -254,7 +257,7 @@ impl ChatService {
         limit: u32,
     ) -> AppResult<Vec<ChatMessage>> {
         // Primary: authoritative SQLite read.
-        let sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
+        let mut sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
 
         #[cfg(feature = "iroh")]
         if let Some(docs_chat) = self.iroh_docs_chat.read().await.as_ref() {
@@ -396,7 +399,7 @@ impl ChatService {
             });
 
         // Touch presence: update sender's last_seen and is_online for group messages.
-        // This runs after the message is persisted so we don't delay the RPC response.
+        // This runs as a fire-and-forget task to avoid delaying the RPC response.
         if matches!(
             envelope.conversation_id.kind_hint(),
             a3chat_core::id::ConversationKindHint::Group
@@ -406,13 +409,12 @@ impl ChatService {
                 .lock()
                 .expect("presence_touch_gate mutex poisoned")
                 .clone();
+            let cid = envelope.conversation_id.clone();
+            let sender = owner.clone();
             if let Some(f) = gate_opt {
-                f(
-                    envelope.conversation_id.clone(),
-                    owner.clone(),
-                    true,
-                )
-                .await;
+                tokio::spawn(async move {
+                    f(cid, sender, true).await;
+                });
             }
         }
 

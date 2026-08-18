@@ -22,6 +22,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use a3chat_core::error::A3chatError;
 use a3chat_core::event::A3chatEvent;
 use a3chat_core::group::{Group, GroupMember, MemberRole};
@@ -29,6 +30,7 @@ use a3chat_core::id::{ConversationId, UserId};
 use a3chat_core::rpc::A3chatRpcMethod;
 
 use crate::error::{AppError, AppResult};
+use crate::group_service_types::TempAdminInfo;
 use crate::notification_bus::NotificationBus;
 
 // Re-export types used by tests and CLI.
@@ -382,7 +384,7 @@ impl GroupService {
         // SECURITY: Propagate error instead of silent failure - user should
         // not be in group without sync capability
         #[cfg(feature = "iroh")]
-        if let Some(ticket) = sync_ticket {
+        if let Some(ticket) = _sync_ticket {
             self.join_sync(conversation_id, ticket).await?;
         }
 
@@ -883,6 +885,46 @@ impl GroupService {
         Ok(members.into_iter().map(hub_member_to_core).collect())
     }
 
+    /// `a3chat.group.members.online` — only members that are currently online.
+    pub async fn list_online_members(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> AppResult<Vec<GroupMember>> {
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        let online: Vec<GroupMember> = members
+            .into_iter()
+            .filter(|m| m.is_online)
+            .map(hub_member_to_core)
+            .collect();
+        Ok(online)
+    }
+
+    /// Get presence statistics for a group.
+    /// Returns (online_count, total_count).
+    pub async fn get_presence_stats(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> AppResult<(u32, u32)> {
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        let total = members.len() as u32;
+        let online = members.iter().filter(|m| m.is_online).count() as u32;
+        Ok((online, total))
+    }
+
     /// `a3chat.group.member.get` — a single member's record.
     pub async fn get_member(
         &self,
@@ -1178,7 +1220,11 @@ impl GroupService {
     }
 
     /// Grant temporary admin status to a member for a specified duration.
-    /// Only owners and current admins can grant temporary admin.
+    ///
+    /// **Security**: Only permanent admins (owners or admins WITHOUT temporary
+    /// admin grants) can grant temporary admin. This prevents privilege
+    /// escalation via temp admin chaining.
+    ///
     /// Duration is capped at MAX_TEMP_ADMIN_DURATION_SECS (7 days).
     pub async fn grant_temp_admin(
         &self,
@@ -1187,8 +1233,31 @@ impl GroupService {
         target: &UserId,
         duration_secs: i64,
     ) -> AppResult<()> {
+        // First check: actor must have admin role
         self.require_role(actor, conversation_id, MemberRole::Admin)
             .await?;
+
+        // Second check: actor must NOT be a temp admin (prevent chaining attack)
+        // Temp admins can perform admin actions but cannot extend privileges
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+        let actor_member = members
+            .iter()
+            .find(|m| m.user_id == actor.as_str())
+            .ok_or_else(|| AppError::Domain("actor is not a member".into()))?;
+
+        if let Some(until) = actor_member.temp_admin_until {
+            if until > chrono::Utc::now() {
+                return Err(AppError::Forbidden(
+                    "temporary admins cannot grant temporary admin privileges".into(),
+                ));
+            }
+        }
 
         if target.as_str().is_empty() {
             return Err(AppError::Domain("target user_id is empty".into()));
@@ -1202,15 +1271,7 @@ impl GroupService {
         }
         let duration_secs = duration_secs.min(MAX_TEMP_ADMIN_DURATION_SECS);
 
-        let hub = self
-            .hub_arc()
-            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
-
         // Verify target is a member
-        let members = hub
-            .get_group_members(conversation_id.as_str())
-            .await
-            .map_err(AppError::from)?;
         if !members.iter().any(|m| m.user_id == target.as_str()) {
             return Err(AppError::Domain("target is not a member".into()));
         }
@@ -1232,25 +1293,41 @@ impl GroupService {
     }
 
     /// Revoke temporary admin status from a member.
-    /// Only owners and current admins can revoke.
+    ///
+    /// **Security**: Only permanent admins can revoke temporary admin.
+    /// Temp admins cannot revoke other temp admins.
     pub async fn revoke_temp_admin(
         &self,
         actor: &UserId,
         conversation_id: &ConversationId,
         target: &UserId,
     ) -> AppResult<()> {
+        // First check: actor must have admin role
         self.require_role(actor, conversation_id, MemberRole::Admin)
             .await?;
 
+        // Second check: actor must NOT be a temp admin (prevent chaining attack)
         let hub = self
             .hub_arc()
             .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
-
-        // Verify target is a member
         let members = hub
             .get_group_members(conversation_id.as_str())
             .await
             .map_err(AppError::from)?;
+        let actor_member = members
+            .iter()
+            .find(|m| m.user_id == actor.as_str())
+            .ok_or_else(|| AppError::Domain("actor is not a member".into()))?;
+
+        if let Some(until) = actor_member.temp_admin_until {
+            if until > chrono::Utc::now() {
+                return Err(AppError::Forbidden(
+                    "temporary admins cannot revoke temporary admin privileges".into(),
+                ));
+            }
+        }
+
+        // Verify target is a member
         if !members.iter().any(|m| m.user_id == target.as_str()) {
             return Err(AppError::Domain("target is not a member".into()));
         }
@@ -1267,6 +1344,87 @@ impl GroupService {
         });
 
         Ok(())
+    }
+
+    /// Get the temporary admin status of a member.
+    /// Returns the expiry time if the member has ACTIVE (non-expired) temp admin, None otherwise.
+    pub async fn get_temp_admin_status(
+        &self,
+        _actor: &UserId,
+        conversation_id: &ConversationId,
+        target: &UserId,
+    ) -> AppResult<Option<DateTime<Utc>>> {
+        // Anyone in the group can query temp admin status
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        let member = members
+            .iter()
+            .find(|m| m.user_id == target.as_str())
+            .ok_or_else(|| AppError::Domain("target is not a member".into()))?;
+
+        // Only return temp_admin_until if it's still valid (not expired)
+        if let Some(until) = member.temp_admin_until {
+            if until > Utc::now() {
+                return Ok(Some(until));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// List all members with temporary admin privileges in a group.
+    pub async fn list_temp_admins(
+        &self,
+        _actor: &UserId,
+        conversation_id: &ConversationId,
+    ) -> AppResult<Vec<TempAdminInfo>> {
+        // Anyone in the group can list temp admins
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        let now = Utc::now();
+        let temp_admins: Vec<TempAdminInfo> = members
+            .iter()
+            .filter_map(|m| {
+                m.temp_admin_until
+                    .filter(|until| *until > now)
+                    .map(|until| TempAdminInfo {
+                        user_id: UserId::from(m.user_id.clone()),
+                        display_name: m.user_id.clone(),
+                        expires_at: until,
+                    })
+            })
+            .collect();
+
+        Ok(temp_admins)
+    }
+
+    /// Clean up all expired temporary admin grants across all groups.
+    /// Returns the number of expired grants that were cleared.
+    ///
+    /// This is intended to be called periodically (e.g., by a background task)
+    /// to clean up stale data from expired grants.
+    pub async fn cleanup_expired_temp_admin(&self) -> AppResult<usize> {
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        hub.cleanup_expired_temp_admin_grants()
+            .await
+            .map_err(AppError::from)
     }
 
     // ── Group mute (G-02) ──────────────────────────────────────────────────────
@@ -2112,6 +2270,57 @@ pub async fn dispatch(
                 .await
                 .map_err(A3chatError::from)?;
             Ok(serde_json::json!({ "ok": true }))
+        }
+        A3chatRpcMethod::GROUP_TEMP_ADMIN_STATUS => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: UserId = serde_json::from_value(
+                params
+                    .get("user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let expires_at = svc
+                .get_temp_admin_status(owner, &conversation_id, &target)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({
+                "user_id": target,
+                "has_temp_admin": expires_at.is_some(),
+                "expires_at": expires_at.map(|t| t.to_rfc3339()),
+            }))
+        }
+        A3chatRpcMethod::GROUP_TEMP_ADMIN_LIST => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let temp_admins = svc
+                .list_temp_admins(owner, &conversation_id)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(&crate::group_service_types::TempAdminListResponse {
+                temp_admins,
+            })
+            .map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::GROUP_TEMP_ADMIN_CLEANUP => {
+            // No parameters needed; this is an admin-only operation
+            // that clears all expired grants across all groups.
+            let cleared = svc
+                .cleanup_expired_temp_admin()
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({ "cleared": cleared }))
         }
 
         _ => Err(A3chatError::Internal(format!(

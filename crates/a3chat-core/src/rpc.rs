@@ -124,6 +124,9 @@ impl A3chatRpcMethod {
     pub const GROUP_MENTION_PARSE: &'static str = "a3chat.group.mention.parse";
     pub const GROUP_TEMP_ADMIN_GRANT: &'static str = "a3chat.group.temp_admin.grant";
     pub const GROUP_TEMP_ADMIN_REVOKE: &'static str = "a3chat.group.temp_admin.revoke";
+    pub const GROUP_TEMP_ADMIN_STATUS: &'static str = "a3chat.group.temp_admin.status";
+    pub const GROUP_TEMP_ADMIN_LIST: &'static str = "a3chat.group.temp_admin.list";
+    pub const GROUP_TEMP_ADMIN_CLEANUP: &'static str = "a3chat.group.temp_admin.cleanup";
     pub const GROUP_SYNC_JOIN: &'static str = "a3chat.group.sync.join";
     pub const GROUP_SYNC_LEAVE: &'static str = "a3chat.group.sync.leave";
     pub const GROUP_SYNC_FORCE: &'static str = "a3chat.group.sync.force";
@@ -407,6 +410,9 @@ impl A3chatRpcMethod {
         Self::GROUP_MENTION_PARSE,
         Self::GROUP_TEMP_ADMIN_GRANT,
         Self::GROUP_TEMP_ADMIN_REVOKE,
+        Self::GROUP_TEMP_ADMIN_STATUS,
+        Self::GROUP_TEMP_ADMIN_LIST,
+        Self::GROUP_TEMP_ADMIN_CLEANUP,
         Self::GROUP_SYNC_JOIN,
         Self::GROUP_SYNC_LEAVE,
         Self::GROUP_SYNC_FORCE,

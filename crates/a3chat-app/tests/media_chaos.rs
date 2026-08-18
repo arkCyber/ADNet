@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3chat_app::media_service::{
-    MediaConfig, MediaService, MAX_ATTACHMENT_BYTES, MAX_CHUNK_BYTES,
+    MediaConfig, MediaService, MAX_ATTACHMENT_BYTES,
 };
 use a3chat_core::id::UserId;
 use uuid::Uuid;

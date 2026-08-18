@@ -3348,7 +3348,7 @@ mod tests {
         let (_dir, storage) = fresh_storage().await;
         let mut hs = Vec::new();
         for i in 1..=8 {
-            let (s, o, p, e) = (storage.clone(), owner(), peer(), envelope());
+            let (s, o, _p, e) = (storage.clone(), owner(), peer(), envelope());
             let mut e = e;
             e.sequence = i;
             e.timestamp = 1_700_000_000 + i as i64;

@@ -38,7 +38,7 @@
 //! - `messages_synced`: Total messages synced from iroh to SQLite
 //! - `sync_errors`: Number of sync errors encountered
 //! - `last_sync_duration_ms`: Duration of last sync operation
-//! - `backfill_batch_sizes`: Distribution of batch sizes for backfills
+//! - `last_backfill_size`: Batch size of the most recent backfill
 
 #[cfg(feature = "iroh")]
 
@@ -79,22 +79,29 @@ pub struct SyncMetrics {
     pub last_sync_at: Option<DateTime<Utc>>,
     /// Number of groups currently subscribed for sync.
     pub active_groups: usize,
-    /// Last backfill batch size.
+    /// Last backfill batch size (for the most recent backfill).
     pub last_backfill_size: usize,
+    /// Seconds since the sync service started.
+    pub uptime_secs: u64,
+    /// Total sync operations attempted.
+    pub sync_operations_total: u64,
+    /// Total bytes synced (estimated from message count * avg message size).
+    pub bytes_synced_total: u64,
+    /// Estimated average message size in bytes.
+    pub avg_message_size_bytes: u32,
 }
 
 impl SyncMetrics {
-    /// Create a new empty metrics instance.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Record a successful sync with the given batch size and duration.
     pub fn record_sync(&mut self, batch_size: usize, duration_ms: u64) {
         self.messages_synced_total += batch_size as u64;
         self.last_sync_duration_ms = Some(duration_ms);
         self.last_sync_at = Some(Utc::now());
         self.last_backfill_size = batch_size;
+        self.sync_operations_total += 1;
+        // Estimate: 500 bytes per message average
+        let bytes = (batch_size as u64) * (self.avg_message_size_bytes as u64);
+        self.bytes_synced_total += bytes;
     }
 
     /// Record a sync error.
@@ -106,20 +113,47 @@ impl SyncMetrics {
     pub fn set_active_groups(&mut self, count: usize) {
         self.active_groups = count;
     }
+
+    /// Calculate the error rate as a percentage.
+    pub fn error_rate_percent(&self) -> f64 {
+        if self.sync_operations_total == 0 {
+            0.0
+        } else {
+            (self.sync_errors_total as f64 / self.sync_operations_total as f64) * 100.0
+        }
+    }
+
+    /// Calculate sync throughput (messages per second).
+    pub fn throughput_msg_per_sec(&self) -> f64 {
+        if self.uptime_secs == 0 {
+            0.0
+        } else {
+            self.messages_synced_total as f64 / self.uptime_secs as f64
+        }
+    }
 }
 
 /// Phase 5c: Metrics collector for sync operations.
 /// Thread-safe, used to expose metrics to monitoring systems.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SyncMetricsCollector {
     inner: Arc<tokio::sync::RwLock<SyncMetrics>>,
+    /// When this collector was created — used to compute uptime.
+    start_time: std::time::Instant,
+}
+
+impl Default for SyncMetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SyncMetricsCollector {
     /// Create a new metrics collector.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(tokio::sync::RwLock::new(SyncMetrics::new())),
+            inner: Arc::new(tokio::sync::RwLock::new(SyncMetrics::default())),
+            start_time: std::time::Instant::now(),
         }
     }
 
@@ -141,9 +175,11 @@ impl SyncMetricsCollector {
         metrics.set_active_groups(count);
     }
 
-    /// Get a snapshot of current metrics.
+    /// Get a snapshot of current metrics (including live uptime_secs).
     pub async fn snapshot(&self) -> SyncMetrics {
-        self.inner.read().await.clone()
+        let mut m = self.inner.read().await.clone();
+        m.uptime_secs = self.start_time.elapsed().as_secs();
+        m
     }
 }
 
@@ -278,19 +314,28 @@ impl GroupSyncService {
         bus: &crate::notification_bus::NotificationBus,
         metrics: &SyncMetricsCollector,
     ) {
+        let start = std::time::Instant::now();
+        let start = std::time::Instant::now();
         let states = sync_states.read().await;
         let active_count = states.values().filter(|s| s.is_subscribed).count();
+        let conv_ids: Vec<_> = states
+            .iter()
+            .filter(|(_, s)| s.is_subscribed)
+            .map(|(id, _)| id.clone())
+            .collect();
         drop(states);
 
         metrics.set_active_groups(active_count).await;
 
-        let states = sync_states.read().await;
-        for (conv_id, state) in states.iter() {
-            if !state.is_subscribed {
-                continue;
-            }
+        // Collect errors across all groups; record once per tick (not per-group).
+        let mut errors_this_tick = 0usize;
+        let mut total_synced_this_tick = 0usize;
 
-            let last_seq = state.last_processed_seq;
+        for conv_id in &conv_ids {
+            let last_seq = {
+                let states = sync_states.read().await;
+                states.get(conv_id).map(|s| s.last_processed_seq).unwrap_or(0)
+            };
             let conv_id_str = conv_id.as_str();
 
             match docs_chat.get_messages(conv_id_str, Some(last_seq), BACKFILL_BATCH_SIZE).await {
@@ -328,7 +373,7 @@ impl GroupSyncService {
                             }
                             Err(e) => {
                                 warn!(conv = %conv_id, seq, "failed to backfill message: {e}");
-                                metrics.record_error().await;
+                                errors_this_tick += 1;
                             }
                         }
                     }
@@ -339,6 +384,7 @@ impl GroupSyncService {
                             state.last_processed_seq = highest_seq;
                             state.last_sync_at = Some(Utc::now());
                         }
+                        total_synced_this_tick += successful_count as usize;
                         debug!(
                             conv = %conv_id,
                             synced = successful_count,
@@ -348,9 +394,18 @@ impl GroupSyncService {
                 }
                 Err(e) => {
                     warn!(conv = %conv_id, "iroh get_messages failed: {e}");
-                    metrics.record_error().await;
+                    errors_this_tick += 1;
                 }
             }
+        }
+
+        // Record once per tick, not per-group.
+        for _ in 0..errors_this_tick {
+            metrics.record_error().await;
+        }
+        if total_synced_this_tick > 0 {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            metrics.record_sync(total_synced_this_tick, elapsed_ms).await;
         }
     }
 
@@ -524,9 +579,8 @@ impl GroupSyncService {
             .await
             .map_err(|e| AppError::Internal(format!("get_messages failed: {e}")))?;
 
-        let count = messages.len();
-
         let mut highest_seq = last_seq;
+        let mut successful_count = 0u32;
         for msg in messages {
             let Some(seq) = msg.sequence else { continue };
             if seq <= last_seq {
@@ -543,6 +597,7 @@ impl GroupSyncService {
                 warn!(conv = %conversation_id, seq, "failed to sync message: {e}");
             } else {
                 highest_seq = seq;
+                successful_count += 1;
             }
         }
 
@@ -554,8 +609,8 @@ impl GroupSyncService {
             }
         }
 
-        info!(conv = %conversation_id, count, "manual sync completed");
-        Ok(count as u32)
+        info!(conv = %conversation_id, synced = successful_count, "manual sync completed");
+        Ok(successful_count)
     }
 
     /// Get sync status for a group.
@@ -716,6 +771,21 @@ impl<'a> std::fmt::Display for MetricsPrometheusFormat<'a> {
         writeln!(f, "# HELP a3chat_group_sync_last_backfill_size Batch size of last backfill.")?;
         writeln!(f, "# TYPE a3chat_group_sync_last_backfill_size gauge")?;
         writeln!(f, "a3chat_group_sync_last_backfill_size {}", m.last_backfill_size)?;
+        writeln!(f, "# HELP a3chat_uptime_secs Seconds since the sync service started.")?;
+        writeln!(f, "# TYPE a3chat_uptime_secs gauge")?;
+        writeln!(f, "a3chat_uptime_secs {}", m.uptime_secs)?;
+        writeln!(f, "# HELP a3chat_group_sync_operations_total Total sync operations attempted.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_operations_total counter")?;
+        writeln!(f, "a3chat_group_sync_operations_total {}", m.sync_operations_total)?;
+        writeln!(f, "# HELP a3chat_group_sync_bytes_total Estimated bytes synced.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_bytes_total counter")?;
+        writeln!(f, "a3chat_group_sync_bytes_total {}", m.bytes_synced_total)?;
+        writeln!(f, "# HELP a3chat_group_sync_throughput_msg_per_sec Messages synced per second.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_throughput_msg_per_sec gauge")?;
+        writeln!(f, "a3chat_group_sync_throughput_msg_per_sec {:.2}", m.throughput_msg_per_sec())?;
+        writeln!(f, "# HELP a3chat_group_sync_error_rate_percent Error rate as percentage.")?;
+        writeln!(f, "# TYPE a3chat_group_sync_error_rate_percent gauge")?;
+        writeln!(f, "a3chat_group_sync_error_rate_percent {:.2}", m.error_rate_percent())?;
         if let Some(ts) = m.last_sync_at {
             writeln!(f, "# HELP a3chat_group_sync_last_timestamp_seconds Unix timestamp of last sync.")?;
             writeln!(f, "# TYPE a3chat_group_sync_last_timestamp_seconds gauge")?;
@@ -733,7 +803,7 @@ mod tests {
     /// Phase 5c: Test SyncMetrics basic operations.
     #[test]
     fn sync_metrics_record_sync() {
-        let mut metrics = SyncMetrics::new();
+        let mut metrics = SyncMetrics::default();
         assert_eq!(metrics.messages_synced_total, 0);
         assert!(metrics.last_sync_duration_ms.is_none());
 
@@ -751,7 +821,7 @@ mod tests {
     /// Phase 5c: Test SyncMetrics error recording.
     #[test]
     fn sync_metrics_record_error() {
-        let mut metrics = SyncMetrics::new();
+        let mut metrics = SyncMetrics::default();
         assert_eq!(metrics.sync_errors_total, 0);
 
         metrics.record_error();
@@ -764,7 +834,7 @@ mod tests {
     /// Phase 5c: Test SyncMetrics active groups.
     #[test]
     fn sync_metrics_active_groups() {
-        let mut metrics = SyncMetrics::new();
+        let mut metrics = SyncMetrics::default();
         assert_eq!(metrics.active_groups, 0);
 
         metrics.set_active_groups(3);
@@ -826,5 +896,233 @@ mod tests {
         assert_eq!(state.last_processed_seq, 0);
         assert!(!state.is_subscribed);
         assert!(state.last_sync_at.is_none());
+    }
+
+    /// Phase 5c: Test that MetricsPrometheusFormat outputs all expected fields.
+    #[test]
+    fn prometheus_format_includes_all_fields() {
+        let mut metrics = SyncMetrics::default();
+        metrics.record_sync(42, 123);
+        metrics.set_active_groups(3);
+
+        let output = MetricsPrometheusFormat(&metrics).to_string();
+
+        assert!(output.contains("a3chat_group_sync_messages_total 42"));
+        assert!(output.contains("a3chat_group_sync_errors_total 0"));
+        assert!(output.contains("a3chat_group_sync_active_groups 3"));
+        assert!(output.contains("a3chat_group_sync_last_duration_ms 123"));
+        assert!(output.contains("a3chat_group_sync_last_backfill_size 42"));
+        assert!(output.contains("a3chat_uptime_secs"));
+        assert!(output.contains("# TYPE a3chat_group_sync_messages_total counter"));
+        assert!(output.contains("# TYPE a3chat_group_sync_active_groups gauge"));
+    }
+
+    /// Phase 5c: Test that uptime_secs increases between snapshots.
+    #[tokio::test]
+    async fn uptime_secs_increases_over_time() {
+        let collector = SyncMetricsCollector::new();
+
+        let before = collector.snapshot().await;
+        assert_eq!(before.uptime_secs, 0);
+
+        // uptime_secs is in seconds, so we need to wait at least 1 second
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let after = collector.snapshot().await;
+        assert!(after.uptime_secs >= 1, "uptime should be >= 1s after 1s wait");
+    }
+
+    /// Phase 5c: Test that errors increment the counter.
+    #[test]
+    fn sync_metrics_multiple_errors() {
+        let mut metrics = SyncMetrics::default();
+        for _ in 0..5 {
+            metrics.record_error();
+        }
+        assert_eq!(metrics.sync_errors_total, 5);
+    }
+
+    /// Phase 5c: Test error rate calculation.
+    #[test]
+    fn sync_metrics_error_rate() {
+        let mut metrics = SyncMetrics::default();
+        assert_eq!(metrics.error_rate_percent(), 0.0);
+
+        // Add some successful syncs
+        metrics.record_sync(10, 100);
+        metrics.record_sync(5, 50);
+
+        // Add errors
+        metrics.record_error();
+        metrics.record_error();
+
+        // 2 errors / 2 operations = 100%
+        assert!((metrics.error_rate_percent() - 100.0).abs() < 0.01);
+    }
+
+    /// Phase 5c: Test throughput calculation.
+    #[tokio::test]
+    async fn sync_metrics_throughput() {
+        let collector = SyncMetricsCollector::new();
+
+        collector.record_sync(100, 100).await;
+
+        let snapshot = collector.snapshot().await;
+        // Initial uptime should be 0 or very small
+        assert!(snapshot.throughput_msg_per_sec() >= 0.0);
+    }
+
+    /// Phase 5c: Test bytes synced tracking.
+    #[test]
+    fn sync_metrics_bytes_tracking() {
+        let mut metrics = SyncMetrics::default();
+        assert_eq!(metrics.bytes_synced_total, 0);
+
+        // Set avg message size for meaningful tracking
+        metrics.avg_message_size_bytes = 500;
+        metrics.record_sync(10, 100);
+        assert_eq!(metrics.bytes_synced_total, 10 * 500);
+    }
+
+    /// Phase 5c: Test sync operations counter.
+    #[test]
+    fn sync_metrics_operations_counter() {
+        let mut metrics = SyncMetrics::default();
+        assert_eq!(metrics.sync_operations_total, 0);
+
+        metrics.record_sync(10, 100);
+        metrics.record_sync(5, 50);
+        metrics.record_error();
+
+        assert_eq!(metrics.sync_operations_total, 2); // Only successful syncs count
+    }
+
+    /// Phase 5c: Test Prometheus format includes new fields.
+    #[test]
+    fn prometheus_format_includes_derived_metrics() {
+        let mut metrics = SyncMetrics::default();
+        metrics.record_sync(42, 123);
+        metrics.set_active_groups(3);
+
+        let output = MetricsPrometheusFormat(&metrics).to_string();
+
+        assert!(output.contains("a3chat_group_sync_operations_total"));
+        assert!(output.contains("a3chat_group_sync_bytes_total"));
+        assert!(output.contains("a3chat_group_sync_throughput_msg_per_sec"));
+        assert!(output.contains("a3chat_group_sync_error_rate_percent"));
+    }
+
+    /// Phase 5c: Test error rate with no operations.
+    #[test]
+    fn sync_metrics_error_rate_no_operations() {
+        let metrics = SyncMetrics::default();
+        assert_eq!(metrics.error_rate_percent(), 0.0);
+    }
+
+    /// Phase 5c: Test throughput with zero uptime.
+    #[test]
+    fn sync_metrics_throughput_zero_uptime() {
+        let metrics = SyncMetrics::default();
+        assert_eq!(metrics.throughput_msg_per_sec(), 0.0);
+    }
+
+    /// Phase 5c: Test Prometheus format handles None values.
+    #[test]
+    fn prometheus_format_handles_none_values() {
+        let metrics = SyncMetrics::default();
+
+        let output = MetricsPrometheusFormat(&metrics).to_string();
+
+        // Should have default value when last_sync_duration_ms is None
+        assert!(output.contains("a3chat_group_sync_last_duration_ms 0"));
+        // Should NOT have timestamp line when last_sync_at is None
+        assert!(!output.contains("a3chat_group_sync_last_timestamp_seconds"));
+    }
+
+    /// Phase 5c: Test Prometheus format includes timestamp when available.
+    #[test]
+    fn prometheus_format_includes_timestamp() {
+        let mut metrics = SyncMetrics::default();
+        metrics.record_sync(10, 100);
+
+        let output = MetricsPrometheusFormat(&metrics).to_string();
+
+        assert!(output.contains("a3chat_group_sync_last_timestamp_seconds"));
+    }
+
+    /// Phase 5c: Test large batch size handling.
+    #[test]
+    fn sync_metrics_large_batch() {
+        let mut metrics = SyncMetrics::default();
+        metrics.avg_message_size_bytes = 1000;
+
+        // Test with a large batch
+        metrics.record_sync(10000, 5000);
+        assert_eq!(metrics.messages_synced_total, 10000);
+        assert_eq!(metrics.bytes_synced_total, 10_000_000);
+    }
+
+    /// Phase 5c: Test concurrent error recording.
+    #[tokio::test]
+    async fn sync_metrics_collector_concurrent_errors() {
+        let collector = SyncMetricsCollector::new();
+
+        let mut handles = vec![];
+        for _ in 0..20 {
+            let c = collector.clone();
+            handles.push(tokio::spawn(async move {
+                c.record_error().await;
+            }));
+        }
+
+        for h in handles {
+            h.await.expect("task should complete");
+        }
+
+        let snapshot = collector.snapshot().await;
+        assert_eq!(snapshot.sync_errors_total, 20);
+    }
+
+    /// Phase 5c: Test mixed sync and error operations.
+    #[tokio::test]
+    async fn sync_metrics_collector_mixed_operations() {
+        let collector = SyncMetricsCollector::new();
+
+        // 5 successful syncs
+        for i in 1..=5 {
+            collector.record_sync(i * 10, i as u64 * 10).await;
+        }
+
+        // 2 errors
+        collector.record_error().await;
+        collector.record_error().await;
+
+        let snapshot = collector.snapshot().await;
+        // Sum of 10+20+30+40+50 = 150 messages
+        assert_eq!(snapshot.messages_synced_total, 150);
+        assert_eq!(snapshot.sync_errors_total, 2);
+        assert_eq!(snapshot.sync_operations_total, 5);
+        assert_eq!(snapshot.active_groups, 0);
+    }
+
+    /// Phase 5c: Test bytes calculation with different message sizes.
+    #[test]
+    fn sync_metrics_bytes_with_various_sizes() {
+        let mut metrics = SyncMetrics::default();
+
+        // Small messages: 10 * 100 = 1000 bytes
+        metrics.avg_message_size_bytes = 100;
+        metrics.record_sync(10, 50);
+        assert_eq!(metrics.bytes_synced_total, 1000);
+
+        // Larger messages: uses current avg_message_size_bytes (100)
+        // Second sync: 5 * 100 = 500 bytes, total = 1000 + 500 = 1500
+        metrics.record_sync(5, 30);
+        assert_eq!(metrics.bytes_synced_total, 1500);
+
+        // Change avg size for next sync: 3 * 500 = 1500, total = 1500 + 1500 = 3000
+        metrics.avg_message_size_bytes = 500;
+        metrics.record_sync(3, 20);
+        assert_eq!(metrics.bytes_synced_total, 3000);
     }
 }

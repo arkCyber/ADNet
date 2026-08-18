@@ -13,7 +13,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use a3chat_app::media_service::{
     dispatch, EcPolicy, EncryptionPolicy, MediaConfig, MediaService, WritePolicy, MAX_ATTACHMENT_BYTES,
