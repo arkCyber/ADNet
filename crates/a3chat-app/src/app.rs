@@ -439,6 +439,24 @@ impl A3chatApp {
         self
     }
 
+    /// F-25 / B-7 — install the blocklist gate so
+    /// [`ChatService::send_message`] consults [`ContactService`]
+    /// before persisting. Call once after [`A3chatApp::new`]. The
+    /// gate is a closure that holds a clone of `Arc<ContactService>`
+    /// so the chat service never imports the contact module
+    /// directly (avoids a circular dependency).
+    pub fn install_blocklist_gate(&mut self) -> &mut Self {
+        let contact = self.contact.clone();
+        let gate: crate::chat_service::BlocklistGate = std::sync::Arc::new(
+            move |owner: UserId, peer: UserId| {
+                let contact = contact.clone();
+                Box::pin(async move { contact.is_blocked(&owner, &peer).await })
+            },
+        );
+        self.chat = self.chat.clone().with_blocklist_gate(gate);
+        self
+    }
+
     /// Phase 5c: attach the distributed message store.
     ///
     /// After calling `A3chatApp::new`, if the process is configured

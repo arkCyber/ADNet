@@ -11,6 +11,7 @@
 
 pub mod app;
 pub mod bot_framework;
+pub mod channel_storage;
 pub mod chat_reaction_service;
 pub mod chat_service;
 pub mod contact_service;
@@ -42,13 +43,14 @@ pub mod sync_service;
 
 pub use app::{A3chatApp, A3chatAppBridge, bridge_for_iroh_docs};
 pub use bot_framework::{BotConfig, BotRole, BotSession, ChatBot, ReplyGenerator};
+pub use channel_storage::{ChannelStorage, ChannelStorageConfig};
 pub use chat_reaction_service::{ChatReactionService, ReactionSummary};
 pub use chat_service::ChatService;
 pub use contact_service::ContactService;
 pub use device_service::{Device, DeviceKind, DeviceService, RegisterDeviceRequest, RevokeDeviceRequest};
 pub use draft_service::DraftService;
 pub use e2e_encryption_service::E2eEncryptionService;
-pub use e2e_bundle::{Bundle, E2eBundleService, ImportSummary};
+pub use e2e_bundle::{Bundle, E2eBundleService, ImportSummary, BUNDLE_VERSION};
 pub use error::{AppError, AppResult, app_to_domain};
 pub use forward_service::{ForwardRequest, ForwardResult, ForwardService, ForwardTargetResult};
 pub use group_service::GroupService;

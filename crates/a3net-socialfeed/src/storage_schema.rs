@@ -1,13 +1,20 @@
 //! Canonical SQLite schema for the social feed storage.
 //!
-//! Mirrors `a3net-chatstore`'s `schema.rs` philosophy: a single
-//! immutable list of `CREATE TABLE IF NOT EXISTS` /
-//! `CREATE INDEX IF NOT EXISTS` statements behind an idempotent
-//! `apply_schema()`. Schema versioning is stamped in
-//! `schema_version`; the migration ladder is a future concern
-//! (today there's only version 1).
+//! DO-178C §11.4 — *Migration discipline*: every schema change
+//! bumps `SCHEMA_VERSION` and adds a migration step in
+//! `apply_schema`. Migrations are append-only and forward-only —
+//! we never edit a shipped statement.
 //!
-//! # Tables
+//! Version history:
+//! - **v1** (initial): posts, post_attachments, post_tags,
+//!   post_mentions, user_posts, comments, post_comments,
+//!   comment_mentions, reactions, follows.
+//! - **v2** (F-05 audit round 2): adds `post_shares`,
+//!   `post_reports`, `blocklist`, plus a couple of helpful
+//!   indexes for the new `list_user_shares` /
+//!   `list_target_reports` queries.
+//!
+//! # Tables (cumulative)
 //!
 //! - `posts`              — `SocialPost` payloads (JSON
 //!   serialisation; integrity hash stored separately for
@@ -22,12 +29,15 @@
 //!   on `(target_id, user_id, reaction_type)` so a user can't
 //!   double-like).
 //! - `follows`            — `FollowRelationship` rows.
+//! - `post_shares`        — `ShareRecord` rows (v2).
+//! - `post_reports`       — `ReportRecord` rows (v2).
+//! - `blocklist`          — `BlockRecord` rows (v2).
 //! - `schema_version`     — version stamp.
 
 /// Current schema version. Bump on every change and add a
 /// migration step in `apply_schema` (or a future
 /// `migrate_to`).
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub(super) const CREATE_STATEMENTS: &[&str] = &[
     // Versioning
@@ -123,4 +133,49 @@ pub(super) const CREATE_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_follows_following
         ON follows (following_id)",
+    // ── v2 additions ─────────────────────────────────────────────
+    // Shares — a row per (target_id, sharer_id). `share_count` on
+    // the post row is computed by COUNT(*) so the source of truth
+    // is this table.
+    "CREATE TABLE IF NOT EXISTS post_shares (
+        share_id     TEXT PRIMARY KEY,
+        target_id    TEXT NOT NULL,
+        target_type  TEXT NOT NULL,
+        sharer_id    TEXT NOT NULL,
+        sharer_name  TEXT NOT NULL,
+        comment      TEXT NOT NULL DEFAULT '',
+        created_at   INTEGER NOT NULL,
+        integrity_hash TEXT NOT NULL,
+        UNIQUE (target_id, target_type, sharer_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_post_shares_target
+        ON post_shares (target_id, target_type)",
+    "CREATE INDEX IF NOT EXISTS idx_post_shares_sharer
+        ON post_shares (sharer_id, created_at DESC)",
+    // Reports — one row per (target_id, reporter_id) so a single
+    // user can't flood moderation with duplicate reports.
+    "CREATE TABLE IF NOT EXISTS post_reports (
+        report_id   TEXT PRIMARY KEY,
+        target_id   TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        reporter_id TEXT NOT NULL,
+        reason      TEXT NOT NULL,
+        notes       TEXT NOT NULL DEFAULT '',
+        created_at  INTEGER NOT NULL,
+        UNIQUE (target_id, target_type, reporter_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_post_reports_target
+        ON post_reports (target_id, target_type)",
+    // Blocklist — owner_id blocks blocked_user_id. The
+    // `ForViewer` timeline consults this table to drop blocked
+    // authors' posts.
+    "CREATE TABLE IF NOT EXISTS blocklist (
+        owner_id        TEXT NOT NULL,
+        blocked_user_id TEXT NOT NULL,
+        created_at      INTEGER NOT NULL,
+        reason          TEXT,
+        PRIMARY KEY (owner_id, blocked_user_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_blocklist_blocked
+        ON blocklist (blocked_user_id)",
 ];

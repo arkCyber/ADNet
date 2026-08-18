@@ -13,6 +13,7 @@ workspace = true
 # Internal A3Net deps
 a3net-types = { workspace = true }
 a3net-error = { workspace = true }
+a3net-roster = { workspace = true }
 
 # Serialization
 serde       = { workspace = true }

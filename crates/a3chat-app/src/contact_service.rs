@@ -17,6 +17,7 @@ use a3chat_core::error::A3chatError;
 use a3chat_core::event::A3chatEvent;
 use a3chat_core::id::UserId;
 use a3chat_core::rpc::A3chatRpcMethod;
+use ed25519_dalek::{Signer, Verifier};
 
 use a3net_roster::{
     ContactGroup, InMemoryRosterStore, RosterStore,
@@ -396,30 +397,75 @@ impl ContactService {
     }
 
     /// `a3chat.contact.add_request` — create and emit a friend request.
+    ///
+    /// Persists the request to the [`RosterStore`] under
+    /// `request.request_id` so an accept call can look it up across
+    /// process restarts. Returns the wire-shape [`ContactRequest`]
+    /// (carrying the optional `signature_b64`).
+    ///
+    /// `signer` is the Ed25519 signing key for `owner`. Pass
+    /// `None` for the legacy unsigned path (the signature is left
+    /// `None` and the receiver will skip the signature check).
     pub async fn add_request(
         &self,
         owner: &UserId,
         to_user: &UserId,
         message: String,
+        signer: Option<&crate::keyring::SigningKey>,
     ) -> AppResult<ContactRequest> {
         if message.len() > MAX_FRIEND_REQUEST_MSG_LEN {
             return Err(AppError::Domain(
                 "friend-request message exceeds 256 chars".into(),
             ));
         }
+        if owner == to_user {
+            return Err(AppError::Domain(
+                "friend-request target must differ from sender".into(),
+            ));
+        }
 
-        let req = ContactRequest {
-            request_id: a3chat_core::id::generate_message_id(owner.as_str()).into_string(),
+        let now = chrono::Utc::now();
+        let request_id =
+            a3chat_core::id::generate_message_id(owner.as_str()).into_string();
+
+        // Build the wire request first (without a signature) so we
+        // can compute the canonical payload, then sign, then patch
+        // the wire request with the signature.
+        let mut req = ContactRequest {
+            request_id: request_id.clone(),
             from_user_id: owner.clone(),
             from_display_name: owner.as_str().into(),
             to_user_id: to_user.clone(),
-            message,
+            message: message.clone(),
             status: ContactRequestStatus::Pending,
-            created_at: chrono::Utc::now(),
+            created_at: now,
             responded_at: None,
+            signature_b64: None,
+            sender_public_key_hex: None,
         };
 
+        if let Some(key) = signer {
+            use ed25519_dalek::Signer;
+            let payload = req.signature_payload();
+            let sig = key.sign(&payload);
+            req.signature_b64 = Some(base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()));
+            req.sender_public_key_hex = Some(crate::keyring::signing_key_public_key_hex(key));
+        }
+
         req.validate()?;
+
+        // Persist to the roster store. SQLite ops are wrapped in a
+        // single connection lock so concurrent writers can't race
+        // a half-written row into the inbox.
+        let store_guard = self.store.read().await;
+        let store = store_guard.as_ref().ok_or_else(|| {
+            AppError::NotInitialised("ContactService store not initialised".into())
+        })?;
+        store
+            .put_contact_request(req.to_persisted())
+            .await
+            .map_err(|e| AppError::Internal(format!("put_contact_request failed: {e}")))?;
+        drop(store_guard);
 
         self.bus
             .publish(A3chatEvent::ContactRequestReceived {
@@ -430,16 +476,144 @@ impl ContactService {
     }
 
     /// `a3chat.contact.accept_request` — accept an inbound friend request.
+    ///
+    /// Performs the following guarantees before flipping the
+    /// request to `accepted`:
+    ///
+    /// 1. `request.to_user_id` matches the calling owner (a peer
+    ///    can't accept someone else's request).
+    /// 2. The persisted request exists in the roster store (i.e.
+    ///    it was issued through this service in this or a previous
+    ///    process — replays of an already-accepted request are
+    ///    rejected).
+    /// 3. The persisted request's `created_at` is within
+    ///    [`REQUEST_TTL_SECS`][a3chat_core::contact::REQUEST_TTL_SECS].
+    /// 4. When the persisted row carries `signature_b64` AND
+    ///    `sender_public_key_hex`, the signature is verified over
+    ///    the canonical payload. A persisted row with no signature
+    ///    is accepted (legacy path); a persisted row WITH a
+    ///    signature but an invalid one is rejected.
+    /// 5. The accept is atomic: the row is deleted from the store
+    ///    before the contact is materialised, so a crash mid-accept
+    ///    leaves the system in a recoverable state (the row is
+    ///    gone, the contact may or may not be present — the next
+    ///    accept call sees `not found` and bails).
     pub async fn accept_request(
         &self,
         owner: &UserId,
         request: ContactRequest,
     ) -> AppResult<ChatContact> {
         self.require_owner(owner)?;
+
+        // (1) Reject cross-user acceptance.
+        if request.to_user_id != *owner {
+            return Err(AppError::Forbidden(format!(
+                "accept_request: caller {owner} is not the addressee {}",
+                request.to_user_id.as_str()
+            )));
+        }
+
         let store_guard = self.store.read().await;
         let store = store_guard.as_ref().ok_or_else(|| {
             AppError::NotInitialised("ContactService store not initialised".into())
         })?;
+
+        // (2) Look up the persisted row.
+        let persisted = store
+            .get_contact_request(&request.request_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("get_contact_request failed: {e}")))?
+            .ok_or_else(|| {
+                AppError::Domain(format!(
+                    "accept_request: request_id {} not found in store",
+                    request.request_id
+                ))
+            })?;
+
+        // (3) TTL.
+        let ttl = chrono::Utc::now()
+            - chrono::Duration::seconds(a3chat_core::contact::REQUEST_TTL_SECS);
+        if persisted.created_at() < ttl {
+            // Best-effort: delete the expired row so the caller can
+            // re-issue cleanly on next attempt.
+            let _ = store
+                .delete_contact_request(&request.request_id)
+                .await;
+            return Err(AppError::Domain(format!(
+                "accept_request: request {} expired (created {})",
+                request.request_id, persisted.created_at_unix
+            )));
+        }
+
+        // (4) Signature verification, if the persisted row has one.
+        // We trust the *persisted* signature rather than the wire
+        // envelope's, so a forged `signature_b64` on the wire
+        // cannot pass as long as the stored row is honest.
+        if let Some(sig_b64) = persisted.signature_b64.as_deref() {
+            use base64::Engine;
+            let sig_bytes = base64::engine::general_purpose::STANDARD
+                .decode(sig_b64)
+                .map_err(|e| {
+                    AppError::Domain(format!(
+                        "accept_request: signature_b64 base64 decode failed: {e}"
+                    ))
+                })?;
+            if sig_bytes.len() != 64 {
+                return Err(AppError::Domain(format!(
+                    "accept_request: signature length {} != 64",
+                    sig_bytes.len()
+                )));
+            }
+
+            // Reconstruct the canonical payload from the persisted
+            // row, NOT the wire envelope, so the wire cannot lie
+            // about the request body.
+            let payload = persisted.signature_payload();
+            // Pull the sender's public key. Either it's embedded in
+            // the wire envelope (`sender_public_key_hex`) or the
+            // caller must have it cached by `from_user_id`. We only
+            // accept the embedded copy to keep verification local —
+            // a future patch can add a cache lookup.
+            let pk_hex = request.sender_public_key_hex.as_deref().ok_or_else(|| {
+                AppError::Domain(
+                    "accept_request: persisted signature present but no sender_public_key_hex \
+                     supplied on the wire envelope"
+                        .into(),
+                )
+            })?;
+            let pk = crate::keyring::public_key_from_hex(pk_hex).map_err(|e| {
+                AppError::Domain(format!(
+                    "accept_request: invalid sender public key: {e}"
+                ))
+            })?;
+            let sig_array: [u8; 64] = sig_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| AppError::Domain(format!(
+                    "accept_request: signature slice length {} != 64",
+                    sig_bytes.len()
+                )))?;
+            let sig = crate::keyring::Signature::from_bytes(&sig_array);
+            pk.verify(&payload, &sig).map_err(|e| {
+                AppError::Domain(format!(
+                    "accept_request: signature verification failed: {e}"
+                ))
+            })?;
+        }
+
+        // (5) Atomic delete-then-materialise. If the contact write
+        // fails, the row is already gone — the caller can retry
+        // and will see a `Domain("not found")` error.
+        let removed = store
+            .delete_contact_request(&request.request_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("delete_contact_request failed: {e}")))?;
+        if removed.is_none() {
+            return Err(AppError::Domain(format!(
+                "accept_request: request {} vanished between get and delete",
+                request.request_id
+            )));
+        }
 
         let contact = ChatContact {
             user_id: request.from_user_id.clone(),
@@ -450,13 +624,14 @@ impl ContactService {
             is_blocked: false,
             added_at: chrono::Utc::now(),
             last_interaction_at: None,
-            public_key: None,
+            public_key: request.sender_public_key_hex.clone(),
         };
 
         let roster_contact = Self::chat_to_roster(&contact);
         store.put_contact(roster_contact).await.map_err(|e| {
-            AppError::Internal(format!("accept_request failed: {e}"))
+            AppError::Internal(format!("accept_request put_contact failed: {e}"))
         })?;
+        drop(store_guard);
 
         self.bus
             .publish(A3chatEvent::ContactRequestAccepted {
@@ -465,6 +640,61 @@ impl ContactService {
             });
 
         Ok(contact)
+    }
+
+    /// List every pending (and historical) request addressed to
+    /// `owner`. Thin wrapper over `RosterStore::list_contact_requests_for`
+    /// — the store returns every status, callers filter as needed.
+    pub async fn list_incoming_requests(
+        &self,
+        owner: &UserId,
+    ) -> AppResult<Vec<ContactRequest>> {
+        self.require_owner(owner)?;
+        let store_guard = self.store.read().await;
+        let store = store_guard.as_ref().ok_or_else(|| {
+            AppError::NotInitialised("ContactService store not initialised".into())
+        })?;
+        let rows = store
+            .list_contact_requests_for(owner.as_str())
+            .await
+            .map_err(|e| AppError::Internal(format!("list_contact_requests_for failed: {e}")))?;
+        Ok(rows.into_iter().map(ContactRequest::from_persisted).collect())
+    }
+
+    /// Cancel a pending outbound request.
+    pub async fn cancel_request(
+        &self,
+        owner: &UserId,
+        request_id: &str,
+    ) -> AppResult<bool> {
+        self.require_owner(owner)?;
+        let store_guard = self.store.read().await;
+        let store = store_guard.as_ref().ok_or_else(|| {
+            AppError::NotInitialised("ContactService store not initialised".into())
+        })?;
+        let row = store
+            .get_contact_request(request_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("get_contact_request failed: {e}")))?;
+        if let Some(r) = row {
+            if r.from_user_id != owner.as_str() {
+                return Err(AppError::Forbidden(format!(
+                    "cancel_request: caller {owner} did not originate request {request_id}"
+                )));
+            }
+            store
+                .delete_contact_request(request_id)
+                .await
+                .map_err(|e| AppError::Internal(format!("delete_contact_request failed: {e}")))?;
+            self.bus
+                .publish(A3chatEvent::ContactRequestCancelled {
+                    request_id: request_id.to_string(),
+                    by_user_id: owner.clone(),
+                });
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// `a3chat.contact.block` — block a user.
@@ -503,6 +733,7 @@ impl ContactService {
 
     /// `a3chat.contact.unblock` — remove from blocklist.
     pub async fn unblock(&self, owner: &UserId, user_id: &UserId) -> AppResult<()> {
+
         self.require_owner(owner)?;
         let store_guard = self.store.read().await;
         let store = store_guard.as_ref().ok_or_else(|| {
@@ -526,6 +757,34 @@ impl ContactService {
             });
 
         Ok(())
+    }
+
+    /// F-25 / B-7 — synchronous blocklist check used by
+    /// [`crate::chat_service::ChatService::send_message`]. Returns
+    /// `true` if `owner` has `user_id` on their blocklist and the
+    /// inbound message should be dropped before persistence.
+    ///
+    /// Returns `Ok(false)` when the store is not initialised (so the
+    /// operator can opt to skip the check in tests). Returns
+    /// `Ok(false)` on `UserStore` errors — log and fail-open rather
+    /// than block legitimate traffic on a transient store glitch.
+    pub async fn is_blocked(&self, owner: &UserId, user_id: &UserId) -> bool {
+        let store_guard = self.store.read().await;
+        let store = match store_guard.as_ref() {
+            Some(s) => s,
+            None => return false,
+        };
+        match store.get_contact(user_id.as_str()).await {
+            Ok(Some(c)) => c.is_blocked,
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    user = %user_id.as_str(),
+                    "is_blocked lookup failed, fail-open: {e}"
+                );
+                false
+            }
+        }
     }
 
     /// `a3chat.contact.qr_invite` — generate an invite payload.
@@ -643,7 +902,7 @@ pub async fn dispatch(
                 .unwrap_or("")
                 .to_string();
             let req = svc
-                .add_request(owner, &to_user, message)
+                .add_request(owner, &to_user, message, None)
                 .await
                 .map_err(A3chatError::from)?;
             serde_json::to_value(req).map_err(A3chatError::from)
@@ -793,7 +1052,7 @@ mod tests {
         let svc = ContactService::in_memory();
         let mut rx = svc.bus().subscribe();
         let r = svc
-            .add_request(&UserId::from("alice"), &UserId::from("bob"), "hi".into())
+            .add_request(&UserId::from("alice"), &UserId::from("bob"), "hi".into(), None)
             .await
             .unwrap();
         assert_eq!(r.status, ContactRequestStatus::Pending);
@@ -814,7 +1073,7 @@ mod tests {
         let svc = ContactService::in_memory();
         let huge = "x".repeat(257);
         let r = svc
-            .add_request(&UserId::from("alice"), &UserId::from("bob"), huge)
+            .add_request(&UserId::from("alice"), &UserId::from("bob"), huge, None)
             .await;
         assert!(matches!(r, Err(AppError::Domain(_))));
     }
@@ -990,6 +1249,8 @@ mod tests {
                     status: ContactRequestStatus::Pending,
                     created_at: chrono::Utc::now(),
                     responded_at: None,
+                    signature_b64: None,
+                    sender_public_key_hex: None,
                 },
             )
             .await;

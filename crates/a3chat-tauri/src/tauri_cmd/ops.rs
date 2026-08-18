@@ -208,13 +208,18 @@ pub async fn stop_daemon(_handle: CancelHandle) -> OpResult<()> {
 pub async fn menu_bar(state: AppState) -> OpResult<Vec<TopLevelMenu>> {
     let screen = state.view().current_screen;
     let enabled = |s: Screen| -> bool {
-        // Login and Chats are always available; other screens
-        // require an active session.
+        // Login is always available; other screens require an
+        // active session.
         if state.client().is_none() && s != Screen::Login {
             return false;
         }
-        let _ = screen;
-        true
+        // B-18 — wire `screen` through. Only show items that
+        // apply to the *current* screen. WeChat's desktop client
+        // hides "New Conversation" while on the Settings tab, etc.
+        // Allow matching to the item's own screen, plus
+        // back-compat: anything tagged Login is always live so
+        // the login screen can still let the user navigate.
+        s == screen || s == Screen::Login
     };
     Ok(vec![
         TopLevelMenu {
@@ -431,8 +436,7 @@ pub async fn sidebar_tree(state: AppState) -> OpResult<Vec<TreeNode>> {
     let arr = v.as_array().cloned().unwrap_or_default();
     let nodes = arr
         .into_iter()
-        .enumerate()
-        .map(|(idx, c)| {
+        .map(|c| {
             let id = c
                 .get("conversation_id")
                 .and_then(|s| s.as_str())
@@ -443,12 +447,32 @@ pub async fn sidebar_tree(state: AppState) -> OpResult<Vec<TreeNode>> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("conversation")
                 .to_string();
+            // B-17 — read the conversation kind from the wire
+            // response, not from `idx % 5` (the previous cosmetic
+            // placeholder). The backend returns `"dm" | "group" | …
+            // ` depending on `ConversationKind`. We map the canonical
+            // strings into the UI's TreeNode kind taxonomy.
+            let raw_kind = c
+                .get("kind")
+                .and_then(|s| s.as_str())
+                .unwrap_or("dm");
+            let kind = match raw_kind {
+                "dm" => "dm",
+                "group" => "group",
+                "channel" => "channel",
+                "system" => "system",
+                _ => "dm",
+            };
+            let badge = c
+                .get("unread_count")
+                .and_then(|u| u.as_u64())
+                .map(|n| n as u32);
             TreeNode {
                 id,
                 label,
-                kind: if idx % 5 == 0 { "group" } else { "dm" }.into(),
+                kind: kind.into(),
                 children: Vec::new(),
-                badge: Some(0),
+                badge,
             }
         })
         .collect();

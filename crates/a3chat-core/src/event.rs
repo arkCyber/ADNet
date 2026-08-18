@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::channel::{FeedItem, PublicAccount};
 use crate::group::{GroupInvitation, GroupMember};
 use crate::id::{ConversationId, MessageId, UserId};
 use crate::link_bookmark::LinkBookmark;
@@ -23,6 +24,7 @@ pub const NOTIFICATION_KIND_CONTACT_BLOCKED: &str = "contact.blocked";
 pub const NOTIFICATION_KIND_CONTACT_UNBLOCKED: &str = "contact.unblocked";
 pub const NOTIFICATION_KIND_CONTACT_FAVORITE_TOGGLED: &str = "contact.favorite.toggled";
 pub const NOTIFICATION_KIND_CONTACT_REQUEST_ACCEPTED: &str = "contact.request.accepted";
+pub const NOTIFICATION_KIND_CONTACT_REQUEST_CANCELLED: &str = "contact.request.cancelled";
 pub const NOTIFICATION_KIND_GROUP: &str = "group.member.joined";
 pub const NOTIFICATION_KIND_GROUP_MEMBER_REMOVED: &str = "group.member.removed";
 pub const NOTIFICATION_KIND_MESSAGE_RECALLED: &str = "chat.message.recalled";
@@ -58,7 +60,23 @@ pub const NOTIFICATION_KIND_PAIRING_TRUSTED_REVOKED: &str = "pairing.trusted.rev
 pub const NOTIFICATION_KIND_MOMENTS_POST_CREATED: &str = "moments.post.created";
 pub const NOTIFICATION_KIND_MOMENTS_POST_DELETED: &str = "moments.post.deleted";
 pub const NOTIFICATION_KIND_MOMENTS_COMMENT_ADDED: &str = "moments.comment.added";
+pub const NOTIFICATION_KIND_MOMENTS_COMMENT_EDITED: &str = "moments.comment.edited";
+pub const NOTIFICATION_KIND_MOMENTS_COMMENT_DELETED: &str = "moments.comment.deleted";
 pub const NOTIFICATION_KIND_MOMENTS_REACTION_TOGGLED: &str = "moments.reaction.toggled";
+pub const NOTIFICATION_KIND_MOMENTS_POST_SHARED: &str = "moments.post.shared";
+pub const NOTIFICATION_KIND_MOMENTS_POST_REPORTED: &str = "moments.post.reported";
+pub const NOTIFICATION_KIND_MOMENTS_USER_BLOCKED: &str = "moments.user.blocked";
+
+// Channel / 公众号 (F-09). The kind strings are stable wire
+// contracts — SSE subscribers match against them to refresh their
+// timelines / subscription list.
+pub const NOTIFICATION_KIND_CHANNEL_ACCOUNT_REGISTERED: &str = "channel.account.registered";
+pub const NOTIFICATION_KIND_CHANNEL_ACCOUNT_UPDATED: &str = "channel.account.updated";
+pub const NOTIFICATION_KIND_CHANNEL_ACCOUNT_DELETED: &str = "channel.account.deleted";
+pub const NOTIFICATION_KIND_CHANNEL_SUBSCRIBED: &str = "channel.subscribed";
+pub const NOTIFICATION_KIND_CHANNEL_UNSUBSCRIBED: &str = "channel.unsubscribed";
+pub const NOTIFICATION_KIND_CHANNEL_FEED_PUBLISHED: &str = "channel.feed.published";
+pub const NOTIFICATION_KIND_CHANNEL_FEED_RETRACTED: &str = "channel.feed.retracted";
 
 /// All a3chat server-pushed events. The discriminator is `kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +127,12 @@ pub enum A3chatEvent {
 
     /// A friend request was accepted and a contact was created.
     ContactRequestAccepted { request_id: String, contact_id: String },
+
+    /// A friend request was cancelled (by the sender) or rejected
+    /// (by the addressee) before reaching an accepted state. Emitted
+    /// alongside the lifecycle update on the roster store so SSE
+    /// subscribers can drop any pending inbox rows.
+    ContactRequestCancelled { request_id: String, by_user_id: UserId },
 
     /// Group membership changed.
     GroupMemberJoined {
@@ -221,6 +245,46 @@ pub enum A3chatEvent {
         actor_id: String,
         reaction_type: String,
         is_added: bool,
+    },
+
+    /// A comment was edited (post_id + comment_id reference the
+    /// underlying post, `author_id` is the editing user).
+    MomentsCommentEdited {
+        user_id: UserId,
+        post_id: String,
+        comment_id: String,
+        author_id: String,
+    },
+
+    /// A comment was deleted. We do not carry the post_id because
+    /// subscribers only need the comment_id to remove their row.
+    MomentsCommentDeleted {
+        user_id: UserId,
+        comment_id: String,
+    },
+
+    /// A user re-shared a post (or a comment). `target_type` is
+    /// `"post"` or `"comment"`.
+    MomentsPostShared {
+        user_id: UserId,
+        target_id: String,
+        target_type: String,
+        sharer_id: String,
+    },
+
+    /// A post (or comment) was reported for moderation. `reason`
+    /// is one of [`crate::social_feed::ReportReason::as_str()`].
+    MomentsPostReported {
+        user_id: UserId,
+        target_id: String,
+        target_type: String,
+        reason: String,
+    },
+
+    /// A user was added to the owner's blocklist.
+    MomentsUserBlocked {
+        user_id: UserId,
+        blocked_user_id: String,
     },
 
     /// A reaction was added or removed from a chat message.
@@ -358,6 +422,55 @@ pub enum A3chatEvent {
         user_id: UserId,
         credential_id: String,
     },
+
+    // ----- Channel / 公众号 (F-09) --------------------------------------
+    // Lifecycle events for accounts the local node owns (`*owner*_*`)
+    // and events fan-out to subscribers (`*Subscriber*`). All
+    // events carry `user_id` of the local node so the SSE bus can
+    // route per-user without re-deriving.
+    ChannelAccountRegistered {
+        user_id: UserId,
+        account: PublicAccount,
+    },
+
+    ChannelAccountUpdated {
+        user_id: UserId,
+        account: PublicAccount,
+    },
+
+    ChannelAccountDeleted {
+        user_id: UserId,
+        account_id: String,
+    },
+
+    ChannelSubscribed {
+        user_id: UserId,
+        account_id: String,
+    },
+
+    ChannelUnsubscribed {
+        user_id: UserId,
+        account_id: String,
+    },
+
+    /// A feed item was published by an account the local user
+    /// subscribes to. Carries the full record so subscribers can
+    /// render the timeline without a follow-up `feed.get`.
+    ChannelFeedPublished {
+        user_id: UserId,
+        account_id: String,
+        feed: FeedItem,
+    },
+
+    /// An admin retracted a feed item. Subscribers should hide it
+    /// from the timeline but keep the row in the local store so a
+    /// future "show retracted" toggle works.
+    ChannelFeedRetracted {
+        user_id: UserId,
+        account_id: String,
+        feed_id: String,
+        reason: String,
+    },
 }
 
 impl A3chatEvent {
@@ -374,6 +487,7 @@ impl A3chatEvent {
             A3chatEvent::ContactUnblocked { .. } => NOTIFICATION_KIND_CONTACT_UNBLOCKED,
             A3chatEvent::ContactFavoriteToggled { .. } => NOTIFICATION_KIND_CONTACT_FAVORITE_TOGGLED,
             A3chatEvent::ContactRequestAccepted { .. } => NOTIFICATION_KIND_CONTACT_REQUEST_ACCEPTED,
+            A3chatEvent::ContactRequestCancelled { .. } => NOTIFICATION_KIND_CONTACT_REQUEST_CANCELLED,
             A3chatEvent::GroupMemberJoined { .. } => NOTIFICATION_KIND_GROUP,
             A3chatEvent::GroupMemberRemoved { .. } => NOTIFICATION_KIND_GROUP_MEMBER_REMOVED,
             A3chatEvent::ChatMessageRecalled { .. } => NOTIFICATION_KIND_MESSAGE_RECALLED,
@@ -388,6 +502,11 @@ impl A3chatEvent {
             A3chatEvent::MomentsPostDeleted { .. } => NOTIFICATION_KIND_MOMENTS_POST_DELETED,
             A3chatEvent::MomentsCommentAdded { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_ADDED,
             A3chatEvent::MomentsReactionToggled { .. } => NOTIFICATION_KIND_MOMENTS_REACTION_TOGGLED,
+            A3chatEvent::MomentsCommentEdited { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_EDITED,
+            A3chatEvent::MomentsCommentDeleted { .. } => NOTIFICATION_KIND_MOMENTS_COMMENT_DELETED,
+            A3chatEvent::MomentsPostShared { .. } => NOTIFICATION_KIND_MOMENTS_POST_SHARED,
+            A3chatEvent::MomentsPostReported { .. } => NOTIFICATION_KIND_MOMENTS_POST_REPORTED,
+            A3chatEvent::MomentsUserBlocked { .. } => NOTIFICATION_KIND_MOMENTS_USER_BLOCKED,
             A3chatEvent::ChatMessageReactionToggled { .. } => "chat.message.reaction.toggled",
             A3chatEvent::ConversationPinChanged { .. } => NOTIFICATION_KIND_CONVERSATION_PIN_CHANGED,
             A3chatEvent::NotificationSettingsChanged { .. } => NOTIFICATION_KIND_NOTIFICATION_SETTINGS_CHANGED,
@@ -403,6 +522,19 @@ impl A3chatEvent {
             A3chatEvent::PairingInvitationCreated { .. } => NOTIFICATION_KIND_PAIRING_INVITATION_CREATED,
             A3chatEvent::PairingTrustedDeviceAdded { .. } => NOTIFICATION_KIND_PAIRING_TRUSTED_ADDED,
             A3chatEvent::PairingTrustedDeviceRevoked { .. } => NOTIFICATION_KIND_PAIRING_TRUSTED_REVOKED,
+            A3chatEvent::ChannelAccountRegistered { .. } => {
+                NOTIFICATION_KIND_CHANNEL_ACCOUNT_REGISTERED
+            }
+            A3chatEvent::ChannelAccountUpdated { .. } => {
+                NOTIFICATION_KIND_CHANNEL_ACCOUNT_UPDATED
+            }
+            A3chatEvent::ChannelAccountDeleted { .. } => {
+                NOTIFICATION_KIND_CHANNEL_ACCOUNT_DELETED
+            }
+            A3chatEvent::ChannelSubscribed { .. } => NOTIFICATION_KIND_CHANNEL_SUBSCRIBED,
+            A3chatEvent::ChannelUnsubscribed { .. } => NOTIFICATION_KIND_CHANNEL_UNSUBSCRIBED,
+            A3chatEvent::ChannelFeedPublished { .. } => NOTIFICATION_KIND_CHANNEL_FEED_PUBLISHED,
+            A3chatEvent::ChannelFeedRetracted { .. } => NOTIFICATION_KIND_CHANNEL_FEED_RETRACTED,
         }
     }
 

@@ -103,6 +103,18 @@ pub struct ContactRequest {
     pub status: ContactRequestStatus,
     pub created_at: DateTime<Utc>,
     pub responded_at: Option<DateTime<Utc>>,
+    /// Optional Ed25519 signature (base64) over
+    /// [`crate::contact::signature_payload`]. When the sender has a
+    /// registered public key, the receiver can verify the request
+    /// originated from the claimed `from_user_id`. Older wire
+    /// envelopes omit this field; deserialisation defaults to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_b64: Option<String>,
+    /// Optional hex-encoded Ed25519 public key of the sender.
+    /// Receivers should fall back to a cached public key for
+    /// `from_user_id` when this is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_public_key_hex: Option<String>,
 }
 
 impl ContactRequest {
@@ -123,7 +135,99 @@ impl ContactRequest {
                 self.status
             )));
         }
+        if let Some(pk_hex) = &self.sender_public_key_hex
+            && pk_hex.len() != 64
+        {
+            return Err(A3chatError::InvalidInput(format!(
+                "sender_public_key_hex: expected 64 hex chars, got {}",
+                pk_hex.len()
+            )));
+        }
+        if let Some(pk_hex) = &self.sender_public_key_hex
+            && !pk_hex.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(A3chatError::InvalidInput(
+                "sender_public_key_hex: non-hex characters".into(),
+            ));
+        }
         Ok(())
+    }
+
+    /// Canonical byte payload that `signature_b64` is computed over.
+    ///
+    /// MUST stay in lock-step with
+    /// [`a3net_roster::PersistedContactRequest::signature_payload`].
+    /// The signature covers the wire identity (`request_id`,
+    /// `from_user_id`, `to_user_id`, `message`) plus the unix
+    /// `created_at` so a replay with a re-timestamped `created_at`
+    /// is detected.
+    ///
+    /// ```text
+    /// A3NET-CONTACT-REQ-v1
+    /// request_id={request_id}
+    /// from={from_user_id}
+    /// to={to_user_id}
+    /// message={message}
+    /// created_at_unix={created_at_unix}
+    /// ```
+    pub fn signature_payload(&self) -> Vec<u8> {
+        format!(
+            "A3NET-CONTACT-REQ-v1\nrequest_id={}\nfrom={}\nto={}\nmessage={}\ncreated_at_unix={}\n",
+            self.request_id,
+            self.from_user_id.as_str(),
+            self.to_user_id.as_str(),
+            self.message,
+            self.created_at.timestamp(),
+        )
+        .into_bytes()
+    }
+
+    /// Convenience: convert this wire-shape request to its
+    /// persistence form so it can be written to a
+    /// [`RosterStore`][a3net_roster::RosterStore].
+    pub fn to_persisted(&self) -> a3net_roster::PersistedContactRequest {
+        a3net_roster::PersistedContactRequest {
+            request_id: self.request_id.clone(),
+            from_user_id: self.from_user_id.as_str().to_string(),
+            to_user_id: self.to_user_id.as_str().to_string(),
+            message: self.message.clone(),
+            status: self.status.as_str().to_string(),
+            created_at_unix: self.created_at.timestamp(),
+            responded_at_unix: self.responded_at.map(|t| t.timestamp()),
+            signature_b64: self.signature_b64.clone(),
+        }
+    }
+
+    /// Inverse of [`Self::to_persisted`]. Reconstructs a wire-shape
+    /// `ContactRequest` from a persistence row.
+    pub fn from_persisted(p: a3net_roster::PersistedContactRequest) -> Self {
+        Self {
+            request_id: p.request_id,
+            from_user_id: UserId::from(p.from_user_id),
+            from_display_name: String::new(), // display name is UI-only
+            to_user_id: UserId::from(p.to_user_id),
+            message: p.message,
+            status: parse_status(&p.status),
+            created_at: DateTime::<Utc>::from_timestamp(p.created_at_unix, 0)
+                .unwrap_or_else(|| {
+                    DateTime::<Utc>::from_timestamp(0, 0).unwrap()
+                }),
+            responded_at: p
+                .responded_at_unix
+                .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0)),
+            signature_b64: p.signature_b64,
+            sender_public_key_hex: None,
+        }
+    }
+}
+
+fn parse_status(s: &str) -> ContactRequestStatus {
+    match s {
+        "accepted" => ContactRequestStatus::Accepted,
+        "rejected" => ContactRequestStatus::Rejected,
+        "expired" => ContactRequestStatus::Expired,
+        "cancelled" => ContactRequestStatus::Cancelled,
+        _ => ContactRequestStatus::Pending,
     }
 }
 

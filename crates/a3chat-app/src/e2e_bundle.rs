@@ -60,6 +60,13 @@ use crate::storage::ChatStorage;
 /// Wire-format version.
 pub const BUNDLE_VERSION: u8 = 1;
 
+/// B-20 — application-level pepper mixed into the bundle KDF. Hard
+/// coded so a passphrase-only offline brute-force is still bound by
+/// the work-factor of Argon2id (≥ 64 MiB of memory per attempt).
+/// Treat this as a constant of the protocol, not a secret: rotating
+/// it will break every existing bundle.
+pub const BUNDLE_PEPPER: &str = "a3chat-e2e-bundle-v1";
+
 /// Hard cap on the number of conversations a single bundle can
 /// import. Prevents a malformed bundle from forcing the daemon to
 /// allocate per-conversation SQLite cursors before AEAD verification
@@ -118,7 +125,19 @@ impl E2eBundleService {
     }
 
     /// `a3chat.e2e.bundle.export` — build a complete [`Bundle`].
-    pub async fn export(&self, owner: &UserId) -> AppResult<Bundle> {
+    ///
+    /// B-20 — `passphrase` is **required**. The previous placeholder
+    /// derived the AEAD key from `owner.as_str().as_bytes()`, meaning
+    /// anyone who knew the owner id could decrypt the bundle. We now
+    /// refuse to export without a passphrase and mix it into the
+    /// Argon2id KDF password input alongside a fixed app-level pepper.
+    pub async fn export(&self, owner: &UserId, passphrase: &str) -> AppResult<Bundle> {
+        if passphrase.is_empty() {
+            return Err(AppError::Domain(
+                "passphrase must not be empty — refusing to export a trivially-decryptable bundle"
+                    .into(),
+            ));
+        }
         let conversations = self.storage.list_conversations(owner).await?;
         let conv_ids: Vec<String> = conversations
             .iter()
@@ -160,15 +179,20 @@ impl E2eBundleService {
             dm_state,
         };
 
-        // Encrypt the snapshot dump directly with ChaCha20-Poly1305
-        // keyed by Argon2id(owner_id, salt). The plain `SnapshotDump`
-        // bytes are the payload — no embedded `BundlePayload` schema.
+        // B-20 — the AEAD key is now `Argon2id(passphrase || pepper,
+        // salt)` instead of `Argon2id(owner, salt)`. The pepper is a
+        // fixed constant baked into the binary; it stops an offline
+        // brute-force on the passphrase from being equivalent to
+        // brute-forcing the owner id alone.
         let plaintext = serde_json::to_vec(&dump)
             .map_err(|e| AppError::Internal(format!("serialize snapshot: {e}")))?;
         let salt = a3chat_crypto::random::random_salt_16();
         let nonce = a3chat_crypto::random::random_nonce();
         let params = KdfParams::default();
-        let kek = kek::derive_kek(owner.as_str().as_bytes(), &salt, params)
+        let mut kdf_input = Vec::with_capacity(passphrase.len() + BUNDLE_PEPPER.len());
+        kdf_input.extend_from_slice(passphrase.as_bytes());
+        kdf_input.extend_from_slice(BUNDLE_PEPPER.as_bytes());
+        let kek = kek::derive_kek(&kdf_input, &salt, params)
             .map_err(|e| AppError::Crypto(format!("kek: {e}")))?;
         let cipher = ChaCha20Poly1305::new_from_slice(&kek)
             .map_err(|e| AppError::Crypto(format!("chacha init: {e}")))?;
@@ -197,12 +221,23 @@ impl E2eBundleService {
     /// exported bundle. Messages are merged per conversation
     /// (newer `sequence` replaces older). DM keyring markers are
     /// refreshed.
+    ///
+    /// B-20 — `passphrase` is required and must match the one used
+    /// at export time. Empty passphrase is rejected, mirroring
+    /// [`E2eBundleService::export`].
     pub async fn import(
         &self,
         owner: &UserId,
+        passphrase: &str,
         bundle: Bundle,
         replace_dm_state: bool,
     ) -> AppResult<ImportSummary> {
+        if passphrase.is_empty() {
+            return Err(AppError::Domain(
+                "passphrase must not be empty — refusing to attempt decryption"
+                    .into(),
+            ));
+        }
         if bundle.version != BUNDLE_VERSION {
             return Err(AppError::Domain(format!(
                 "unsupported bundle version {} (expected {})",
@@ -220,7 +255,10 @@ impl E2eBundleService {
             return Err(AppError::Domain("nonce length must be 12 bytes".into()));
         }
 
-        let kek = kek::derive_kek(owner.as_str().as_bytes(), &salt, bundle.kdf_params)
+        let mut kdf_input = Vec::with_capacity(passphrase.len() + BUNDLE_PEPPER.len());
+        kdf_input.extend_from_slice(passphrase.as_bytes());
+        kdf_input.extend_from_slice(BUNDLE_PEPPER.as_bytes());
+        let kek = kek::derive_kek(&kdf_input, &salt, bundle.kdf_params)
             .map_err(|e| AppError::Crypto(format!("kek: {e}")))?;
         let cipher = ChaCha20Poly1305::new_from_slice(&kek)
             .map_err(|e| AppError::Crypto(format!("chacha init: {e}")))?;
@@ -373,7 +411,20 @@ pub async fn dispatch(
 ) -> Result<serde_json::Value, A3chatError> {
     match method {
         "a3chat.e2e.bundle.export" => {
-            let bundle = svc.export(owner).await.map_err(A3chatError::from)?;
+            let passphrase: String = params
+                .get("passphrase")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    A3chatError::InvalidInput(
+                        "passphrase missing — bundle export now requires a non-empty passphrase"
+                            .into(),
+                    )
+                })?
+                .to_string();
+            let bundle = svc
+                .export(owner, &passphrase)
+                .await
+                .map_err(A3chatError::from)?;
             serde_json::to_value(bundle).map_err(A3chatError::from)
         }
         "a3chat.e2e.bundle.import" => {
@@ -384,11 +435,26 @@ pub async fn dispatch(
                 .get("replace_dm_state")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            let bundle: Bundle = serde_json::from_value(params).map_err(|e| {
+            let passphrase: String = params
+                .get("passphrase")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    A3chatError::InvalidInput(
+                        "passphrase missing — bundle import now requires the passphrase"
+                            .into(),
+                    )
+                })?
+                .to_string();
+            // B-20 — `passphrase` is stripped before parsing the
+            // wire bundle shape so it never accidentally lands in
+            // the persisted `Bundle` struct.
+            let mut bundle_params = params.clone();
+            bundle_params.as_object_mut().map(|m| m.remove("passphrase"));
+            let bundle: Bundle = serde_json::from_value(bundle_params).map_err(|e| {
                 A3chatError::InvalidInput(format!("malformed bundle: {e}"))
             })?;
             let r = svc
-                .import(owner, bundle, replace_dm_state)
+                .import(owner, &passphrase, bundle, replace_dm_state)
                 .await
                 .map_err(A3chatError::from)?;
             serde_json::to_value(r).map_err(A3chatError::from)
@@ -511,7 +577,7 @@ mod tests {
         svc.storage.save_outbound(&owner(), &env1).await.unwrap();
         svc.storage.save_outbound(&owner(), &env2).await.unwrap();
 
-        let bundle = svc.export(&owner()).await.unwrap();
+        let bundle = svc.export(&owner(), "test-passphrase-123").await.unwrap();
         assert_eq!(bundle.version, BUNDLE_VERSION);
 
         // Round trip via a fresh app instance (simulating a second
@@ -524,7 +590,7 @@ mod tests {
         );
         storage2.init_user(&owner()).await.unwrap();
         let svc2 = Arc::new(E2eBundleService::new(storage2, keyring2));
-        let r = svc2.import(&owner(), bundle, true).await.unwrap();
+        let r = svc2.import(&owner(), "test-passphrase-123", bundle, true).await.unwrap();
         assert!(r.imported_messages >= 2);
     }
 
@@ -541,7 +607,7 @@ mod tests {
             payload_b64: b64_std(&[0u8; 16]),
         };
         let err = svc
-            .import(&owner(), bogus, false)
+            .import(&owner(), "test-passphrase-123", bogus, false)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Domain(_)));
@@ -560,7 +626,7 @@ mod tests {
             payload_b64: b64_std(&[0u8; 64]),
         };
         let err = svc
-            .import(&owner(), bogus, false)
+            .import(&owner(), "test-passphrase-123", bogus, false)
             .await
             .unwrap_err();
         // All-zero ciphertext fails AEAD verification → Crypto error.
@@ -571,14 +637,14 @@ mod tests {
     async fn import_rejects_tampered_payload() {
         let (_d, svc) = fresh();
         svc.storage.init_user(&owner()).await.unwrap();
-        let bundle = svc.export(&owner()).await.unwrap();
+        let bundle = svc.export(&owner(), "test-passphrase-123").await.unwrap();
         let mut bad = bundle.clone();
         let mut bytes = base64::engine::general_purpose::STANDARD
             .decode(&bad.payload_b64)
             .unwrap();
         bytes[0] ^= 0xff;
         bad.payload_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let err = svc.import(&owner(), bad, false).await.unwrap_err();
+        let err = svc.import(&owner(), "test-passphrase-123", bad, false).await.unwrap_err();
         assert!(matches!(err, AppError::Crypto(_)));
     }
 

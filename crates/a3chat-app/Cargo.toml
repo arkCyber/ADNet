@@ -35,6 +35,11 @@ a3net-identity             = { workspace = true }
 a3net-socialfeed           = { workspace = true }
 a3net-gossip               = { workspace = true }
 a3net-ipc                  = { workspace = true }
+# Channel / 公众号 (F-09) — wraps `a3net-news::NewsService` (gossip
+# fan-out, monotonic per-room sequence, optional wallet signature)
+# and adds the `account_id` / `feed_id` surface that RPC clients
+# actually see.
+a3net-news                 = { workspace = true }
 
 # Async runtime
 tokio                      = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
@@ -57,6 +62,7 @@ uuid                       = { workspace = true }
 # Crypto / hashing
 blake3                     = { workspace = true }
 chacha20poly1305          = { workspace = true }
+ed25519-dalek              = { workspace = true }
 # `rand` is used by the pairing service to mint the per-invitation
 # salt and replay-guard nonces. `OsRng` is the only entry point we
 # touch, so the default features are kept off.

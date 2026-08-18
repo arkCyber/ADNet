@@ -79,6 +79,6 @@ pub use storage_schema::SCHEMA_VERSION;
 // to depend on this crate, not `a3net-types` directly, when they
 // only care about the social-feed surface.
 pub use a3net_types::social_feed::{
-    FollowRelationship, PostAttachment, SocialComment, SocialPost, SocialReaction, VIS_FRIENDS,
-    VIS_PRIVATE, VIS_PUBLIC,
+    BlockRecord, FollowRelationship, PostAttachment, ReportReason, ReportRecord, ShareRecord,
+    ShareTarget, SocialComment, SocialPost, SocialReaction, VIS_FRIENDS, VIS_PRIVATE, VIS_PUBLIC,
 };

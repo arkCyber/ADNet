@@ -17,6 +17,8 @@ impl A3chatRpcMethod {
     // Conversations
     pub const CHAT_CONVERSATION_LIST: &'static str = "a3chat.chat.conversation.list";
     pub const CHAT_CONVERSATION_OPEN: &'static str = "a3chat.chat.conversation.open";
+    pub const CHAT_CONVERSATION_CREATE_DIRECT: &'static str =
+        "a3chat.chat.conversation.create_direct";
     pub const CHAT_MESSAGE_SEND: &'static str = "a3chat.chat.message.send";
     pub const CHAT_MESSAGE_RECALL: &'static str = "a3chat.chat.message.recall";
     pub const CHAT_MESSAGE_ACK: &'static str = "a3chat.chat.message.ack";
@@ -143,12 +145,21 @@ impl A3chatRpcMethod {
     pub const PROFILE_KIND_SET: &'static str = "a3chat.profile.kind.set";
 
     // Media / crypto
+    pub const MEDIA_HEALTH: &'static str = "a3chat.media.health";
     pub const MEDIA_UPLOAD_INIT: &'static str = "a3chat.media.upload_init";
     pub const MEDIA_UPLOAD_CHUNK: &'static str = "a3chat.media.upload_chunk";
     pub const MEDIA_UPLOAD_FINALIZE: &'static str = "a3chat.media.upload_finalize";
     pub const MEDIA_DOWNLOAD_GET: &'static str = "a3chat.media.download_get";
     pub const E2E_BUNDLE_EXPORT: &'static str = "a3chat.e2e.bundle.export";
     pub const E2E_BUNDLE_IMPORT: &'static str = "a3chat.e2e.bundle.import";
+
+    // Moderation (content / attachment policy gate). Names match
+    // the routing table in `a3chat_app::moderation_service`.
+    pub const MODERATION_CHECK_CONTENT: &'static str = "a3chat.moderation.check_content";
+    pub const MODERATION_CHECK_ATTACHMENT: &'static str = "a3chat.moderation.check_attachment";
+    pub const MODERATION_LIST_BLOCKED: &'static str = "a3chat.moderation.list_blocked";
+    pub const MODERATION_SET_DENY_DEFAULT: &'static str = "a3chat.moderation.set_deny_default";
+    pub const MODERATION_STATS: &'static str = "a3chat.moderation.stats";
 
     // Stream (SSE)
     pub const STREAM_SUBSCRIBE: &'static str = "a3chat.stream.subscribe";
@@ -172,6 +183,71 @@ impl A3chatRpcMethod {
     pub const LINK_BOOKMARK_TAGS: &'static str = "a3chat.link.bookmark.tags";
     pub const LINK_BOOKMARK_FOLDERS: &'static str = "a3chat.link.bookmark.folders";
     pub const LINK_BOOKMARK_COUNT: &'static str = "a3chat.link.bookmark.count";
+
+    // Moments / 朋友圈 (F-05). Mirrors the 19-method
+    // `a3chat.moments.*` JSON-RPC namespace that
+    // `a3chat_app::moments_service::dispatch` serves. Without
+    // these constants in `ALL`, the discovery helpers and the CLI
+    // parsing table silently drop every Moments method.
+    pub const MOMENTS_NODE_INFO: &'static str = "a3chat.moments.node_info";
+    pub const MOMENTS_POST_CREATE: &'static str = "a3chat.moments.post.create";
+    pub const MOMENTS_POST_UPDATE: &'static str = "a3chat.moments.post.update";
+    pub const MOMENTS_POST_DELETE: &'static str = "a3chat.moments.post.delete";
+    pub const MOMENTS_POST_GET: &'static str = "a3chat.moments.post.get";
+    pub const MOMENTS_POSTS_BY_USER: &'static str = "a3chat.moments.posts.by_user";
+    pub const MOMENTS_TIMELINE: &'static str = "a3chat.moments.timeline";
+    pub const MOMENTS_COMMENT_ADD: &'static str = "a3chat.moments.comment.add";
+    pub const MOMENTS_COMMENT_EDIT: &'static str = "a3chat.moments.comment.edit";
+    pub const MOMENTS_COMMENT_DELETE: &'static str = "a3chat.moments.comment.delete";
+    pub const MOMENTS_COMMENTS_LIST: &'static str = "a3chat.moments.comments.list";
+    pub const MOMENTS_REACT: &'static str = "a3chat.moments.react";
+    pub const MOMENTS_UNREACT: &'static str = "a3chat.moments.unreact";
+    pub const MOMENTS_REACTIONS_LIST: &'static str = "a3chat.moments.reactions.list";
+    pub const MOMENTS_FOLLOW: &'static str = "a3chat.moments.follow";
+    pub const MOMENTS_UNFOLLOW: &'static str = "a3chat.moments.unfollow";
+    pub const MOMENTS_FOLLOWERS_LIST: &'static str = "a3chat.moments.followers.list";
+    pub const MOMENTS_FOLLOWING_LIST: &'static str = "a3chat.moments.following.list";
+    pub const MOMENTS_FOLLOWING_CHECK: &'static str = "a3chat.moments.following.check";
+    pub const MOMENTS_BLOCK: &'static str = "a3chat.moments.block";
+    pub const MOMENTS_UNBLOCK: &'static str = "a3chat.moments.unblock";
+    pub const MOMENTS_BLOCKLIST_LIST: &'static str = "a3chat.moments.blocklist.list";
+    pub const MOMENTS_SHARE: &'static str = "a3chat.moments.share";
+    pub const MOMENTS_REPORT: &'static str = "a3chat.moments.report";
+    pub const MOMENTS_VERIFY_POST: &'static str = "a3chat.moments.verify.post";
+    pub const MOMENTS_VERIFY_COMMENT: &'static str = "a3chat.moments.verify.comment";
+    pub const MOMENTS_VERIFY_REACTION: &'static str = "a3chat.moments.verify.reaction";
+
+    // Channel / 公众号 (F-09). Backed by `a3net-news::NewsService`
+    // (gossip fan-out, monotonic per-room sequence) with a
+    // friendlier `account_id` / `feed_id` surface in front. The
+    // dispatcher in `a3chat_app::channel_service::dispatch`
+    // owns the actual routing — keeping these constants next to
+    // the rest of the `a3chat.*` namespace so the CLI help
+    // text and discovery helpers enumerate them automatically.
+    pub const CHANNEL_ACCOUNT_REGISTER: &'static str = "a3chat.channel.account.register";
+    pub const CHANNEL_ACCOUNT_UPDATE: &'static str = "a3chat.channel.account.update";
+    pub const CHANNEL_ACCOUNT_GET: &'static str = "a3chat.channel.account.get";
+    pub const CHANNEL_ACCOUNT_GET_BY_OWNER: &'static str = "a3chat.channel.account.get_by_owner";
+    pub const CHANNEL_ACCOUNT_LIST: &'static str = "a3chat.channel.account.list";
+    pub const CHANNEL_ACCOUNT_SEARCH: &'static str = "a3chat.channel.account.search";
+    pub const CHANNEL_ACCOUNT_DELETE: &'static str = "a3chat.channel.account.delete";
+    pub const CHANNEL_SUBSCRIBE: &'static str = "a3chat.channel.subscribe";
+    pub const CHANNEL_UNSUBSCRIBE: &'static str = "a3chat.channel.unsubscribe";
+    pub const CHANNEL_SUBSCRIPTIONS_LIST: &'static str = "a3chat.channel.subscriptions.list";
+    pub const CHANNEL_SUBSCRIPTIONS_OF_ACCOUNT: &'static str =
+        "a3chat.channel.subscriptions.of_account";
+    pub const CHANNEL_SUBSCRIPTION_SET_NOTIFY: &'static str =
+        "a3chat.channel.subscription.set_notify";
+    pub const CHANNEL_SUBSCRIPTION_SET_PINNED: &'static str =
+        "a3chat.channel.subscription.set_pinned";
+    pub const CHANNEL_FEED_PUBLISH: &'static str = "a3chat.channel.feed.publish";
+    pub const CHANNEL_FEED_RETRACT: &'static str = "a3chat.channel.feed.retract";
+    pub const CHANNEL_FEED_GET: &'static str = "a3chat.channel.feed.get";
+    pub const CHANNEL_FEED_LIST: &'static str = "a3chat.channel.feed.list";
+    pub const CHANNEL_FEED_TIMELINE: &'static str = "a3chat.channel.feed.timeline";
+    pub const CHANNEL_FEED_MARK_READ: &'static str = "a3chat.channel.feed.mark_read";
+    pub const CHANNEL_FEED_UNREAD_COUNT: &'static str = "a3chat.channel.feed.unread_count";
+    pub const CHANNEL_HEALTH: &'static str = "a3chat.channel.health";
 
     // SSE notification event names (emitted on `/rpc/stream`).
     // The frontend subscribes to these via EventSource.
@@ -222,6 +298,7 @@ impl A3chatRpcMethod {
     pub const ALL: &'static [&'static str] = &[
         Self::CHAT_CONVERSATION_LIST,
         Self::CHAT_CONVERSATION_OPEN,
+        Self::CHAT_CONVERSATION_CREATE_DIRECT,
         Self::CHAT_MESSAGE_SEND,
         Self::CHAT_MESSAGE_RECALL,
         Self::CHAT_MESSAGE_ACK,
@@ -319,12 +396,18 @@ impl A3chatRpcMethod {
         Self::PROFILE_PUBLIC_KEY_LABEL,
         Self::PROFILE_KIND_GET,
         Self::PROFILE_KIND_SET,
+        Self::MEDIA_HEALTH,
         Self::MEDIA_UPLOAD_INIT,
         Self::MEDIA_UPLOAD_CHUNK,
         Self::MEDIA_UPLOAD_FINALIZE,
         Self::MEDIA_DOWNLOAD_GET,
         Self::E2E_BUNDLE_EXPORT,
         Self::E2E_BUNDLE_IMPORT,
+        Self::MODERATION_CHECK_CONTENT,
+        Self::MODERATION_CHECK_ATTACHMENT,
+        Self::MODERATION_LIST_BLOCKED,
+        Self::MODERATION_SET_DENY_DEFAULT,
+        Self::MODERATION_STATS,
         Self::STREAM_SUBSCRIBE,
         Self::STREAM_UNSUBSCRIBE,
         Self::STREAM_LIST,
@@ -341,6 +424,56 @@ impl A3chatRpcMethod {
         Self::LINK_BOOKMARK_TAGS,
         Self::LINK_BOOKMARK_FOLDERS,
         Self::LINK_BOOKMARK_COUNT,
+        // Moments / 朋友圈 (F-05) — 27 methods total
+        Self::MOMENTS_NODE_INFO,
+        Self::MOMENTS_POST_CREATE,
+        Self::MOMENTS_POST_UPDATE,
+        Self::MOMENTS_POST_DELETE,
+        Self::MOMENTS_POST_GET,
+        Self::MOMENTS_POSTS_BY_USER,
+        Self::MOMENTS_TIMELINE,
+        Self::MOMENTS_COMMENT_ADD,
+        Self::MOMENTS_COMMENT_EDIT,
+        Self::MOMENTS_COMMENT_DELETE,
+        Self::MOMENTS_COMMENTS_LIST,
+        Self::MOMENTS_REACT,
+        Self::MOMENTS_UNREACT,
+        Self::MOMENTS_REACTIONS_LIST,
+        Self::MOMENTS_FOLLOW,
+        Self::MOMENTS_UNFOLLOW,
+        Self::MOMENTS_FOLLOWERS_LIST,
+        Self::MOMENTS_FOLLOWING_LIST,
+        Self::MOMENTS_FOLLOWING_CHECK,
+        Self::MOMENTS_BLOCK,
+        Self::MOMENTS_UNBLOCK,
+        Self::MOMENTS_BLOCKLIST_LIST,
+        Self::MOMENTS_SHARE,
+        Self::MOMENTS_REPORT,
+        Self::MOMENTS_VERIFY_POST,
+        Self::MOMENTS_VERIFY_COMMENT,
+        Self::MOMENTS_VERIFY_REACTION,
+        // F-09 Channel / 公众号 — 20 methods total
+        Self::CHANNEL_ACCOUNT_REGISTER,
+        Self::CHANNEL_ACCOUNT_UPDATE,
+        Self::CHANNEL_ACCOUNT_GET,
+        Self::CHANNEL_ACCOUNT_GET_BY_OWNER,
+        Self::CHANNEL_ACCOUNT_LIST,
+        Self::CHANNEL_ACCOUNT_SEARCH,
+        Self::CHANNEL_ACCOUNT_DELETE,
+        Self::CHANNEL_SUBSCRIBE,
+        Self::CHANNEL_UNSUBSCRIBE,
+        Self::CHANNEL_SUBSCRIPTIONS_LIST,
+        Self::CHANNEL_SUBSCRIPTIONS_OF_ACCOUNT,
+        Self::CHANNEL_SUBSCRIPTION_SET_NOTIFY,
+        Self::CHANNEL_SUBSCRIPTION_SET_PINNED,
+        Self::CHANNEL_FEED_PUBLISH,
+        Self::CHANNEL_FEED_RETRACT,
+        Self::CHANNEL_FEED_GET,
+        Self::CHANNEL_FEED_LIST,
+        Self::CHANNEL_FEED_TIMELINE,
+        Self::CHANNEL_FEED_MARK_READ,
+        Self::CHANNEL_FEED_UNREAD_COUNT,
+        Self::CHANNEL_HEALTH,
         // F-07 newly wired
         Self::CHAT_DRAFT_SAVE,
         Self::CHAT_DRAFT_GET,
@@ -420,7 +553,7 @@ mod tests {
     #[test]
     fn all_list_is_not_empty() {
         assert!(!A3chatRpcMethod::ALL.is_empty());
-        // Bump floor when adding a new namespace. As of F-07 the
+        // Bump floor when adding a new namespace. As of F-09 the
         // floor covers:
         //  - chat / contact / group / sync / presence (~24)
         //  - profile (~18)
@@ -430,7 +563,9 @@ mod tests {
         //  - device (~7)
         //  - notifications (~7)
         //  - health + e2e handshake (~4)
-        // Total ≈ 88.
-        assert!(A3chatRpcMethod::ALL.len() >= 80);
+        //  - moments / 朋友圈 (~27)
+        //  - channel / 公众号 (~20)
+        // Total ≈ 135.
+        assert!(A3chatRpcMethod::ALL.len() >= 130);
     }
 }

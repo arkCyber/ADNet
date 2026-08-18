@@ -45,6 +45,7 @@ pub mod group;
 pub mod mapping;
 pub mod mem;
 pub mod model;
+pub mod request;
 pub mod settings;
 pub mod sqlite;
 pub mod store;
@@ -59,6 +60,7 @@ pub use model::{
     IoTProtocol, IoTStatus, MAX_CONTACT_NAME_LEN, MAX_GROUPS_PER_CONTACT,
     MAX_TAGS_PER_CONTACT,
 };
+pub use request::PersistedContactRequest;
 pub use settings::{FriendRequestMode, FriendRequestSetting};
 pub use sqlite::{SCHEMA_VERSION, SqliteRosterStore, SqliteRosterStoreConfig};
 pub use store::{RosterStore, RosterStoreInfo};

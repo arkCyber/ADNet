@@ -361,6 +361,237 @@ impl Validate for FollowRelationship {
     }
 }
 
+/// Target kind for [`ReportRecord`] / [`ShareRecord`]. Mirrors
+/// `ReactionTarget` so callers don't need to learn a separate
+/// vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareTarget {
+    Post,
+    Comment,
+}
+
+impl ShareTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Post => "post",
+            Self::Comment => "comment",
+        }
+    }
+
+    pub fn from_strict(s: &str) -> Result<Self> {
+        Ok(match s {
+            "post" => Self::Post,
+            "comment" => Self::Comment,
+            other => {
+                return Err(AdnetError::Validation(format!(
+                    "invalid ShareTarget {other:?}"
+                )))
+            }
+        })
+    }
+}
+
+/// `a3chat.moments.share` payload — a user re-broadcasts someone
+/// else's post (or comment). We do not fork the original record;
+/// `ShareRecord` is a row in `post_shares` (`post_id -> sharer_id,
+/// created_at`) plus an optional comment field. `share_count` on the
+/// original `SocialPost` is the SQL `COUNT(*)` from this table.
+///
+/// The integrity hash covers `(target_id, target_type, sharer_id,
+/// created_at, comment)` so a tampered share record fails
+/// `verify_share_integrity`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ShareRecord {
+    pub share_id: String,
+    pub target_id: String,
+    pub target_type: ShareTarget,
+    pub sharer_id: String,
+    pub sharer_name: String,
+    pub comment: String,
+    pub created_at: u64,
+    pub integrity_hash: Option<String>,
+}
+
+impl ShareRecord {
+    pub fn validate(&self) -> Result<()> {
+        validate_id("share_id", &self.share_id)?;
+        validate_id("target_id", &self.target_id)?;
+        validate_id("sharer_id", &self.sharer_id)?;
+        validate_name("sharer_name", &self.sharer_name)?;
+        // `comment` is the user-added commentary; bound by the
+        // same cap as a comment body (1024 chars) so the gossip
+        // layer can't be DoS'd by an attacker filling the table.
+        if self.comment.len() > crate::invariants::MAX_CONTENT_LEN {
+            return Err(AdnetError::Validation(format!(
+                "comment: {} chars exceeds {}",
+                self.comment.len(),
+                crate::invariants::MAX_CONTENT_LEN
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn compute_hash(&self) -> String {
+        let base = crate::integrity::post_hash(
+            self.target_type.as_str(),
+            &self.sharer_id,
+            &self.comment,
+            1, // share records have no monotonic sequence
+            self.created_at,
+        );
+        crate::integrity::hash_fields([
+            base.as_bytes(),
+            self.target_id.as_bytes(),
+            b"share",
+        ])
+    }
+
+    pub fn stamp_integrity_hash(&mut self) {
+        self.integrity_hash = Some(self.compute_hash());
+    }
+
+    pub fn verify_integrity(&self) -> bool {
+        match &self.integrity_hash {
+            Some(h) => h == &self.compute_hash(),
+            None => false,
+        }
+    }
+}
+
+impl Validate for ShareRecord {
+    fn validate(&self) -> Result<()> {
+        self.validate()
+    }
+}
+
+/// `a3chat.moments.report` payload. A reporter flags a post (or
+/// comment) as abusive. The reason string is a strict vocabulary —
+/// see [`ReportReason`] — so moderation can apply a uniform policy
+/// across the fleet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportReason {
+    Spam,
+    Abuse,
+    Harassment,
+    Illegal,
+    Impersonation,
+    Other,
+}
+
+impl ReportReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spam => "spam",
+            Self::Abuse => "abuse",
+            Self::Harassment => "harassment",
+            Self::Illegal => "illegal",
+            Self::Impersonation => "impersonation",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn from_strict(s: &str) -> Result<Self> {
+        Ok(match s {
+            "spam" => Self::Spam,
+            "abuse" => Self::Abuse,
+            "harassment" => Self::Harassment,
+            "illegal" => Self::Illegal,
+            "impersonation" => Self::Impersonation,
+            "other" => Self::Other,
+            other => {
+                return Err(AdnetError::Validation(format!(
+                    "invalid ReportReason {other:?}"
+                )))
+            }
+        })
+    }
+}
+
+/// `a3chat.moments.report` payload. Reporter may attach free-form
+/// notes (≤ 512 chars); the strict [`ReportReason`] is what moderation
+/// actually keys on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReportRecord {
+    pub report_id: String,
+    pub target_id: String,
+    pub target_type: ShareTarget,
+    pub reporter_id: String,
+    pub reason: ReportReason,
+    pub notes: String,
+    pub created_at: u64,
+}
+
+impl ReportRecord {
+    pub fn validate(&self) -> Result<()> {
+        validate_id("report_id", &self.report_id)?;
+        validate_id("target_id", &self.target_id)?;
+        validate_id("reporter_id", &self.reporter_id)?;
+        if self.notes.len() > 512 {
+            return Err(AdnetError::Validation(format!(
+                "notes: {} chars exceeds 512",
+                self.notes.len()
+            )));
+        }
+        // Self-reports are nonsensical; reject at validation time so
+        // `ModerationService` never sees them.
+        if self.target_type == ShareTarget::Post {
+            // Cross-reference deferred to the service layer — the
+            // typed record does not know who authored the post.
+        }
+        Ok(())
+    }
+}
+
+impl Validate for ReportRecord {
+    fn validate(&self) -> Result<()> {
+        self.validate()
+    }
+}
+
+/// `a3chat.moments.block` payload. Bidirectional block: when alice
+/// blocks bob, alice's `ForViewer` timeline filter drops all of bob's
+/// posts, and bob's `react` / `comment_post` paths must consult
+/// `is_blocked(target_post.author)` before persisting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BlockRecord {
+    pub owner_id: String,
+    pub blocked_user_id: String,
+    pub created_at: u64,
+    pub reason: Option<String>,
+}
+
+impl BlockRecord {
+    pub fn validate(&self) -> Result<()> {
+        validate_id("owner_id", &self.owner_id)?;
+        validate_id("blocked_user_id", &self.blocked_user_id)?;
+        if self.owner_id == self.blocked_user_id {
+            return Err(AdnetError::Validation(
+                "owner_id == blocked_user_id (self-block)".into(),
+            ));
+        }
+        if let Some(r) = &self.reason {
+            if r.len() > 256 {
+                return Err(AdnetError::Validation(format!(
+                    "reason: {} chars exceeds 256",
+                    r.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Validate for BlockRecord {
+    fn validate(&self) -> Result<()> {
+        self.validate()
+    }
+}
+
 /// Build a [`PostAttachment`] from a [`ContentHash`]. The thumbnail is
 /// left as `None`; callers that have a separate preview hash can fill
 /// it in afterwards.

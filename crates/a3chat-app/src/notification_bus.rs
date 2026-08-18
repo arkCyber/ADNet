@@ -157,7 +157,13 @@ impl NotificationReceiver {
             (Some(uid), A3chatEvent::MomentsPostDeleted { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::MomentsCommentAdded { user_id, .. }) => uid == user_id,
             (Some(uid), A3chatEvent::MomentsReactionToggled { user_id, .. }) => uid == user_id,
-            (None, _) => true,
+            (Some(uid), A3chatEvent::MomentsCommentEdited { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::MomentsCommentDeleted { user_id, .. }) => uid == user_id,
+            // v2 audit round — share / report / block are user-scoped
+            // (the local owner is the actor), so route by `user_id`.
+            (Some(uid), A3chatEvent::MomentsPostShared { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::MomentsPostReported { user_id, .. }) => uid == user_id,
+            (Some(uid), A3chatEvent::MomentsUserBlocked { user_id, .. }) => uid == user_id,
             // Presence events broadcast to all subscribers regardless.
             (_, A3chatEvent::PresenceChanged { .. }) => true,
             (_, A3chatEvent::ChatTyping { .. }) => true,
@@ -170,6 +176,7 @@ impl NotificationReceiver {
             (_, A3chatEvent::ContactUnblocked { .. }) => true,
             (_, A3chatEvent::ContactFavoriteToggled { .. }) => true,
             (_, A3chatEvent::ContactRequestAccepted { .. }) => true,
+            (_, A3chatEvent::ContactRequestCancelled { .. }) => true,
             // Chat message reaction events — broadcast to all
             (_, A3chatEvent::ChatMessageReactionToggled { .. }) => true,
             // Link bookmark events — broadcast to all
@@ -190,6 +197,30 @@ impl NotificationReceiver {
             (_, A3chatEvent::PairingInvitationCreated { .. }) => true,
             (_, A3chatEvent::PairingTrustedDeviceAdded { .. }) => true,
             (_, A3chatEvent::PairingTrustedDeviceRevoked { .. }) => true,
+            // Channel / Public-Account events fire from
+            // `a3chat.channel.*` RPC methods. They are global
+            // announcements (account registered, updated, deleted,
+            // feed published / retracted, subscription changed) —
+            // every local subscriber should see them so the
+            // in-process search index and the per-account follower
+            // cache stay in lock-step.
+            (_, A3chatEvent::ChannelAccountRegistered { .. }) => true,
+            (_, A3chatEvent::ChannelAccountUpdated { .. }) => true,
+            (_, A3chatEvent::ChannelAccountDeleted { .. }) => true,
+            (Some(uid), A3chatEvent::ChannelSubscribed { user_id, .. }) if uid == user_id => true,
+            (_, A3chatEvent::ChannelFeedPublished { .. }) => true,
+            (_, A3chatEvent::ChannelFeedRetracted { .. }) => true,
+            // Catch-all: any event whose owner filter already
+            // matched above falls through here with `(None, _)`,
+            // which means "no filter subscribed, accept every
+            // event". We MUST keep this branch exhaustive so
+            // adding a new event variant does not silently drop
+            // the global subscriber's view.
+            (None, _) => true,
+            // An owner-scoped subscriber received an event not
+            // addressed to it (e.g. a chat.message.received for a
+            // peer). Drop it.
+            (Some(_), _) => false,
         }
     }
 }

@@ -46,3 +46,14 @@ Exodus@src-backup/
 
 # Runtime artefacts produced by moderation tests / local runs
 /crates/a3chat-app/<memory>
+
+# Flutter build / generated artefacts (mobile/)
+mobile/.dart_tool/
+mobile/.flutter-plugins-dependencies
+mobile/build/
+mobile/ios/Flutter/ephemeral/
+mobile/macos/Flutter/ephemeral/
+mobile/linux/flutter/generated_plugin_registrant.*
+mobile/linux/flutter/generated_plugins.cmake
+mobile/android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
+mobile/android/local.properties

@@ -41,26 +41,72 @@ pub struct ChatService {
     /// `send_message` calls can read the gate without racing the
     /// writer and without an `Arc::get_mut` dance.
     mute_gate: Arc<std::sync::Mutex<Option<MuteGate>>>,
+    /// F-25 / B-7 — blocklist gate. When `Some`, every
+    /// `send_message` consults it for the receiver and rejects
+    /// with [`AppError::Forbidden`] when the receiver is on the
+    /// owner's blocklist. The gate is wired in `A3chatApp::new`
+    /// (`chat.with_blocklist_gate(contact.is_blocked_gate)`) so
+    /// chat and contact remain loosely coupled and the chat
+    /// service never imports `ContactService` directly (that would
+    /// be a circular dependency).
+    blocklist_gate: Arc<std::sync::Mutex<Option<BlocklistGate>>>,
 }
 
 /// Async predicate for GB-22. `(conversation_id, sender) -> true`
 /// means the sender is currently muted in this conversation and the
 /// outbound message must be rejected.
 ///
-/// `MuteGate` is the `Send + Sync` `dyn Fn` trait object directly so
-/// callers can `Arc::new(...)` their closure without an extra
-/// `Box::new`. The slot that holds it ([`ChatService::mute_gate`])
-/// is `Arc<Mutex<Option<Arc<MuteGate>>>>` so concurrent reads can
-/// clone the inner `Arc` cheaply without racing the writer.
+/// `MuteGate` is `Arc<dyn Fn(...)> + Send + Sync` so it is sized,
+/// cheaply cloneable, and storable under [`ChatService::mute_gate`]
+/// (`Arc<Mutex<Option<Arc<MuteGate>>>>`). Callers wrap their
+/// closure in `Arc::new` before handing it to
+/// [`ChatService::with_mute_gate`].
+///
+/// The returned future only needs `Send` (not `Sync`) — it is
+/// held inside an async function which moves it across `.await`
+/// points without ever being shared. `Sync` would force every
+/// awaited future to also be `Sync`, which leaks a `Sync`
+/// requirement into every async trait object the closure might
+/// call (e.g. `RosterStore::get_contact` inside the blocklist
+/// gate). See [`BlocklistGate`] for the same reasoning applied to
+/// the blocklist predicate.
 pub type MuteGate = Arc<
     dyn Fn(
             ConversationId,
             UserId,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = bool> + Send + Sync>,
+            Box<dyn std::future::Future<Output = bool> + Send>,
         > + Send
         + Sync,
 >;
+
+/// F-25 / B-7 — async blocklist check. `(owner, peer) -> true`
+/// means `owner` has `peer` on their blocklist and the outbound
+/// message must be rejected with [`AppError::Forbidden`].
+///
+/// Like [`MuteGate`], this is a `Send + Sync` `dyn Fn` trait object
+/// so callers can `Arc::new(...)` their closure without an extra
+/// `Box::new`. Stored behind `Arc<Mutex<Option<...>>>` so concurrent
+/// reads can clone the inner `Arc` cheaply without racing the writer.
+///
+/// The returned future only needs `Send` (not `Sync`) — it is held
+/// inside an async function which moves it across `.await` points
+/// without ever being shared. `Sync` would force every awaited
+/// future to also be `Sync`, which leaks a `Sync` requirement into
+/// every async trait object the closure might call (e.g.
+/// `RosterStore::get_contact`).
+pub type BlocklistGate = Arc<
+    dyn Fn(UserId, UserId) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// F-11 / B-27 — WeChat-style 2-minute recall window. A sender can
+/// retract a message within this many seconds of `timestamp`. After
+/// the window closes the recall RPC returns `AppError::Forbidden` so
+/// the UI can show "撤回超过 2 分钟，不允许撤回" without any client
+/// clock check.
+pub const RECALL_WINDOW_SECS: i64 = 120;
 
 impl ChatService {
     pub fn new(storage: ChatStorage, bus: NotificationBus) -> Self {
@@ -69,6 +115,7 @@ impl ChatService {
             bus,
             moderation: None,
             mute_gate: Arc::new(std::sync::Mutex::new(None)),
+            blocklist_gate: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(feature = "iroh")]
             iroh_docs_chat: Arc::new(RwLock::new(None)),
         }
@@ -102,6 +149,20 @@ impl ChatService {
             let gate_arc = self.mute_gate.clone();
             tokio::spawn(async move {
                 *gate_arc.lock().expect("mute_gate mutex poisoned") = Some(gate);
+            });
+        }
+        self
+    }
+
+    /// F-25 / B-7 — install the blocklist gate.
+    pub fn with_blocklist_gate(mut self, gate: BlocklistGate) -> Self {
+        if let Some(slot) = Arc::get_mut(&mut self.blocklist_gate) {
+            *slot.get_mut().expect("blocklist_gate mutex poisoned") = Some(gate);
+        } else {
+            let gate_arc = self.blocklist_gate.clone();
+            let gate_for_task = gate.clone();
+            tokio::spawn(async move {
+                *gate_arc.lock().expect("blocklist_gate mutex poisoned") = Some(gate_for_task);
             });
         }
         self
@@ -202,6 +263,33 @@ impl ChatService {
         envelope: &MessageEnvelope,
     ) -> AppResult<StoredMessage> {
         envelope.validate()?;
+        // F-25 / B-7 — blocklist gate. When the local owner has the
+        // receiver on their blocklist, refuse to send the message
+        // (and never let it land in storage). This mirrors WeChat
+        // semantics ("你已将对方屏蔽，无法发送消息"). System messages
+        // bypass the gate so moderation/system cues still propagate.
+        //
+        // The gate is an Arc<dyn Fn> so we clone the Arc out of the
+        // slot lock before any await to keep the slot mutex-free for
+        // concurrent callers.
+        if !matches!(
+            envelope.message_type,
+            a3chat_core::message::MessageType::System
+        ) {
+            let gate_opt = self
+                .blocklist_gate
+                .lock()
+                .expect("blocklist_gate mutex poisoned")
+                .clone();
+            if let Some(f) = gate_opt {
+                if f(owner.clone(), envelope.receiver_id.clone()).await {
+                    return Err(AppError::Forbidden(format!(
+                        "user is on {}'s blocklist",
+                        owner.as_str()
+                    )));
+                }
+            }
+        }
         // Content moderation gate. Only run the policy on
         // plaintext bodies (`MessageBody::Plain`), since encrypted
         // bodies are opaque to the moderator (the receiving device
@@ -317,6 +405,18 @@ impl ChatService {
             return Err(AppError::Forbidden(
                 "only the sender can recall a message".into(),
             ));
+        }
+        // F-11 / B-27 — WeChat enforces a 2-minute recall window. We
+        // use the message's own `timestamp` (the wall-clock second the
+        // sender claims to have hit "send"). If the clock is wildly
+        // wrong the request is rejected; clients should sync NTP.
+        let now = chrono::Utc::now().timestamp();
+        let age_secs = now.saturating_sub(m.timestamp);
+        if age_secs > RECALL_WINDOW_SECS {
+            return Err(AppError::Forbidden(format!(
+                "recall window expired: message is {age_secs}s old, \
+                 max {RECALL_WINDOW_SECS}s"
+            )));
         }
         self.storage.recall_message(owner, message_id).await?;
         let updated = self
@@ -473,6 +573,21 @@ pub async fn dispatch(
                 .map_err(A3chatError::from)?
                 .ok_or_else(|| A3chatError::NotFound(format!("conversation {id} not found")))?;
             serde_json::to_value(r).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::CHAT_CONVERSATION_CREATE_DIRECT => {
+            let peer: UserId = serde_json::from_value(
+                params
+                    .get("peer_user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("peer_user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let meta = svc
+                .storage()
+                .create_direct_conversation(owner, &peer)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(meta).map_err(A3chatError::from)
         }
         A3chatRpcMethod::CHAT_MESSAGE_SEND => {
             let env: MessageEnvelope = serde_json::from_value(params).map_err(A3chatError::from)?;

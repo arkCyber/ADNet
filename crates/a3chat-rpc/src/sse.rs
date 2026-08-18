@@ -512,6 +512,16 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
                 "contact_id": contact_id,
             }),
         ),
+        A3chatEvent::ContactRequestCancelled { request_id, by_user_id } => (
+            // Distinct from `a3chat.contact.request.accepted` so SSE
+            // consumers can drop pending inbox rows without confusing
+            // the two lifecycle states.
+            "a3chat.contact.request.cancelled",
+            serde_json::json!({
+                "request_id": request_id,
+                "by_user_id": by_user_id,
+            }),
+        ),
         // Forward-compatible catch-all for any *future* event variants
         // that this dispatcher has not yet been taught about. Today
         // every variant is enumerated explicitly above, so this arm
@@ -584,6 +594,7 @@ fn event_variant_name(event: &a3chat_core::event::A3chatEvent) -> &'static str {
         A3chatEvent::ContactUnblocked { .. } => "contact_unblocked",
         A3chatEvent::ContactFavoriteToggled { .. } => "contact_favorite_toggled",
         A3chatEvent::ContactRequestAccepted { .. } => "contact_request_accepted",
+        A3chatEvent::ContactRequestCancelled { .. } => "contact_request_cancelled",
         A3chatEvent::ConversationPinChanged { .. } => "conversation_pin_changed",
         A3chatEvent::MomentsPostCreated { .. } => "moments_post_created",
         A3chatEvent::MomentsPostDeleted { .. } => "moments_post_deleted",
@@ -605,6 +616,18 @@ fn event_variant_name(event: &a3chat_core::event::A3chatEvent) -> &'static str {
         A3chatEvent::PairingInvitationCreated { .. } => "pairing_invitation_created",
         A3chatEvent::PairingTrustedDeviceAdded { .. } => "pairing_trusted_added",
         A3chatEvent::PairingTrustedDeviceRevoked { .. } => "pairing_trusted_revoked",
+        A3chatEvent::MomentsPostShared { .. } => "moments_post_shared",
+        A3chatEvent::MomentsPostReported { .. } => "moments_post_reported",
+        A3chatEvent::MomentsUserBlocked { .. } => "moments_user_blocked",
+        A3chatEvent::MomentsCommentEdited { .. } => "moments_comment_edited",
+        A3chatEvent::MomentsCommentDeleted { .. } => "moments_comment_deleted",
+        A3chatEvent::ChannelAccountRegistered { .. } => "channel_account_registered",
+        A3chatEvent::ChannelAccountUpdated { .. } => "channel_account_updated",
+        A3chatEvent::ChannelAccountDeleted { .. } => "channel_account_deleted",
+        A3chatEvent::ChannelSubscribed { .. } => "channel_subscribed",
+        A3chatEvent::ChannelUnsubscribed { .. } => "channel_unsubscribed",
+        A3chatEvent::ChannelFeedPublished { .. } => "channel_feed_published",
+        A3chatEvent::ChannelFeedRetracted { .. } => "channel_feed_retracted",
     }
 }
 

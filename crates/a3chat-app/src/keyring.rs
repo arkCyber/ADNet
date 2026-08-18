@@ -14,6 +14,46 @@ use parking_lot::RwLock;
 use a3chat_core::id::{ConversationId, UserId};
 use a3chat_crypto::session::{DmSession, SessionKeys};
 
+// ---------------------------------------------------------------------------
+// Re-exports for friend-request signing.
+//
+// `ContactService` needs to compute and verify Ed25519 signatures over
+// the canonical friend-request payload (see
+// `a3chat_core::contact::ContactRequest::signature_payload`). Rather than
+// introduce a new cryptographic wrapper crate, we re-export the
+// `ed25519_dalek` types callers need and add a thin hex helper for the
+// 32-byte public key. The re-exports are `pub` so unit tests in
+// `contact_service::tests` can construct keys without depending on
+// `ed25519_dalek` directly.
+// ---------------------------------------------------------------------------
+
+pub use ed25519_dalek::Signature;
+pub use ed25519_dalek::SigningKey;
+pub use ed25519_dalek::Verifier;
+pub use ed25519_dalek::VerifyingKey;
+
+/// Format the 32-byte Ed25519 public key as 64 lower-case hex chars.
+pub fn public_key_to_hex(pk: &VerifyingKey) -> String {
+    hex::encode(pk.to_bytes())
+}
+
+/// Parse a 64-char hex Ed25519 public key.
+pub fn public_key_from_hex(s: &str) -> Result<VerifyingKey, String> {
+    let bytes = hex::decode(s).map_err(|e| format!("hex decode: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!("expected 32 bytes, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    VerifyingKey::from_bytes(&arr).map_err(|e| format!("ed25519 key: {e}"))
+}
+
+/// Hex-encoded copy of the public half of a `SigningKey`.
+/// Convenient for persisting alongside the request envelope.
+pub fn signing_key_public_key_hex(key: &SigningKey) -> String {
+    public_key_to_hex(&key.verifying_key())
+}
+
 /// Cached E2E state for one peer.
 ///
 /// Holds a real [`DmSession`] once a Noise_XX handshake has

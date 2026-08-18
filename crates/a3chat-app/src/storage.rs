@@ -686,6 +686,75 @@ impl ChatStorage {
         Ok(rows)
     }
 
+    /// B-9 / F-20 — explicit DM creation. WeChat's contact list
+    /// shows a DM for every known contact even before the first
+    /// message lands, so this lets the UI "create" a conversation
+    /// independently. Idempotent — if the row already exists it's
+    /// returned unchanged.
+    pub async fn create_direct_conversation(
+        &self,
+        owner: &UserId,
+        peer: &UserId,
+    ) -> AppResult<ConversationMeta> {
+        // Canonical DM id format: `dm:{sorted_a}:{sorted_b}`. Sorting
+        // the user names guarantees a 1:1 conversation has the same
+        // id on both sides (Alice's "dm:alice:bob" matches Bob's
+        // "dm:alice:bob"). Without the sort, Alice would say
+        // "dm:alice:bob" and Bob would say "dm:bob:alice".
+        let (a, b) = if owner.as_str() <= peer.as_str() {
+            (owner.as_str(), peer.as_str())
+        } else {
+            (peer.as_str(), owner.as_str())
+        };
+        let conv_id = ConversationId::from(format!("dm:{a}:{b}"));
+        let conn_arc = self.connection(owner).await?;
+        let peer_str = peer.as_str().to_string();
+        let conv_id_str = conv_id.as_str().to_string();
+        let now = chrono::Utc::now().timestamp();
+        let conv_id_clone = conv_id.clone();
+        let owner_clone = owner.clone();
+        let peer_clone = peer.clone();
+        let owner_for_log = owner.clone();
+        let meta: ConversationMeta = tokio::task::spawn_blocking(
+            move || -> AppResult<ConversationMeta> {
+                let guard = conn_arc.blocking_lock_owned();
+                // ON CONFLICT DO NOTHING — keep existing previews
+                // / counts / pin state intact when the conversation
+                // already exists.
+                guard.execute(
+                    "INSERT OR IGNORE INTO conversations
+                        (conversation_id, kind, title, peer_user_id,
+                         last_message_preview, last_activity, message_count,
+                         unread_count, peer_online, muted, pinned)
+                     VALUES (?1, 'one_on_one', ?2, ?3, '', ?4, 0, 0, 0, 0, 0)",
+                    rusqlite::params![conv_id_str, peer_str, peer_str, now],
+                )?;
+                tracing::debug!(
+                    owner = %owner_for_log.as_str(),
+                    conv = %conv_id_str,
+                    "create_direct_conversation: idempotent row ensured"
+                );
+                Ok(ConversationMeta {
+                    conversation_id: conv_id_clone,
+                    kind: a3chat_core::conversation::ConversationKind::Dm,
+                    title: peer_clone.as_str().to_string(),
+                    peer_user_id: Some(peer_clone),
+                    last_message_preview: String::new(),
+                    last_activity: now,
+                    message_count: 0,
+                    unread_count: 0,
+                    peer_online: false,
+                    muted: false,
+                    pinned: false,
+                })
+            },
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("create_direct_conversation join: {e}")))??;
+        let _ = owner_clone; // suppress unused warning
+        Ok(meta)
+    }
+
     /// Look up a single message by id.
     pub async fn get_message(
         &self,

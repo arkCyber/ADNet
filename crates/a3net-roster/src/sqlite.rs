@@ -10,6 +10,8 @@
 //! - `contact_groups`                 — one row per [`ContactGroup`].
 //! - `digit_mappings`                 — bidirectional `digit_id ↔ node_id`.
 //! - `friend_request_settings`        — per-user friend-request mode.
+//! - `contact_requests`              — pending / accepted / rejected friend
+//!                                     requests, keyed by `request_id`.
 //!
 //! ## Conventions
 //!
@@ -31,12 +33,13 @@ use crate::error::{RosterError, RosterResult};
 use crate::group::ContactGroup;
 use crate::mapping::DigitMapping;
 use crate::model::Contact;
+use crate::request::PersistedContactRequest;
 use crate::settings::FriendRequestSetting;
 use crate::store::{RosterStore, RosterStoreInfo};
 
 /// Current schema version. Bump this and add a migration when changing the
 /// tables.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Configuration for [`SqliteRosterStore`].
 #[derive(Debug, Clone)]
@@ -106,6 +109,22 @@ CREATE TABLE IF NOT EXISTS friend_request_settings (
     mode        TEXT NOT NULL,
     updated_at  INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS contact_requests (
+    request_id         TEXT PRIMARY KEY,
+    from_user_id       TEXT NOT NULL,
+    to_user_id         TEXT NOT NULL,
+    message            TEXT NOT NULL DEFAULT '',
+    status             TEXT NOT NULL,
+    created_at_unix    INTEGER NOT NULL DEFAULT 0,
+    responded_at_unix  INTEGER,
+    signature_b64      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_contact_requests_to_user
+    ON contact_requests(to_user_id);
+CREATE INDEX IF NOT EXISTS idx_contact_requests_from_user
+    ON contact_requests(from_user_id);
 
 CREATE TABLE IF NOT EXISTS schema_version (
     version     INTEGER PRIMARY KEY,
@@ -547,6 +566,90 @@ impl RosterStore for SqliteRosterStore {
             .optional()?;
         Ok(row)
     }
+
+    async fn put_contact_request(
+        &self,
+        request: PersistedContactRequest,
+    ) -> RosterResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO contact_requests \
+             (request_id, from_user_id, to_user_id, message, status, \
+              created_at_unix, responded_at_unix, signature_b64) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                request.request_id,
+                request.from_user_id,
+                request.to_user_id,
+                request.message,
+                request.status,
+                request.created_at_unix,
+                request.responded_at_unix,
+                request.signature_b64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    async fn get_contact_request(
+        &self,
+        request_id: &str,
+    ) -> RosterResult<Option<PersistedContactRequest>> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT request_id, from_user_id, to_user_id, message, status, \
+                 created_at_unix, responded_at_unix, signature_b64 \
+                 FROM contact_requests WHERE request_id = ?1",
+                params![request_id],
+                row_to_contact_request,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    async fn delete_contact_request(
+        &self,
+        request_id: &str,
+    ) -> RosterResult<Option<PersistedContactRequest>> {
+        let conn = self.lock()?;
+        // Read-then-delete so we can return the just-removed row in a
+        // single round-trip. Both legs live in the same `conn` lock so
+        // they are atomic with respect to other writers.
+        let row = conn
+            .query_row(
+                "SELECT request_id, from_user_id, to_user_id, message, status, \
+                 created_at_unix, responded_at_unix, signature_b64 \
+                 FROM contact_requests WHERE request_id = ?1",
+                params![request_id],
+                row_to_contact_request,
+            )
+            .optional()?;
+        if row.is_some() {
+            conn.execute(
+                "DELETE FROM contact_requests WHERE request_id = ?1",
+                params![request_id],
+            )?;
+        }
+        Ok(row)
+    }
+
+    async fn list_contact_requests_for(
+        &self,
+        user_id: &str,
+    ) -> RosterResult<Vec<PersistedContactRequest>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT request_id, from_user_id, to_user_id, message, status, \
+             created_at_unix, responded_at_unix, signature_b64 \
+             FROM contact_requests WHERE to_user_id = ?1 \
+             ORDER BY created_at_unix DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![user_id], row_to_contact_request)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
 }
 
 /// Escape `%` and `_` so user input cannot be interpreted as SQL `LIKE`
@@ -569,6 +672,19 @@ fn escape_like(s: &str) -> String {
 // ---------------------------------------------------------------------------
 // Row → struct helpers.
 // ---------------------------------------------------------------------------
+
+fn row_to_contact_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedContactRequest> {
+    Ok(PersistedContactRequest {
+        request_id: row.get(0)?,
+        from_user_id: row.get(1)?,
+        to_user_id: row.get(2)?,
+        message: row.get(3)?,
+        status: row.get(4)?,
+        created_at_unix: row.get(5)?,
+        responded_at_unix: row.get(6)?,
+        signature_b64: row.get(7)?,
+    })
+}
 
 fn row_to_contact(row: &rusqlite::Row<'_>) -> rusqlite::Result<Contact> {
     let agent_ids_json: String = row.get(4)?;

@@ -709,7 +709,7 @@ async fn verify(
 }
 
 fn print_dry_run(
-    cfg: &CliConfig,
+    _cfg: &CliConfig,
     method: &'static str,
     params: &serde_json::Value,
 ) -> CliResult<()> {

@@ -14,6 +14,16 @@ Commands:
   message       Message commands
   sync          Sync (multi-device) commands
   profile       Profile / public-key / device commands
+  chat          Interactive multi-turn conversation session (slash commands + SSE)
+  contact       Contact commands (friend / blocklist / QR-invite)
+  group         Group commands (create / invite / membership / mute / nickname)
+  moments       Moments commands (朋友圈 — post / comment / reaction / follow)
+  link          Link bookmark commands (favorites / folders / search)
+  media         Media commands (blob upload / download / health)
+  moderation    Moderation commands (content / attachment policy gate)
+  presence      Presence commands (publish / subscribe)
+  bundle        Bundle commands (export / import E2E state bundle)
+  stream        Stream commands (subscribe / unsubscribe / list event streams)
   trace         Subscribe to the daemon SSE event stream
   rpc           Raw JSON-RPC fallback — call any a3chat.* method
   audit         Static / live audit of the a3chat API surface
@@ -92,6 +102,135 @@ Reports each probe's outcome as `ok` / `transient` / `fail`.
 
 > `profile` is the only wrapper surface that includes explicit input
 > validation; the daemon trusts the operator.
+
+### `chat` — interactive conversation session
+
+```bash
+a3chat chat --conversation-id dm:alice:bob         # join an existing DM
+a3chat chat --to <user_id>                         # open or create the DM
+a3chat chat --history 100                          # replay 100 msgs on open
+a3chat chat --idle-timeout-secs 60                 # auto-quit after 60s idle
+a3chat chat --dry-run                              # echo resolved options, no RPC
+```
+
+Inside the session, stdin is read line-by-line; non-empty lines
+become `a3chat.chat.message.send`. Lines beginning with `/` are
+slash-commands:
+
+| Slash command            | Effect                                          |
+|--------------------------|-------------------------------------------------|
+| `/help`                  | print the in-session command list               |
+| `/quit`, `/exit`         | leave the session                               |
+| `/history [n]`           | re-play the last `n` (default 50) messages     |
+| `/recall <msg-id>`       | recall a message you sent                       |
+| `/ack <msg-id>`          | acknowledge a received message                  |
+| `/edit <msg-id> <txt>`   | edit a message body                             |
+| `/delete <msg-id>`       | delete a message locally                        |
+| `/search <needle>`       | search the conversation                         |
+| `/typing`                | emit a typing indicator to the peer             |
+| `/status`                | print session stats (msgs sent/received)        |
+
+### `contact`
+
+| Subcommand                              | RPC method                              | Notes |
+|-----------------------------------------|-----------------------------------------|-------|
+| `contact list`                          | `a3chat.contact.list`                   | — |
+| `contact add --to <id> --message "…"`   | `a3chat.contact.add_request`            | message ≤ 256 chars |
+| `contact add-direct --user-id … --display-name …` | `a3chat.contact.add`            | — |
+| `contact accept --request-id …`         | `a3chat.contact.accept_request`         | — |
+| `contact block --user-id …`             | `a3chat.contact.block`                  | — |
+| `contact unblock --user-id …`           | `a3chat.contact.unblock`                | — |
+| `contact remove --user-id …`            | `a3chat.contact.remove`                 | — |
+| `contact get --user-id …`               | `a3chat.contact.get`                    | — |
+| `contact search --query …`              | `a3chat.contact.search`                 | — |
+| `contact toggle-favorite --user-id …`   | `a3chat.contact.toggle_favorite`        | — |
+| `contact update --user-id … --display-name …` | `a3chat.contact.update`          | — |
+| `contact qr-invite`                     | `a3chat.contact.qr_invite`              | returns base64 payload |
+| `contact qr-invite-render [--output qr.svg] [--caption "…"]` | `a3chat.contact.qr_invite` | writes SVG to `--output` |
+
+### `group`
+
+29 subcommands covering lifecycle, membership, invitation, mute,
+nickname, and mention-parsing. Full dispatch in
+`crates/a3chat-cli/src/cmd/group.rs`. Examples:
+
+```bash
+a3chat group create --name team-a --description "core team" --is-private=true
+a3chat group invite --conversation-id <cid> --invitee-id <user> --group-name team-a --inviter-name alice
+a3chat group members --conversation-id <cid>
+a3chat group role --conversation-id <cid> --user-id <u> --role admin
+a3chat group mute-member --conversation-id <cid> --user-id <u> --indefinite
+a3chat group mention-parse --body "ping @alice" --nicknames "<alice_uid>:alice"
+```
+
+### `moments`
+
+15 subcommands for the 朋友圈 surface:
+
+```bash
+a3chat moments node-info
+a3chat moments post --text "Hello world" --visibility public
+a3chat moments posts-by --user-id <u>
+a3chat moments timeline --limit 50
+a3chat moments comment --post-id <p> --text "nice!"
+a3chat moments react --target-id <p> --reaction-type like
+a3chat moments follow --who <u>
+a3chat moments verify-post --post-id <p>
+```
+
+### `link`
+
+14 bookmark / favorite subcommands:
+
+```bash
+a3chat link add https://example.com --title "Example" --tags rust,docs
+a3chat link list --folder work --limit 100
+a3chat link search "rust async"
+a3chat link pin <bookmark_id>
+a3chat link touch <bookmark_id>
+```
+
+### `media`
+
+```bash
+a3chat media health
+TOKEN=$(a3chat media upload-init --mime image/png | jq -r .token)
+a3chat media upload-chunk --token "$TOKEN" --file chunk1.bin
+a3chat media upload-finalize --token "$TOKEN" --filename photo.png
+a3chat media download-get --hash <blake3_hex> --out ./photo.png
+```
+
+### `moderation`
+
+```bash
+a3chat moderation check-content --text "<utf-8 text>"
+a3chat moderation check-attachment --hash <blake3_hex>
+a3chat moderation list-blocked
+a3chat moderation set-deny-default --on=true
+a3chat moderation stats
+```
+
+### `presence`
+
+```bash
+a3chat presence publish --status online --message "at desk"
+a3chat presence subscribe --peers <uid1>,<uid2>
+```
+
+### `bundle`
+
+```bash
+a3chat bundle export --out backup.a3b          # AEAD-encrypted state bundle
+a3chat bundle import --in backup.a3b           # decrypt + merge on this node
+```
+
+### `stream`
+
+```bash
+a3chat stream subscribe --topic "*"            # acquire a handle
+a3chat stream list                             # show every active subscription
+a3chat stream unsubscribe --handle-id <id>     # release
+```
 
 ### `audit`
 Pure offline report. Outputs:

@@ -25,6 +25,7 @@ a3chat-rpc             = { workspace = true }
 
 # Async runtime
 tokio                  = { workspace = true, features = ["full"] }
+tokio-stream            = { workspace = true }
 async-trait            = { workspace = true }
 futures                = { workspace = true }
 
