@@ -95,7 +95,7 @@ pub use client::{
 pub use config::{MailboxConfig, MailboxServerInfo, StorageBackend};
 pub use error::{MailboxError, MailboxErrorClass, MailboxResult};
 pub use policy::{QuotaCheck, QuotaDecision, QuotaPolicy, SizePolicy, TtlPolicy};
-pub use rate_limit::{RateLimitConfig, RateLimitRegistry, RateLimitResult};
+pub use rate_limit::{RateLimitConfig, RateLimitRegistry, RateLimitResult, TrustedProxy};
 pub use server::{
     ErrorBody, MailboxServer, MailboxServerHandle, ServerPolicy, ServerState,
 };

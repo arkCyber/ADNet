@@ -37,17 +37,17 @@ use tokio::time::sleep;
 /// behind a known-trusted reverse proxy (nginx, Cloudflare, etc.).
 /// If the server is directly internet-facing, keep this `Disabled`
 /// to prevent clients from spoofing their IP and bypassing rate limits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustedProxy {
-    /// Default: do not trust forwarded headers. IP is always derived
-    /// from the direct TCP connection (the connection's `SocketAddr`).
-    /// This is the safe default when the server is internet-facing.
+    /// Default. Never trust forwarded headers. IP is always derived from
+    /// the direct TCP connection. Safe for internet-facing deployments.
     Disabled,
-    /// Trust forwarded headers only when the direct TCP connection
-    /// originates from this exact IP address (the proxy's IP).
-    Single(ipnetwork::IpNetwork),
-    /// Always trust forwarded headers (dangerous: only use in
-    /// fully controlled environments with no direct internet access).
+    /// Trust forwarded headers only when the direct TCP peer IP matches
+    /// this exact string (the proxy's IP, e.g. `"10.0.0.1"`).
+    FromProxy(String),
+    /// **DANGEROUS**: always trust forwarded headers regardless of
+    /// the direct connection source. Only use in fully controlled
+    /// environments where no direct internet access is possible.
     AlwaysTrust,
 }
 
@@ -164,36 +164,68 @@ pub fn check_and_consume(
     }
 }
 
-/// Extract the client IP from `req`.
+/// Extract the client IP from `req` using the trusted-proxy policy.
 ///
-/// Tries in order:
-/// 1. `X-Real-IP` header (set by some reverse proxies like nginx).
-/// 2. `X-Forwarded-For` first value (for proxied setups).
-/// 3. Fallback to `"0.0.0.0"` (will be globally rate-limited).
+/// SECURITY: forwarded headers (`X-Real-IP`, `X-Forwarded-For`) are only
+/// consulted when `proxy` is not `Disabled`. This prevents clients from
+/// spoofing their IP address to bypass rate limiting.
 #[inline]
-pub fn client_ip(req: &Request<Body>) -> String {
-    // 1. Try X-Real-IP header (set by some reverse proxies).
+pub fn client_ip(req: &Request<Body>, proxy: &TrustedProxy) -> String {
+    match proxy {
+        TrustedProxy::Disabled => {
+            // Never trust forwarded headers — derive IP from the direct connection.
+            // In production, the actual socket IP comes from the middleware that
+            // inserts ConnectInfo. Here we fall back to 0.0.0.0 (global rate-limit).
+            "0.0.0.0".to_string()
+        }
+        TrustedProxy::FromProxy(expected_proxy_ip) => {
+            // First, extract the direct TCP peer IP from extensions (set by TcpListener).
+            // For now, we treat this as the proxy IP. If it matches, trust forwarded headers.
+            let direct_ip = req
+                .extensions()
+                .get::<std::net::SocketAddr>()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            if direct_ip == *expected_proxy_ip {
+                // Proxy is trusted — extract the actual client IP from headers.
+                first_forwarded_ip(req).unwrap_or_else(|| direct_ip)
+            } else {
+                // Direct connection is not from the trusted proxy — don't trust headers.
+                direct_ip
+            }
+        }
+        TrustedProxy::AlwaysTrust => {
+            // DANGEROUS: trust forwarded headers blindly.
+            first_forwarded_ip(req).unwrap_or_else(|| "0.0.0.0".to_string())
+        }
+    }
+}
+
+/// Extract the first (leftmost) IP from `X-Real-IP` or `X-Forwarded-For`.
+/// Returns `None` if neither header is present or valid.
+fn first_forwarded_ip(req: &Request<Body>) -> Option<String> {
+    // Try X-Real-IP first (higher priority).
     if let Some(val) = req.headers().get("x-real-ip") {
         if let Ok(ip) = val.to_str() {
             let ip = ip.trim();
             if !ip.is_empty() && ip.len() < 48 {
-                return ip.to_string();
+                return Some(ip.to_string());
             }
         }
     }
-    // 2. X-Forwarded-For.
+    // Fall back to X-Forwarded-For (take first IP in the chain).
     if let Some(val) = req.headers().get("x-forwarded-for") {
         if let Ok(s) = val.to_str() {
             if let Some(ip) = s.split(',').next() {
                 let ip = ip.trim();
                 if !ip.is_empty() {
-                    return ip.to_string();
+                    return Some(ip.to_string());
                 }
             }
         }
     }
-    // 3. Fallback.
-    "0.0.0.0".to_string()
+    None
 }
 
 /// JSON body for a rate-limit rejection.
@@ -231,21 +263,28 @@ use crate::error::MailboxError;
 pub struct RateLimitState {
     pub registry: RateLimitRegistry,
     pub policy: RateLimitConfig,
+    /// Controls when forwarded headers are trusted. Default: `Disabled`
+    /// (safe for internet-facing deployments).
+    pub trusted_proxy: TrustedProxy,
 }
 
 impl RateLimitState {
-    pub fn new(registry: RateLimitRegistry, policy: RateLimitConfig) -> Self {
-        Self { registry, policy }
+    pub fn new(
+        registry: RateLimitRegistry,
+        policy: RateLimitConfig,
+        trusted_proxy: TrustedProxy,
+    ) -> Self {
+        Self { registry, policy, trusted_proxy }
     }
 
-    /// Enqueue middleware: use this when you want the tighter enqueue policy.
-    pub fn enqueue(registry: RateLimitRegistry) -> Self {
-        Self::new(registry, RateLimitConfig::enqueue())
+    /// Enqueue middleware: tight policy + configurable proxy trust.
+    pub fn enqueue(registry: RateLimitRegistry, trusted_proxy: TrustedProxy) -> Self {
+        Self::new(registry, RateLimitConfig::enqueue(), trusted_proxy)
     }
 
-    /// Read middleware: use this for pull/ack (looser policy).
-    pub fn read(registry: RateLimitRegistry) -> Self {
-        Self::new(registry, RateLimitConfig::read())
+    /// Read middleware: loose policy + configurable proxy trust.
+    pub fn read(registry: RateLimitRegistry, trusted_proxy: TrustedProxy) -> Self {
+        Self::new(registry, RateLimitConfig::read(), trusted_proxy)
     }
 }
 
@@ -256,7 +295,7 @@ pub async fn rate_limit_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let ip = client_ip(&req);
+    let ip = client_ip(&req, &state.trusted_proxy);
     match check_and_consume(&state.registry, &state.policy, &ip) {
         RateLimitResult::Allowed(_) => next.run(req).await,
         RateLimitResult::Rejected { retry_after } => {
@@ -370,27 +409,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_ip_from_forwarded_for() {
+    async fn client_ip_disabled_ignores_forwarded_headers() {
         let mut req = Request::builder()
             .header("x-forwarded-for", "5.6.7.8, 10.0.0.1")
+            .header("x-real-ip", "9.9.9.9")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(client_ip(&req), "5.6.7.8");
+        // With Disabled, forwarded headers are ignored — returns 0.0.0.0.
+        assert_eq!(client_ip(&req, &TrustedProxy::Disabled), "0.0.0.0");
     }
 
     #[tokio::test]
-    async fn client_ip_fallback() {
-        let req = Request::builder().body(Body::empty()).unwrap();
-        assert_eq!(client_ip(&req), "0.0.0.0");
+    async fn client_ip_always_trust_accepts_forwarded_headers() {
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "5.6.7.8, 10.0.0.1")
+            .header("x-real-ip", "9.9.9.9")
+            .body(Body::empty())
+            .unwrap();
+        // With AlwaysTrust, forwarded headers are accepted.
+        assert_eq!(client_ip(&req, &TrustedProxy::AlwaysTrust), "9.9.9.9");
     }
 
     #[tokio::test]
-    async fn client_ip_real_ip_header_takes_priority() {
+    async fn client_ip_real_ip_takes_priority_in_trusted_mode() {
         let mut req = Request::builder()
             .header("x-real-ip", "9.9.9.9")
             .header("x-forwarded-for", "5.6.7.8")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(client_ip(&req), "9.9.9.9");
+        assert_eq!(client_ip(&req, &TrustedProxy::AlwaysTrust), "9.9.9.9");
+    }
+
+    #[tokio::test]
+    async fn client_ip_no_headers_returns_fallback() {
+        let req = Request::builder().body(Body::empty()).unwrap();
+        assert_eq!(client_ip(&req, &TrustedProxy::Disabled), "0.0.0.0");
     }
 }

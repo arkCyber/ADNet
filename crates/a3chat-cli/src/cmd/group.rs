@@ -41,6 +41,9 @@ pub enum GroupCmd {
     Join {
         #[arg(long)]
         invitation_id: String,
+        /// Sync ticket from the invitation (Phase 5c: for P2P sync).
+        #[arg(long)]
+        sync_ticket: Option<String>,
     },
     /// Add a member to a group (admin-only).
     AddMember {
@@ -220,7 +223,7 @@ pub async fn run(
             group_name,
             inviter_name,
         } => invite(cfg, client, conversation_id, invitee_id, group_name, inviter_name).await,
-        GroupCmd::Join { invitation_id } => join(cfg, client, invitation_id).await,
+        GroupCmd::Join { invitation_id, sync_ticket } => join(cfg, client, invitation_id, sync_ticket).await,
         GroupCmd::AddMember {
             conversation_id,
             user_id,
@@ -365,12 +368,17 @@ async fn join(
     cfg: &CliConfig,
     client: &HttpRpcClient,
     invitation_id: String,
+    sync_ticket: Option<String>,
 ) -> CliResult<()> {
     validate_required("invitation-id", &invitation_id)?;
+    let mut payload = serde_json::json!({ "invitation_id": invitation_id });
+    if let Some(ref ticket) = sync_ticket {
+        payload["sync_ticket"] = serde_json::json!(ticket);
+    }
     let v = client
         .call_raw(
             A3chatRpcMethod::GROUP_JOIN,
-            serde_json::json!({ "invitation_id": invitation_id }),
+            payload,
         )
         .await?;
     output::print(cfg.effective_output(), &v)

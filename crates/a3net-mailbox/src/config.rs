@@ -39,6 +39,11 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// window, it falls back to the mailbox `enqueue`.
 pub const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum allowed signature age in seconds. Even if an operator configures
+/// a larger value, it is capped here to prevent accidentally disabling replay
+/// protection entirely. Default: 3600 (1 hour).
+pub const MAX_SIGNATURE_AGE_SECS: u64 = 3600;
+
 /// Storage backend choice.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -76,6 +81,10 @@ pub struct MailboxConfig {
     pub max_total_bytes_per_user: u64,
     /// Default message lifetime. Default `30 days`.
     pub default_ttl: Duration,
+    /// Maximum age of a sender signature (EIP-712 timestamp binding) in seconds.
+    /// Signatures older than this are rejected. Capped at `MAX_SIGNATURE_AGE_SECS`
+    /// (1 hour) even if configured higher. Default: 300 (5 minutes).
+    pub max_signature_age_secs: u64,
     /// Whether to require sender signature on `enqueue`. Default `true`.
     pub require_sender_signature: bool,
     /// HTTP client / upstream timeout. Default `5s`.
@@ -97,6 +106,7 @@ impl Default for MailboxConfig {
             max_inflight_per_user: DEFAULT_MAX_INFLIGHT_PER_USER,
             max_total_bytes_per_user: DEFAULT_MAX_TOTAL_BYTES_PER_USER,
             default_ttl: DEFAULT_TTL,
+            max_signature_age_secs: 300,
             require_sender_signature: true,
             upstream_timeout: DEFAULT_DIAL_TIMEOUT,
             base_url: None,

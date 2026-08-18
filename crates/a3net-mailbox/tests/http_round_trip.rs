@@ -739,3 +739,298 @@ async fn sqlite_recipient_isolation() {
 
     handle.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Security & edge-case HTTP integration tests (post-audit fixes)
+// ---------------------------------------------------------------------------
+
+/// H-2 fix: far-future timestamp must NOT fall through to no-expiry path.
+#[tokio::test]
+async fn enqueue_rejects_far_future_timestamp() {
+    let state = ServerState::new(
+        Arc::new(MemoryStore::new()),
+        ServerPolicy::default(),
+    );
+    let mut handle = MailboxServer::start_with_state("127.0.0.1", 0, state)
+        .await
+        .expect("server should bind");
+
+    let alice_w = alice();
+    let alice_id = alice_w.public().address().to_checksum();
+    let bob_w = alice();
+    let bob = bob_w.public().address().to_checksum();
+    let msg_id = "550e8400-e29b-41d4-a716-446655440001";
+
+    // Sign with a timestamp 10 years in the future.
+    let far_future = chrono::Utc::now().timestamp() + 10 * 365 * 24 * 3600;
+    let msg = canonical_enqueue_with_timestamp(&bob, msg_id, b"hello", far_future);
+    let digest = digest_of(&msg);
+    let sig = alice_w.sign_personal(&digest).unwrap();
+    let sig_bytes = sig.to_compact();
+    let req = EnqueueRequest {
+        sender_id: alice_id,
+        msg_id: msg_id.to_string(),
+        ciphertext_b64: base64::engine::general_purpose::STANDARD.encode(b"hello"),
+        sender_signature_b64: base64::engine::general_purpose::STANDARD.encode(sig_bytes),
+        ttl_secs: Some(3600),
+        timestamp: Some(far_future),
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/inbox/{}", handle.base_url, bob);
+    let resp = client.post(&url).json(&req).send().await.expect("request");
+    assert!(
+        !resp.status().is_success(),
+        "far-future timestamp should be rejected, got {}",
+        resp.status()
+    );
+    handle.shutdown();
+}
+
+/// H-2 fix: stale timestamp is rejected with correct error code.
+#[tokio::test]
+async fn enqueue_rejects_stale_timestamp() {
+    let state = ServerState::new(
+        Arc::new(MemoryStore::new()),
+        ServerPolicy::default(),
+    );
+    let mut handle = MailboxServer::start_with_state("127.0.0.1", 0, state)
+        .await
+        .expect("server should bind");
+
+    let alice_w = alice();
+    let alice_id = alice_w.public().address().to_checksum();
+    let bob_w = alice();
+    let bob = bob_w.public().address().to_checksum();
+    let msg_id = "550e8400-e29b-41d4-a716-446655440002";
+
+    // Sign with a timestamp 10 minutes ago (stale for 5-min max age).
+    let stale = chrono::Utc::now().timestamp() - 600;
+    let msg = canonical_enqueue_with_timestamp(&bob, msg_id, b"hello", stale);
+    let digest = digest_of(&msg);
+    let sig = alice_w.sign_personal(&digest).unwrap();
+    let sig_bytes = sig.to_compact();
+    let req = EnqueueRequest {
+        sender_id: alice_id,
+        msg_id: msg_id.to_string(),
+        ciphertext_b64: base64::engine::general_purpose::STANDARD.encode(b"hello"),
+        sender_signature_b64: base64::engine::general_purpose::STANDARD.encode(sig_bytes),
+        ttl_secs: Some(3600),
+        timestamp: Some(stale),
+    };
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/inbox/{}", handle.base_url, bob);
+    let resp = client.post(&url).json(&req).send().await.expect("request");
+    assert!(!resp.status().is_success(), "stale timestamp should be rejected");
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("stale_signature"), "error body: {body}");
+    handle.shutdown();
+}
+
+/// SECURITY fix: duplicate msg_ids in ack are rejected with 400.
+/// A well-formed client never sends duplicates. Accepting them would let a
+/// client double-ack a message (if the store doesn't dedup internally),
+/// bypassing the at-most-once delivery guarantee.
+#[tokio::test]
+async fn ack_rejects_duplicate_msg_ids() {
+    let state = ServerState::new(
+        Arc::new(MemoryStore::new()),
+        ServerPolicy::default(),
+    );
+    let mut handle = MailboxServer::start_with_state("127.0.0.1", 0, state)
+        .await
+        .expect("server should bind");
+
+    let bob_w = alice();
+    let bob = bob_w.public().address().to_checksum();
+    let msg_id = "a".repeat(64);
+
+    // Enqueue one message for Bob.
+    let (req, _) = envelope_from(&bob_w, &bob, &bob, &msg_id, b"test");
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/inbox/{}", handle.base_url, bob);
+    let resp = client.post(&url).json(&req).send().await.expect("enqueue");
+    assert_eq!(resp.status(), 202);
+
+    // Ack with the same msg_id twice. Server must reject duplicates.
+    let ack_msg = canonical_ack(&bob, &[msg_id.clone(), msg_id.clone()]);
+    let digest = digest_of(&ack_msg);
+    let sig = bob_w.sign_personal(&digest).unwrap();
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_compact());
+    let ack_req = AckRequest {
+        recipient_id: bob.clone(),
+        msg_ids: vec![msg_id.clone(), msg_id.clone()],
+        signature_b64: sig_b64,
+    };
+    let ack_url = format!("{}/v1/inbox/{}/ack", handle.base_url, bob);
+    let resp = client.post(&ack_url).json(&ack_req).send().await.expect("ack");
+    assert!(
+        resp.status() == 400 || resp.status() == 422,
+        "ack with duplicates should be rejected (got {}), indicating malformed request",
+        resp.status()
+    );
+    handle.shutdown();
+}
+
+/// Positive case: ack with distinct msg_ids succeeds.
+#[tokio::test]
+async fn ack_with_distinct_msg_ids_succeeds() {
+    let state = ServerState::new(
+        Arc::new(MemoryStore::new()),
+        ServerPolicy::default(),
+    );
+    let mut handle = MailboxServer::start_with_state("127.0.0.1", 0, state)
+        .await
+        .expect("server should bind");
+
+    let bob_w = alice();
+    let bob = bob_w.public().address().to_checksum();
+    let msg_id_a = "a".repeat(64);
+    let msg_id_b = "b".repeat(64);
+
+    // Enqueue two messages for Bob.
+    for msg_id in [&msg_id_a, &msg_id_b] {
+        let (req, _) = envelope_from(&bob_w, &bob, &bob, msg_id, b"test");
+        let client = reqwest::Client::new();
+        let url = format!("{}/v1/inbox/{}", handle.base_url, bob);
+        let resp = client.post(&url).json(&req).send().await.expect("enqueue");
+        assert_eq!(resp.status(), 202);
+    }
+
+    // Ack both messages.
+    let ack_msg = canonical_ack(&bob, &[msg_id_a.clone(), msg_id_b.clone()]);
+    let digest = digest_of(&ack_msg);
+    let sig = bob_w.sign_personal(&digest).unwrap();
+    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_compact());
+    let ack_req = AckRequest {
+        recipient_id: bob.clone(),
+        msg_ids: vec![msg_id_a, msg_id_b],
+        signature_b64: sig_b64,
+    };
+    let ack_url = format!("{}/v1/inbox/{}/ack", handle.base_url, bob);
+    let resp = client.post(&ack_url).json(&ack_req).send().await.expect("ack");
+    assert_eq!(resp.status(), 200, "ack with distinct msg_ids should succeed");
+    handle.shutdown();
+}
+
+/// StaleSignature / InvalidTimestamp error codes and HTTP status are stable.
+#[tokio::test]
+fn new_error_codes_are_stable() {
+    use a3net_mailbox::MailboxError;
+
+    let e = MailboxError::StaleSignature { age_secs: 600, max_age_secs: 300 };
+    assert_eq!(e.error_code(), "stale_signature");
+    assert_eq!(e.http_status(), axum::http::StatusCode::UNAUTHORIZED);
+
+    let e = MailboxError::InvalidTimestamp;
+    assert_eq!(e.error_code(), "invalid_timestamp");
+    assert_eq!(e.http_status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+/// RetentionPolicy: unknown recipient gets default TTL.
+#[tokio::test]
+fn retention_unknown_recipient_gets_default() {
+    use a3net_mailbox::policy::RetentionPolicy;
+
+    let rp = RetentionPolicy::default();
+    let default = Duration::from_secs(30 * 24 * 60 * 60);
+    let ttl = rp.effective_ttl("0xUNKNOWN0000000000000000000000000000000001", default);
+    assert_eq!(ttl, default);
+}
+
+/// RetentionPolicy: override clamped to max_ttl_secs.
+#[tokio::test]
+fn retention_override_clamped_to_max() {
+    use a3net_mailbox::policy::{RecipientTtlOverride, RetentionPolicy};
+
+    let mut rp = RetentionPolicy::new(60, 3600); // 1min min, 1hr max
+    rp.set_recipient_ttl(RecipientTtlOverride {
+        recipient: "0xAAA0000000000000000000000000000000000001".to_string(),
+        ttl_secs: 99 * 3600,
+        expires_at_unix: None,
+        source: "test".to_string(),
+    });
+    let ttl = rp.effective_ttl("0xAAA0000000000000000000000000000000000001", Duration::from_secs(3600));
+    assert_eq!(ttl, Duration::from_secs(3600), "should be clamped to max 1 hour");
+}
+
+/// RetentionPolicy: override clamped to min_ttl_secs.
+#[tokio::test]
+fn retention_override_clamped_to_min() {
+    use a3net_mailbox::policy::{RecipientTtlOverride, RetentionPolicy};
+
+    let mut rp = RetentionPolicy::new(3600, 86400); // 1hr min, 1day max
+    rp.set_recipient_ttl(RecipientTtlOverride {
+        recipient: "0xAAA0000000000000000000000000000000000001".to_string(),
+        ttl_secs: 30,
+        expires_at_unix: None,
+        source: "test".to_string(),
+    });
+    let ttl = rp.effective_ttl("0xAAA0000000000000000000000000000000000001", Duration::from_secs(3600));
+    assert_eq!(ttl, Duration::from_secs(3600), "should be clamped to min 1 hour");
+}
+
+/// BillingPolicy: try_grant_quota returns 0 when no pledge (free tier).
+#[test]
+fn billing_no_pledge_is_free_tier() {
+    use a3net_mailbox::billing::BillingPolicy;
+
+    let p = BillingPolicy::default();
+    let bonus = p.try_grant_quota(None, "0xAAA", chrono::Utc::now().timestamp());
+    assert_eq!(bonus, 0);
+}
+
+/// BillingPolicy: try_grant_quota returns 0 on invalid pledge (non-fatal).
+#[test]
+fn billing_invalid_pledge_is_non_fatal() {
+    use a3net_mailbox::billing::BillingPolicy;
+
+    let p = BillingPolicy::default();
+    let bonus = p.try_grant_quota(Some("totally-invalid-url"), "0xAAA", chrono::Utc::now().timestamp());
+    assert_eq!(bonus, 0, "invalid pledge should return 0, not panic");
+}
+
+/// TrustedProxy: default is Disabled (safe for internet-facing deployments).
+#[test]
+fn trusted_proxy_default_is_disabled() {
+    use a3net_mailbox::rate_limit::TrustedProxy;
+    assert_eq!(TrustedProxy::default(), TrustedProxy::Disabled);
+}
+
+/// RateLimitConfig: enqueue policy is tighter than read policy.
+#[test]
+fn rate_limit_policies_are_tiered() {
+    use a3net_mailbox::rate_limit::RateLimitConfig;
+    let enq = RateLimitConfig::enqueue();
+    let read = RateLimitConfig::read();
+    assert!(enq.capacity < read.capacity, "enqueue capacity must be tighter");
+    assert!(enq.refill_per_sec <= read.refill_per_sec);
+}
+
+/// RateLimitRegistry: buckets are created lazily via check_and_consume.
+#[test]
+fn rate_limit_bucket_created_lazily() {
+    use a3net_mailbox::rate_limit::{check_and_consume, RateLimitConfig, RateLimitRegistry, RateLimitResult};
+
+    let registry = RateLimitRegistry::new();
+    let policy = RateLimitConfig::enqueue();
+    // First call should create a bucket and succeed.
+    let r1 = check_and_consume(&registry, &policy, "1.2.3.4");
+    assert!(matches!(r1, RateLimitResult::Allowed(_)));
+    // Second call should also succeed (token refilled).
+    let r2 = check_and_consume(&registry, &policy, "1.2.3.4");
+    assert!(matches!(r2, RateLimitResult::Allowed(_)));
+}
+
+/// Signature max age is bounded by MAX_SIGNATURE_AGE_SECS in config.
+#[test]
+fn signature_max_age_uses_config_cap() {
+    use a3net_mailbox::config::{MailboxConfig, MAX_SIGNATURE_AGE_SECS};
+
+    assert!(MAX_SIGNATURE_AGE_SECS > 0);
+    assert!(MAX_SIGNATURE_AGE_SECS <= 3600);
+    let cfg = MailboxConfig::default();
+    assert!(cfg.max_signature_age_secs <= MAX_SIGNATURE_AGE_SECS as u64);
+}
+

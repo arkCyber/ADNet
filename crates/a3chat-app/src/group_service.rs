@@ -226,6 +226,13 @@ impl GroupService {
             AppError::NotInitialised("GroupService iroh_docs not set".into())
         })?;
 
+        // Ensure the doc is open before sharing a ticket.
+        // If it doesn't exist, create it. If it exists, this is a no-op.
+        docs_chat
+            .open_conversation(conversation_id.as_str())
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to open doc: {e}")))?;
+
         let ticket = docs_chat
             .share(conversation_id.as_str(), iroh_docs::api::protocol::ShareMode::Write)
             .await
@@ -245,7 +252,11 @@ impl GroupService {
     /// SECURITY: Validates the ticket format before use. The ticket itself
     /// is scoped to a specific namespace (doc ID) which provides access control.
     #[cfg(feature = "iroh")]
-    pub async fn join_sync(&self, ticket_b64: &str) -> AppResult<ConversationId> {
+    pub async fn join_sync(
+        &self,
+        conversation_id: &ConversationId,
+        ticket_b64: &str,
+    ) -> AppResult<()> {
         use base64::Engine;
 
         // Input validation - prevent DoS via oversized tickets
@@ -268,20 +279,40 @@ impl GroupService {
         let ticket: iroh_docs::DocTicket = serde_json::from_slice(&json)
             .map_err(|e| AppError::Domain(format!("invalid ticket format: {e}")))?;
 
-        // SECURITY: Extract namespace from ticket - this IS the conversation_id.
-        // The namespace is the unique identifier for the iroh-docs document.
-        // A ticket can only open its own namespace, providing inherent access control.
-        let namespace = ticket.namespace();
-        let conversation_id = ConversationId::from(namespace.to_string());
+        // SECURITY: Validate ticket by importing it first. The import returns a Doc
+        // whose ID is the authoritative namespace. We then open using that namespace.
+        // This prevents key mismatch if caller-supplied conversation_id differs from
+        // the namespace embedded in the ticket.
+        let namespace = {
+            let temp_ticket = ticket.clone();
+            let doc = docs_chat.api().import(temp_ticket).await
+                .map_err(|e| AppError::Domain(format!("invalid ticket (cannot import): {e}")))?;
+            doc.id()
+        };
+        let ticket_cid = ConversationId::from(namespace.to_string());
 
-        // Open the doc with the ticket
-        docs_chat
-            .open_with_ticket(conversation_id.as_str(), ticket)
+        // Warn if caller-supplied conversation_id differs from ticket's namespace
+        let caller_cid = conversation_id.as_str();
+        if caller_cid != ticket_cid.as_str() {
+            tracing::warn!(
+                caller_cid = %caller_cid,
+                ticket_cid = %ticket_cid,
+                "join_sync: caller cid mismatch, using ticket namespace"
+            );
+        }
+
+        // Open the doc with the ticket using the authoritative namespace.
+        let handle = docs_chat
+            .open_with_ticket(ticket_cid.as_str(), ticket)
             .await
             .map_err(|e| AppError::Internal(format!("failed to open sync doc: {e}")))?;
 
-        tracing::info!(conv = %conversation_id, "joined group sync network");
-        Ok(conversation_id)
+        tracing::info!(
+            conv = %ticket_cid,
+            namespace = %handle.namespace,
+            "joined group sync network"
+        );
+        Ok(())
     }
 
     /// `a3chat.group.create` — owner creates a group conversation.
@@ -371,7 +402,7 @@ impl GroupService {
         // not be in group without sync capability
         #[cfg(feature = "iroh")]
         if let Some(ticket) = sync_ticket {
-            self.join_sync(ticket).await?;
+            self.join_sync(conversation_id, ticket).await?;
         }
 
         self.bus
@@ -1166,6 +1197,15 @@ impl GroupService {
             .hub_arc()
             .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
 
+        // Verify target is a member
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+        if !members.iter().any(|m| m.user_id == target.as_str()) {
+            return Err(AppError::Domain("target is not a member".into()));
+        }
+
         let until = chrono::Utc::now() + chrono::Duration::seconds(duration_secs);
         hub.set_temp_admin(conversation_id.as_str(), target.as_str(), until)
             .await
@@ -1197,6 +1237,15 @@ impl GroupService {
         let hub = self
             .hub_arc()
             .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        // Verify target is a member
+        let members = hub
+            .get_group_members(conversation_id.as_str())
+            .await
+            .map_err(AppError::from)?;
+        if !members.iter().any(|m| m.user_id == target.as_str()) {
+            return Err(AppError::Domain("target is not a member".into()));
+        }
 
         hub.clear_temp_admin(conversation_id.as_str(), target.as_str())
             .await

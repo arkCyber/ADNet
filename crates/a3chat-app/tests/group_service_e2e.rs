@@ -856,3 +856,165 @@ async fn member_cannot_perform_admin_actions() {
         .unwrap_err();
     assert!(matches!(err, a3chat_app::error::AppError::Domain(_)));
 }
+
+// ── Edge Cases ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn temp_admin_grant_to_non_member_fails() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    // Carol is NOT a member
+
+    // Try to grant temp admin to non-member (should fail with Domain error)
+    let err = svc
+        .grant_temp_admin(&ids.alice(), &cid, &ids.carol(), 3600)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, a3chat_app::error::AppError::Domain(_)));
+}
+
+#[tokio::test]
+async fn revoke_temp_admin_of_non_member_fails() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    // Carol is NOT a member
+
+    // Try to revoke temp admin from non-member (should fail with Domain error)
+    let err = svc
+        .revoke_temp_admin(&ids.alice(), &cid, &ids.carol())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, a3chat_app::error::AppError::Domain(_)));
+}
+
+#[tokio::test]
+async fn temp_admin_cannot_be_granted_by_member() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Bob (member) tries to grant temp admin to Carol (also member)
+    // This should fail because Bob is not an admin
+    let err = svc
+        .grant_temp_admin(&ids.bob(), &cid, &ids.carol(), 3600)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, a3chat_app::error::AppError::Domain(_)));
+}
+
+#[tokio::test]
+async fn list_members_shows_updated_presence() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Initially both members are offline
+    let members = svc.list_members(&cid).await.unwrap();
+    for m in &members {
+        assert!(!m.is_online, "Member {} should be offline initially", m.user_id);
+    }
+
+    // Touch bob's presence
+    svc.touch_member(&cid, &ids.bob(), true).await.unwrap();
+
+    // Verify bob is now online
+    let members = svc.list_members(&cid).await.unwrap();
+    let bob = members.iter().find(|m| m.user_id == ids.bob()).unwrap();
+    assert!(bob.is_online, "Bob should be online after touch");
+    assert!(bob.last_seen.is_some(), "Bob should have last_seen set");
+
+    // Touch bob as offline
+    svc.touch_member(&cid, &ids.bob(), false).await.unwrap();
+
+    // Verify bob is now offline
+    let members = svc.list_members(&cid).await.unwrap();
+    let bob = members.iter().find(|m| m.user_id == ids.bob()).unwrap();
+    assert!(!bob.is_online, "Bob should be offline after going offline");
+}
+
+#[tokio::test]
+async fn temp_admin_expired_cannot_perform_admin_actions() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Grant temp admin for 1 second
+    svc.grant_temp_admin(&ids.alice(), &cid, &ids.bob(), 1)
+        .await
+        .unwrap();
+
+    // Immediately bob can perform admin action
+    svc.set_announcement(&ids.bob(), &cid, "Temp admin".into())
+        .await
+        .unwrap();
+
+    // Wait for temp admin to expire (1 second + buffer)
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Bob can no longer perform admin action
+    let err = svc
+        .set_announcement(&ids.bob(), &cid, "Try again".into())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, a3chat_app::error::AppError::Domain(_)));
+}

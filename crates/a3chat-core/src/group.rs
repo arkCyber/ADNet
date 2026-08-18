@@ -189,6 +189,11 @@ pub struct GroupInvitation {
     pub status: InvitationStatus,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Phase 5c: iroh-docs sync ticket for P2P group message sync.
+    /// Base64-encoded DocTicket that allows the invitee to join
+    /// the group's P2P sync network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_ticket: Option<String>,
 }
 
 impl GroupInvitation {

@@ -71,6 +71,7 @@ impl From<InvitationRecord> for GroupInvitation {
                 .unwrap_or_else(chrono::Utc::now),
             expires_at: chrono::DateTime::from_timestamp(r.expires_at_unix, 0)
                 .unwrap_or_else(chrono::Utc::now),
+            sync_ticket: r.sync_ticket,
         }
     }
 }
@@ -435,6 +436,47 @@ mod tests {
         };
         let inv: GroupInvitation = r.into();
         assert!(matches!(inv.status, a3chat_core::group::InvitationStatus::Accepted));
+    }
+
+    /// Phase 5c: Verify sync_ticket is properly converted to GroupInvitation.
+    #[test]
+    fn record_to_invitation_preserves_sync_ticket() {
+        let now = chrono::Utc::now().timestamp();
+        let sync_ticket = "test_ticket_base64_abc123";
+        let r = InvitationRecord {
+            invitation_id: "i".into(),
+            conversation_id: ConversationId::from("grp:x"),
+            group_name: "g".into(),
+            inviter_id: UserId::from("alice"),
+            inviter_name: "Alice".into(),
+            invitee_id: UserId::from("bob"),
+            status: STATUS_PENDING.into(),
+            created_at_unix: now,
+            expires_at_unix: now + 60,
+            responded_at_unix: None,
+            message: None,
+            sync_ticket: Some(sync_ticket.to_string()),
+        };
+        let inv: GroupInvitation = r.into();
+        assert_eq!(inv.sync_ticket, Some(sync_ticket.to_string()));
+    }
+
+    /// Phase 5c: Verify validate_record accepts valid base64 sync_ticket.
+    #[test]
+    fn validate_accepts_valid_sync_ticket() {
+        // Valid base64 encoded ticket (URL-safe, >= 10 chars)
+        let mut r = rec();
+        r.sync_ticket = Some("abcdefghijklmnopqrstuvwxyz123456".to_string());
+        assert!(validate_record(&r).is_ok());
+    }
+
+    /// Phase 5c: Verify validate_record rejects invalid base64 sync_ticket.
+    #[test]
+    fn validate_rejects_invalid_base64_sync_ticket() {
+        let mut r = rec();
+        r.sync_ticket = Some("not-valid-base64!!!".to_string());
+        let result = validate_record(&r);
+        assert!(matches!(result, Err(AppError::Domain(_))));
     }
 
     /// GB-10 — Inserting two invitations with the same id must NOT

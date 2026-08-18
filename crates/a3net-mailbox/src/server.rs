@@ -45,7 +45,7 @@ use tracing::{info, warn};
 use a3net_observability::prometheus::PrometheusExporter;
 use a3net_observability::registry::GLOBAL;
 use crate::rate_limit::{
-    rate_limit_middleware, RateLimitConfig, RateLimitRegistry, RateLimitState,
+    rate_limit_middleware, RateLimitConfig, RateLimitRegistry, RateLimitState, TrustedProxy,
 };
 
 use crate::auth::{
@@ -95,6 +95,11 @@ impl Default for ServerPolicy {
 
 impl ServerPolicy {
     pub fn from_config(cfg: &MailboxConfig) -> Self {
+        // Cap max_signature_age_secs to MAX_SIGNATURE_AGE_SECS to prevent operators
+        // from accidentally disabling replay protection entirely (M-1 fix).
+        let max_age = cfg
+            .max_signature_age_secs
+            .min(crate::config::MAX_SIGNATURE_AGE_SECS);
         Self {
             max_envelope_bytes: cfg.max_envelope_bytes,
             require_sender_signature: cfg.require_sender_signature,
@@ -103,7 +108,7 @@ impl ServerPolicy {
                 default_ttl: cfg.default_ttl,
                 ..TtlPolicy::default()
             },
-            signature_max_age_secs: crate::auth::DEFAULT_SIGNATURE_MAX_AGE_SECS,
+            signature_max_age_secs: max_age as i64,
         }
     }
 
@@ -119,6 +124,9 @@ impl ServerPolicy {
     }
 }
 
+#[cfg(feature = "billing")]
+use crate::billing::BillingPolicy;
+
 /// Shared state for the axum router.
 #[derive(Clone)]
 pub struct ServerState {
@@ -126,6 +134,8 @@ pub struct ServerState {
     pub policy: ServerPolicy,
     /// Per-recipient TTL overrides (P3-8).
     pub retention: std::sync::Arc<parking_lot::RwLock<RetentionPolicy>>,
+    #[cfg(feature = "billing")]
+    pub billing: Option<BillingPolicy>,
     pub metrics: MailboxMetrics,
 }
 
@@ -135,6 +145,24 @@ impl ServerState {
             store,
             policy,
             retention: std::sync::Arc::new(parking_lot::RwLock::new(RetentionPolicy::default())),
+            #[cfg(feature = "billing")]
+            billing: None,
+            metrics: MailboxMetrics::get(),
+        }
+    }
+
+    /// Create state with a billing policy attached.
+    #[cfg(feature = "billing")]
+    pub fn with_billing(
+        store: Arc<dyn MailboxStore>,
+        policy: ServerPolicy,
+        billing: BillingPolicy,
+    ) -> Self {
+        Self {
+            store,
+            policy,
+            retention: std::sync::Arc::new(parking_lot::RwLock::new(RetentionPolicy::default())),
+            billing: Some(billing),
             metrics: MailboxMetrics::get(),
         }
     }
@@ -267,7 +295,10 @@ impl MailboxServer {
 
         let registry = rate_limit.unwrap_or_else(RateLimitRegistry::new);
         // Enqueue path: tight policy (60 req/min per IP).
-        let rate_state = RateLimitState::enqueue(registry.clone());
+        // TrustedProxy::Disabled: forwarded headers are ignored by default.
+        // For deployments behind a trusted reverse proxy, replace with
+        // RateLimitState::enqueue(registry.clone(), TrustedProxy::FromProxy("10.0.0.1".into())).
+        let rate_state = RateLimitState::enqueue(registry.clone(), TrustedProxy::Disabled);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut router = Router::new()
@@ -365,6 +396,7 @@ pub struct EnqueueRequest {
 async fn enqueue_handler(
     State(state): State<ServerState>,
     Path(recipient_id): Path<String>,
+    headers: axum::http::HeaderMap,
     axum::Json(req): axum::Json<EnqueueRequest>,
 ) -> Response {
     let m = &state.metrics;
@@ -440,6 +472,23 @@ async fn enqueue_handler(
     if let Err(e) = sig_ok {
         m.enqueues_rejected.inc();
         return error_to_response(e);
+    }
+
+    // Step 5b: billing mandatory check (P3-3).
+    // If billing is mandatory and no valid pledge was provided, reject.
+    #[cfg(feature = "billing")]
+    if let Some(ref billing) = state.billing {
+        if billing.mandatory {
+            let pledge_header = headers
+                .get("x-a3net-pledge")
+                .and_then(|v| v.to_str().ok());
+            if pledge_header.is_none() {
+                m.enqueues_rejected.inc();
+                return error_to_response(MailboxError::Internal(
+                    "billing mandatory: missing X-A3Net-Pledge header".into(),
+                ));
+            }
+        }
     }
 
     // Step 6: build the envelope and check size + quota.
@@ -598,27 +647,47 @@ async fn ack_handler(
         Err(e) => return error_to_response(e),
     };
 
-    // Step 2: validate msg_ids *before* sig verification, so the
-    // signature payload is bounded by the same length constraint.
-    for id in &req.msg_ids {
+    // Step 2: validate msg_ids.
+    //
+    // SECURITY: reject duplicate msg_ids upfront. A well-formed client never
+    // sends duplicates. If the server accepted duplicates, a client could
+    // craft a valid signature over `["a", "a"]` and effectively double-ack
+    // a message (if the store didn't deduplicate internally), bypassing the
+    // at-most-once delivery guarantee. Rejecting here also ensures the
+    // signature is verified over exactly the same payload the client signed.
+    use std::collections::HashSet;
+    let msg_ids = req.msg_ids.clone();
+    if msg_ids.is_empty() {
+        return error_to_response(MailboxError::InvalidMessageId("ack msg_ids is empty".into()));
+    }
+    // Reject duplicates — this also guarantees signature verification uses the
+    // same payload the client signed.
+    if msg_ids.iter().collect::<HashSet<_>>().len() != msg_ids.len() {
+        return error_to_response(
+            MailboxError::InvalidMessageId("ack msg_ids contains duplicates".into()),
+        );
+    }
+
+    // Validate all ids.
+    for id in &msg_ids {
         if let Err(e) = validate_msg_id(id) {
             return error_to_response(e);
         }
     }
 
-    // Step 3: verify recipient signature.
+    // Step 3: verify recipient signature over the original list.
     let sig_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.signature_b64) {
         Ok(b) => b,
         Err(_) => {
             return error_to_response(MailboxError::InvalidRecipientSignature);
         }
     };
-    if let Err(e) = verify_ack_signature(&recipient, &req.msg_ids, &sig_bytes) {
+    if let Err(e) = verify_ack_signature(&recipient, &msg_ids, &sig_bytes) {
         return error_to_response(e);
     }
 
     // Step 4: ack.
-    let removed = match state.store.ack(&recipient, &req.msg_ids).await {
+    let removed = match state.store.ack(&recipient, &msg_ids).await {
         Ok(n) => n,
         Err(e) => return error_to_response(e),
     };
