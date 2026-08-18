@@ -130,6 +130,10 @@ pub struct GroupMember {
     pub is_online: bool,
     /// Per-group nickname override (the "群昵称").
     pub nickname: Option<String>,
+    /// Expiry of a temporary admin grant. `None` means no temporary grant.
+    /// When expired, the member reverts to their base [`role`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp_admin_until: Option<DateTime<Utc>>,
 }
 
 impl GroupMember {
@@ -144,6 +148,14 @@ impl GroupMember {
         {
             return Err(A3chatError::InvalidInput(format!(
                 "last_seen {seen} < joined_at {}",
+                self.joined_at
+            )));
+        }
+        if let Some(until) = self.temp_admin_until
+            && until < self.joined_at
+        {
+            return Err(A3chatError::InvalidInput(format!(
+                "temp_admin_until {until} < joined_at {}",
                 self.joined_at
             )));
         }
@@ -312,6 +324,7 @@ mod tests {
             last_seen: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
             is_online: false,
             nickname: None,
+            temp_admin_until: None,
         };
         assert!(m.validate().is_err());
     }

@@ -448,33 +448,29 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
             }),
         ),
         A3chatEvent::GroupTempAdminGranted {
-            user_id,
             conversation_id,
             target_user_id,
-            granted_by,
+            actor_user_id,
             expires_at,
         } => (
             "a3chat.group.temp_admin.granted",
             serde_json::json!({
-                "user_id": user_id,
                 "conversation_id": conversation_id,
                 "target_user_id": target_user_id,
-                "granted_by": granted_by,
+                "actor_user_id": actor_user_id,
                 "expires_at": expires_at.to_rfc3339(),
             }),
         ),
         A3chatEvent::GroupTempAdminRevoked {
-            user_id,
             conversation_id,
             target_user_id,
-            revoked_by,
+            actor_user_id,
         } => (
             "a3chat.group.temp_admin.revoked",
             serde_json::json!({
-                "user_id": user_id,
                 "conversation_id": conversation_id,
                 "target_user_id": target_user_id,
-                "revoked_by": revoked_by,
+                "actor_user_id": actor_user_id,
             }),
         ),
         // Pairing (P2P device linking).
@@ -931,6 +927,7 @@ mod tests {
                 status: a3chat_core::group::InvitationStatus::Pending,
                 created_at: chrono::Utc::now(),
                 expires_at: chrono::Utc::now(),
+                sync_ticket: None,
             },
         };
         let s = event_to_sse(evt);
@@ -1045,6 +1042,7 @@ mod tests {
                 last_seen: None,
                 is_online: false,
                 nickname: None,
+                temp_admin_until: None,
             },
         };
         let s = event_to_sse(evt);

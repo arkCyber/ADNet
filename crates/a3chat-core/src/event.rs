@@ -405,20 +405,20 @@ pub enum A3chatEvent {
     },
 
     /// Temporary admin privileges were granted to a member.
+    /// The `actor_user_id` is who performed the grant.
     GroupTempAdminGranted {
-        user_id: UserId,
         conversation_id: ConversationId,
         target_user_id: UserId,
-        granted_by: UserId,
+        actor_user_id: UserId,
         expires_at: DateTime<Utc>,
     },
 
     /// Temporary admin privileges were revoked from a member.
+    /// The `actor_user_id` is who performed the revocation.
     GroupTempAdminRevoked {
-        user_id: UserId,
         conversation_id: ConversationId,
         target_user_id: UserId,
-        revoked_by: UserId,
+        actor_user_id: UserId,
     },
 
     /// Per-member mute state changed inside a group. `is_muted =

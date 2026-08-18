@@ -36,6 +36,11 @@ pub mod schema;
 pub mod validation;
 pub mod channel;
 
+// Re-export the JSON Schema entry point so external crates (e.g. a3chat-cli)
+// can call `a3chat_core::a3chat_json_schema()` without knowing the internal
+// module layout.
+pub use schema::a3chat_json_schema;
+
 pub use channel::{
     ACCOUNT_ID_PREFIX, AccountKind, DEFAULT_NOTIFY_MODE, FEED_ID_PREFIX, FeedAttachment,
     FeedItem, MAX_ACCOUNT_BIO_LEN, MAX_ACCOUNT_NAME_LEN, MAX_ATTACHMENTS_PER_FEED_ITEM,
