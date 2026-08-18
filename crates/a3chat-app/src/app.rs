@@ -483,6 +483,23 @@ impl A3chatApp {
         self
     }
 
+    /// Install the presence touch gate so that when a group message
+    /// is sent, the sender's `last_seen` and `is_online` are updated
+    /// in the group membership table.
+    pub fn install_presence_touch_gate(&mut self) -> &mut Self {
+        let group = self.group.clone();
+        let gate: crate::chat_service::PresenceTouchGate = std::sync::Arc::new(
+            move |conv_id: a3chat_core::id::ConversationId, sender: UserId, is_online: bool| {
+                let group = group.clone();
+                Box::pin(async move {
+                    group.touch_member(&conv_id, &sender, is_online).await.ok();
+                })
+            },
+        );
+        self.chat = self.chat.clone().with_presence_touch_gate(gate);
+        self
+    }
+
     /// Phase 5c: attach the distributed message store.
     ///
     /// After calling `A3chatApp::new`, if the process is configured

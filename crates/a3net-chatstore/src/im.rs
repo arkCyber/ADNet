@@ -145,6 +145,17 @@ pub struct GroupMember {
     pub user_id: String,
     pub joined_at: DateTime<Utc>,
     pub role: String,
+    /// RFC3339 timestamp of last activity (message sent or presence update).
+    /// `None` if never seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Cached online status derived from presence service.
+    /// Updated via `update_member_presence()` when member sends messages.
+    #[serde(default)]
+    pub is_online: bool,
+    /// Optional expiry for temporary admin grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp_admin_until: Option<DateTime<Utc>>,
 }
 
 /// Single chat message (hub-canonical). `receiver_id` is `None` for
@@ -618,19 +629,31 @@ impl ImManager {
         // Detect "already a member" so we can return the existing row.
         let existing = conn
             .query_row(
-                "SELECT id, joined_at FROM group_members
+                "SELECT id, joined_at, last_seen, is_online, temp_admin_until
+                 FROM group_members
                  WHERE conversation_id = ?1 AND user_id = ?2",
                 params![conversation_id, user_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((id, joined_at)) = existing {
+        if let Some((id, joined_at, last_seen, is_online, temp_admin_until)) = existing {
             return Ok(GroupMember {
                 id,
                 conversation_id: conversation_id.to_string(),
                 user_id: user_id.to_string(),
                 joined_at: parse_dt(joined_at)?,
                 role: role.to_string(),
+                last_seen: last_seen.and_then(|s| parse_dt(s).ok()),
+                is_online,
+                temp_admin_until: temp_admin_until.and_then(|s| parse_dt(s).ok()),
             });
         }
 
@@ -638,8 +661,8 @@ impl ImManager {
         let joined_at = Utc::now();
         conn.execute(
             "INSERT INTO group_members
-             (id, conversation_id, user_id, joined_at, role)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (id, conversation_id, user_id, joined_at, role, is_online)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
             params![id, conversation_id, user_id, joined_at.to_rfc3339(), role],
         )?;
         Ok(GroupMember {
@@ -648,6 +671,9 @@ impl ImManager {
             user_id: user_id.to_string(),
             joined_at,
             role: role.to_string(),
+            last_seen: None,
+            is_online: false,
+            temp_admin_until: None,
         })
     }
 
@@ -689,22 +715,95 @@ impl ImManager {
         Ok(())
     }
 
+    /// Update last_seen and is_online for a group member.
+    /// Called when a member sends a message or updates their presence.
+    pub async fn update_member_presence(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        is_online: bool,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        a3net_types::invariants::validate_id("user_id", user_id)?;
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE group_members
+             SET last_seen = ?1, is_online = ?2
+             WHERE conversation_id = ?3 AND user_id = ?4",
+            params![now.to_rfc3339(), is_online, conversation_id, user_id],
+        )?;
+        if updated == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "member {user_id} not found in group {conversation_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Grant temporary admin status to a member until the specified time.
+    pub async fn set_temp_admin(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        until: DateTime<Utc>,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        a3net_types::invariants::validate_id("user_id", user_id)?;
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE group_members
+             SET temp_admin_until = ?1
+             WHERE conversation_id = ?2 AND user_id = ?3",
+            params![until.to_rfc3339(), conversation_id, user_id],
+        )?;
+        if updated == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "member {user_id} not found in group {conversation_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Clear temporary admin status for a member.
+    pub async fn clear_temp_admin(&self, conversation_id: &str, user_id: &str) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        a3net_types::invariants::validate_id("user_id", user_id)?;
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE group_members
+             SET temp_admin_until = NULL
+             WHERE conversation_id = ?1 AND user_id = ?2",
+            params![conversation_id, user_id],
+        )?;
+        Ok(())
+    }
+
     /// All members of a group conversation, oldest-joined first.
     pub async fn get_group_members(&self, conversation_id: &str) -> Result<Vec<GroupMember>> {
         a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, conversation_id, user_id, joined_at, role
+            "SELECT id, conversation_id, user_id, joined_at, role,
+                    last_seen, is_online, temp_admin_until
              FROM group_members WHERE conversation_id = ?1
              ORDER BY joined_at ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id], |row| {
+            let last_seen_str: Option<String> = row.get(5)?;
+            let last_seen = last_seen_str.and_then(|s| parse_dt(s).ok());
+            let is_online: bool = row.get(6)?;
+            let temp_admin_str: Option<String> = row.get(7)?;
+            let temp_admin_until = temp_admin_str.and_then(|s| parse_dt(s).ok());
             Ok(GroupMember {
                 id: row.get(0)?,
                 conversation_id: row.get(1)?,
                 user_id: row.get(2)?,
                 joined_at: parse_dt(row.get::<_, String>(3)?)?,
                 role: row.get(4)?,
+                last_seen,
+                is_online,
+                temp_admin_until,
             })
         })?;
         let members = rows.collect::<std::result::Result<Vec<_>, _>>()?;

@@ -131,10 +131,13 @@ fn error_from_std_try_lock_is_lock_variant() {
 #[test]
 fn schema_version_constant_matches_documented() {
     // The crate re-exports `SCHEMA_VERSION` from the public surface.
-    // The migration ladder is `migrate_to(1)`, `migrate_to(2)`,
-    // `migrate_to(3)` (chat_trust table), and `migrate_to(4)`
-    // (group-metadata columns on conversations).
-    assert_eq!(SCHEMA_VERSION, 4);
+    // The migration ladder is:
+    // - migrate_to(1): Initial schema
+    // - migrate_to(2): Add edit-tracking columns to messages
+    // - migrate_to(3): Add chat_trust table
+    // - migrate_to(4): Add group-metadata columns on conversations
+    // - migrate_to(5): Add presence columns to group_members (last_seen, is_online, temp_admin_until)
+    assert_eq!(SCHEMA_VERSION, 5);
 }
 
 #[test]

@@ -44,6 +44,10 @@ pub struct InvitationRecord {
     pub expires_at_unix: i64,
     pub responded_at_unix: Option<i64>,
     pub message: Option<String>,
+    /// Phase 5c: iroh-docs sync ticket for P2P group message sync.
+    /// Always `None` when the `iroh` feature is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_ticket: Option<String>,
 }
 
 impl From<InvitationRecord> for GroupInvitation {
@@ -123,8 +127,8 @@ impl GroupInvitationService {
                     (invitation_id, conversation_id, group_name,
                      inviter_id, inviter_name, invitee_id,
                      status, created_at_unix, expires_at_unix,
-                     responded_at_unix, message)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     responded_at_unix, message, sync_ticket)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     rec_in.invitation_id,
                     rec_in.conversation_id.as_str(),
@@ -137,6 +141,7 @@ impl GroupInvitationService {
                     rec_in.expires_at_unix,
                     rec_in.responded_at_unix,
                     rec_in.message,
+                    rec_in.sync_ticket,
                 ],
             )?;
             Ok(())
@@ -176,7 +181,8 @@ impl GroupInvitationService {
                 let mut stmt = guard.prepare_cached(
                     "SELECT invitation_id, conversation_id, group_name, inviter_id,
                             inviter_name, invitee_id, status,
-                            created_at_unix, expires_at_unix, responded_at_unix, message
+                            created_at_unix, expires_at_unix, responded_at_unix,
+                            message, sync_ticket
                      FROM group_invitations
                      WHERE invitee_id = ?1 AND status = 'pending'
                        AND expires_at_unix > ?2
@@ -261,7 +267,8 @@ impl GroupInvitationService {
                 let mut stmt = guard.prepare_cached(
                     "SELECT invitation_id, conversation_id, group_name, inviter_id,
                             inviter_name, invitee_id, status,
-                            created_at_unix, expires_at_unix, responded_at_unix, message
+                            created_at_unix, expires_at_unix, responded_at_unix,
+                            message, sync_ticket
                      FROM group_invitations WHERE invitation_id = ?1",
                 )?;
                 let row = stmt
@@ -293,7 +300,8 @@ impl GroupInvitationService {
                 let mut stmt = guard.prepare_cached(
                     "SELECT invitation_id, conversation_id, group_name, inviter_id,
                             inviter_name, invitee_id, status,
-                            created_at_unix, expires_at_unix, responded_at_unix, message
+                            created_at_unix, expires_at_unix, responded_at_unix,
+                            message, sync_ticket
                      FROM group_invitations WHERE invitation_id = ?1",
                 )?;
                 let row = stmt
@@ -323,6 +331,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<InvitationRecord> 
         expires_at_unix: row.get(8)?,
         responded_at_unix: responded_at,
         message: row.get(10)?,
+        sync_ticket: row.get(11)?,
     })
 }
 
@@ -364,6 +373,7 @@ mod tests {
             expires_at_unix: now + DEFAULT_INVITATION_TTL_SECS,
             responded_at_unix: None,
             message: Some("hi".into()),
+            sync_ticket: None,
         }
     }
 
@@ -403,6 +413,7 @@ mod tests {
             expires_at_unix: now + 60,
             responded_at_unix: Some(now),
             message: None,
+            sync_ticket: None,
         };
         let inv: GroupInvitation = r.into();
         assert!(matches!(inv.status, a3chat_core::group::InvitationStatus::Accepted));
@@ -458,6 +469,7 @@ mod tests {
             expires_at_unix: now - 1,
             responded_at_unix: None,
             message: None,
+            sync_ticket: None,
         };
         // We cannot insert an invalid record via `create` because
         // validate_record rejects inverted windows; bypass it with a
@@ -474,8 +486,8 @@ mod tests {
                     (invitation_id, conversation_id, group_name,
                      inviter_id, inviter_name, invitee_id,
                      status, created_at_unix, expires_at_unix,
-                     responded_at_unix, message)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)",
+                     responded_at_unix, message, sync_ticket)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     stale_in.invitation_id,
                     stale_in.conversation_id.as_str(),
@@ -486,7 +498,9 @@ mod tests {
                     stale_in.status,
                     stale_in.created_at_unix,
                     stale_in.expires_at_unix,
+                    stale_in.responded_at_unix,
                     stale_in.message,
+                    stale_in.sync_ticket,
                 ],
             )
             .unwrap();

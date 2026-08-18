@@ -431,6 +431,52 @@ fn event_to_sse(event: a3chat_core::event::A3chatEvent) -> String {
                 "actor_user_id": actor_user_id,
             }),
         ),
+        A3chatEvent::GroupMemberPresenceChanged {
+            user_id,
+            conversation_id,
+            target_user_id,
+            is_online,
+            last_seen,
+        } => (
+            "a3chat.group.member.presence",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "target_user_id": target_user_id,
+                "is_online": is_online,
+                "last_seen": last_seen.map(|ts| ts.to_rfc3339()),
+            }),
+        ),
+        A3chatEvent::GroupTempAdminGranted {
+            user_id,
+            conversation_id,
+            target_user_id,
+            granted_by,
+            expires_at,
+        } => (
+            "a3chat.group.temp_admin.granted",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "target_user_id": target_user_id,
+                "granted_by": granted_by,
+                "expires_at": expires_at.to_rfc3339(),
+            }),
+        ),
+        A3chatEvent::GroupTempAdminRevoked {
+            user_id,
+            conversation_id,
+            target_user_id,
+            revoked_by,
+        } => (
+            "a3chat.group.temp_admin.revoked",
+            serde_json::json!({
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "target_user_id": target_user_id,
+                "revoked_by": revoked_by,
+            }),
+        ),
         // Pairing (P2P device linking).
         A3chatEvent::PairingInvitationCreated {
             user_id,
@@ -633,6 +679,9 @@ fn event_variant_name(event: &a3chat_core::event::A3chatEvent) -> &'static str {
         A3chatEvent::GroupMuteChanged { .. } => "group_mute_changed",
         A3chatEvent::GroupMuteAllChanged { .. } => "group_mute_all_changed",
         A3chatEvent::GroupNicknameChanged { .. } => "group_nickname_changed",
+        A3chatEvent::GroupMemberPresenceChanged { .. } => "group_member_presence_changed",
+        A3chatEvent::GroupTempAdminGranted { .. } => "group_temp_admin_granted",
+        A3chatEvent::GroupTempAdminRevoked { .. } => "group_temp_admin_revoked",
         A3chatEvent::PairingInvitationCreated { .. } => "pairing_invitation_created",
         A3chatEvent::PairingTrustedDeviceAdded { .. } => "pairing_trusted_added",
         A3chatEvent::PairingTrustedDeviceRevoked { .. } => "pairing_trusted_revoked",

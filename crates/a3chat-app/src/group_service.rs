@@ -56,6 +56,11 @@ macro_rules! require_initialised {
 
 /// Convert a hub-canonical `GroupMember` (role as String) to the core
 /// domain type (role as `MemberRole`).
+///
+/// Note: `last_seen` and `is_online` are sourced from the hub's
+/// group_members table. When a member sends a message, the chat
+/// service calls `touch_member()` to update these fields via the
+/// presence touch gate.
 #[inline]
 fn hub_member_to_core(hub: a3net_chatstore::GroupMember) -> a3chat_core::group::GroupMember {
     use a3chat_core::id::UserId;
@@ -67,8 +72,9 @@ fn hub_member_to_core(hub: a3net_chatstore::GroupMember) -> a3chat_core::group::
         display_name: user_id_str,
         role,
         joined_at: hub.joined_at,
-        last_seen: None,
-        is_online: false,
+        // Preserve presence data from hub (populated by touch_member)
+        last_seen: hub.last_seen,
+        is_online: hub.is_online,
         nickname: None,
     }
 }
@@ -96,6 +102,10 @@ pub struct GroupService {
     /// always released before any `.await`.
     invitation_state:
         Arc<std::sync::Mutex<Option<crate::group_invitation_service::GroupInvitationService>>>,
+    /// Phase 5c: iroh-docs chat bridge for P2P group sync.
+    /// `None` until [`with_iroh_docs`](Self::with_iroh_docs).
+    #[cfg(feature = "iroh")]
+    iroh_docs: Arc<std::sync::Mutex<Option<Arc<a3net_chatstore::IrohDocsChat>>>>,
 }
 
 impl GroupService {
@@ -108,6 +118,8 @@ impl GroupService {
             storage: Arc::new(std::sync::Mutex::new(None)),
             hub: Arc::new(std::sync::Mutex::new(None)),
             invitation_state: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(feature = "iroh")]
+            iroh_docs: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -170,6 +182,75 @@ impl GroupService {
         self
     }
 
+    /// Phase 5c: attach the iroh-docs chat bridge for P2P group sync.
+    ///
+    /// When attached, groups can sync messages via iroh-docs Doc.
+    #[cfg(feature = "iroh")]
+    pub fn with_iroh_docs(
+        self: Arc<Self>,
+        docs_chat: Arc<a3net_chatstore::IrohDocsChat>,
+    ) -> Arc<Self> {
+        *self.iroh_docs.lock().expect("iroh_docs mutex poisoned") = Some(docs_chat);
+        self
+    }
+
+    /// Acquire the iroh docs slot, clone the inner `Arc`, drop the guard.
+    #[cfg(feature = "iroh")]
+    fn iroh_docs_arc(&self) -> Option<Arc<a3net_chatstore::IrohDocsChat>> {
+        let guard = self.iroh_docs.lock().expect("iroh_docs mutex poisoned");
+        guard.as_ref().map(Arc::clone)
+    }
+
+    /// `a3chat.group.sync.ticket` — get the DocTicket for a group's iroh-docs sync.
+    ///
+    /// Returns a base64-encoded ticket that can be shared with new members
+    /// to join the group's P2P sync network.
+    #[cfg(feature = "iroh")]
+    pub async fn get_sync_ticket(&self, conversation_id: &ConversationId) -> AppResult<String> {
+        use base64::Engine;
+        let docs_chat = self.iroh_docs_arc().ok_or_else(|| {
+            AppError::NotInitialised("GroupService iroh_docs not set".into())
+        })?;
+
+        let ticket = docs_chat
+            .share(conversation_id.as_str(), iroh_docs::api::protocol::ShareMode::Write)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to share doc: {e}")))?;
+
+        // Encode ticket to JSON then base64 for transmission
+        let json = serde_json::to_string(&ticket)
+            .map_err(|e| AppError::Internal(format!("ticket serialization failed: {e}")))?;
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json))
+    }
+
+    /// `a3chat.group.sync.join` — join a group's sync network via DocTicket.
+    ///
+    /// Opens the iroh-docs doc for the conversation and starts receiving
+    /// messages via the P2P sync network.
+    #[cfg(feature = "iroh")]
+    pub async fn join_sync(&self, conversation_id: &ConversationId, ticket_b64: &str) -> AppResult<()> {
+        use base64::Engine;
+        let docs_chat = self.iroh_docs_arc().ok_or_else(|| {
+            AppError::NotInitialised("GroupService iroh_docs not set".into())
+        })?;
+
+        // Decode ticket from base64
+        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(ticket_b64)
+            .map_err(|e| AppError::Internal(format!("invalid ticket encoding: {e}")))?;
+        let ticket: iroh_docs::DocTicket = serde_json::from_slice(&json)
+            .map_err(|e| AppError::Internal(format!("invalid ticket format: {e}")))?;
+
+        // Open the doc with the ticket
+        docs_chat
+            .open_with_ticket(conversation_id.as_str(), ticket)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to open sync doc: {e}")))?;
+
+        tracing::info!(conv = %conversation_id, "joined group sync network");
+        Ok(())
+    }
+
     /// `a3chat.group.create` — owner creates a group conversation.
     ///
     /// Persists the conversation to hub and emits `GroupMemberJoined`.
@@ -229,11 +310,15 @@ impl GroupService {
     }
 
     /// `a3chat.group.join` — accept an invitation and become a member.
+    ///
+    /// Phase 5c: When iroh-docs is configured and the invitation contains
+    /// a sync ticket, automatically joins the P2P sync network.
     pub async fn join(
         &self,
         user: &UserId,
         conversation_id: &ConversationId,
         _invitation_id: &str,
+        sync_ticket: Option<&str>,
     ) -> AppResult<GroupMember> {
         // GB-13 — extract the hub Arc before any `.await`.
         let hub = self
@@ -244,6 +329,14 @@ impl GroupService {
             .add_group_member(conversation_id.as_str(), user.as_str(), MemberRole::Member.as_str())
             .await
             .map_err(AppError::from)?;
+
+        // Phase 5c: Join P2P sync network if ticket is provided
+        #[cfg(feature = "iroh")]
+        if let Some(ticket) = sync_ticket {
+            if let Err(e) = self.join_sync(conversation_id, ticket).await {
+                tracing::warn!(conv = %conversation_id, "failed to join sync network: {e}");
+            }
+        }
 
         self.bus
             .publish(A3chatEvent::GroupMemberJoined {
@@ -256,6 +349,10 @@ impl GroupService {
 
     /// `a3chat.group.invite` — owner or admin invites a user; emits
     /// a [`A3chatEvent::GroupInvitationReceived`] for the invitee.
+    ///
+    /// Phase 5c: When iroh-docs is configured, automatically includes
+    /// the group's DocTicket in the invitation so the invitee can
+    /// join the P2P sync network.
     pub async fn invite(
         &self,
         inviter: &UserId,
@@ -267,14 +364,14 @@ impl GroupService {
         self.require_role(inviter, conversation_id, MemberRole::Admin)
             .await?;
 
-        // GB-14 — the previous implementation locked the hub slot
-        // just to drop it without using the value. The hub is not
-        // consulted here (invitations are stored exclusively in the
-        // a3chat invitation table); the lock was pure dead traffic.
-
         let now_unix = chrono::Utc::now().timestamp();
         let expires_at = now_unix + crate::group_invitation_service::DEFAULT_INVITATION_TTL_SECS;
         let invitation_id = uuid::Uuid::new_v4().to_string();
+
+        // Phase 5c: Get sync ticket for P2P group message sync
+        #[cfg(feature = "iroh")]
+        let sync_ticket = self.get_sync_ticket(conversation_id).await.ok();
+
         let rec = crate::group_invitation_service::InvitationRecord {
             invitation_id: invitation_id.clone(),
             conversation_id: conversation_id.clone(),
@@ -287,6 +384,10 @@ impl GroupService {
             expires_at_unix: expires_at,
             responded_at_unix: None,
             message: message.map(|s| s.to_string()),
+            #[cfg(feature = "iroh")]
+            sync_ticket,
+            #[cfg(not(feature = "iroh"))]
+            sync_ticket: None,
         };
 
         // Persist via the a3chat invitation store. GB-13 — pull
@@ -917,7 +1018,25 @@ impl GroupService {
 
     // ── Internal helpers ────────────────────────────────────────────────────────
 
+    /// Compute the effective role rank for a member, considering temporary
+    /// admin grants. A member with a valid temporary admin grant has
+    /// admin-level permissions for the duration.
+    fn effective_role_rank(member: &a3net_chatstore::GroupMember) -> i32 {
+        let base_rank = a3chat_core::group::MemberRole::rank_from_str(&member.role);
+
+        // Check if user has a temporary admin grant that's still valid
+        if let Some(until) = member.temp_admin_until {
+            if until > chrono::Utc::now() {
+                // Temporary admin has same effective rank as regular admin
+                return base_rank.max(MemberRole::Admin.rank() as i32);
+            }
+        }
+
+        base_rank
+    }
+
     /// Returns Ok if `actor` has role strictly higher than `required`.
+    /// Considers temporary admin grants for authorization.
     async fn require_role(
         &self,
         actor: &UserId,
@@ -940,7 +1059,8 @@ impl GroupService {
             .find(|m| m.user_id == actor.as_str())
             .ok_or_else(|| AppError::Domain("actor is not a member".into()))?;
 
-        let actor_rank = a3chat_core::group::MemberRole::rank_from_str(&actor_member.role);
+        // Use effective rank that considers temporary admin status
+        let actor_rank = Self::effective_role_rank(actor_member);
 
         if actor_rank < required.rank() as i32 {
             return Err(AppError::Domain(format!(
@@ -948,6 +1068,102 @@ impl GroupService {
                 actor_member.role, required
             )));
         }
+
+        Ok(())
+    }
+
+    /// Update the last_seen timestamp for a member when they perform
+    /// an action (send message, etc.). This is called from message
+    /// sending via the presence touch gate.
+    pub async fn touch_member(
+        &self,
+        conversation_id: &ConversationId,
+        user_id: &UserId,
+        is_online: bool,
+    ) -> AppResult<()> {
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        hub.update_member_presence(conversation_id.as_str(), user_id.as_str(), is_online)
+            .await
+            .map_err(AppError::from)?;
+
+        // Publish event so SSE subscribers get the updated presence
+        self.bus.publish(A3chatEvent::GroupMemberPresenceChanged {
+            user_id: user_id.clone(),
+            conversation_id: conversation_id.clone(),
+            target_user_id: user_id.clone(),
+            is_online,
+            last_seen: Some(chrono::Utc::now()),
+        });
+
+        Ok(())
+    }
+
+    /// Grant temporary admin status to a member for a specified duration.
+    /// Only owners and current admins can grant temporary admin.
+    pub async fn grant_temp_admin(
+        &self,
+        actor: &UserId,
+        conversation_id: &ConversationId,
+        target: &UserId,
+        duration_secs: i64,
+    ) -> AppResult<()> {
+        self.require_role(actor, conversation_id, MemberRole::Admin)
+            .await?;
+
+        if target.as_str().is_empty() {
+            return Err(AppError::Domain("target user_id is empty".into()));
+        }
+
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        let until = chrono::Utc::now() + chrono::Duration::seconds(duration_secs);
+        hub.set_temp_admin(conversation_id.as_str(), target.as_str(), until)
+            .await
+            .map_err(AppError::from)?;
+
+        // Publish event
+        self.bus.publish(A3chatEvent::GroupTempAdminGranted {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            target_user_id: target.clone(),
+            granted_by: actor.clone(),
+            expires_at: until,
+        });
+
+        Ok(())
+    }
+
+    /// Revoke temporary admin status from a member.
+    /// Only owners and current admins can revoke.
+    pub async fn revoke_temp_admin(
+        &self,
+        actor: &UserId,
+        conversation_id: &ConversationId,
+        target: &UserId,
+    ) -> AppResult<()> {
+        self.require_role(actor, conversation_id, MemberRole::Admin)
+            .await?;
+
+        let hub = self
+            .hub_arc()
+            .ok_or_else(|| AppError::NotInitialised("GroupService hub not set".into()))?;
+
+        hub.clear_temp_admin(conversation_id.as_str(), target.as_str())
+            .await
+            .map_err(AppError::from)?;
+
+        // Publish event so subscribers know the temp admin status was revoked
+        self.bus.publish(A3chatEvent::GroupTempAdminRevoked {
+            user_id: actor.clone(),
+            conversation_id: conversation_id.clone(),
+            target_user_id: target.clone(),
+            revoked_by: actor.clone(),
+        });
 
         Ok(())
     }
@@ -1246,6 +1462,10 @@ pub async fn dispatch(
                 .get("invitation_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            let sync_ticket: Option<String> = params
+                .get("sync_ticket")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let cid: ConversationId = serde_json::from_value(
                 params
                     .get("conversation_id")
@@ -1255,7 +1475,7 @@ pub async fn dispatch(
             .map_err(A3chatError::from)?;
             let inv_id = invitation_id.unwrap_or_default();
             let m = svc
-                .join(owner, &cid, &inv_id)
+                .join(owner, &cid, &inv_id, sync_ticket.as_deref())
                 .await
                 .map_err(A3chatError::from)?;
             serde_json::to_value(&m).map_err(A3chatError::from)

@@ -50,6 +50,10 @@ pub struct ChatService {
     /// service never imports `ContactService` directly (that would
     /// be a circular dependency).
     blocklist_gate: Arc<std::sync::Mutex<Option<BlocklistGate>>>,
+    /// Presence touch gate. When `Some`, every `send_message` calls it
+    /// to update the sender's `last_seen` and `is_online` in the
+    /// group membership table.
+    presence_touch_gate: Arc<std::sync::Mutex<Option<PresenceTouchGate>>>,
 }
 
 /// Async predicate for GB-22. `(conversation_id, sender) -> true`
@@ -101,6 +105,23 @@ pub type BlocklistGate = Arc<
         + Sync,
 >;
 
+/// Presence touch gate — called after a message is sent to update
+/// the sender's `last_seen` and `is_online` in group membership.
+///
+/// `(conversation_id, sender, is_online) -> future`
+///
+/// Stored behind `Arc<Mutex<Option<...>>>` so concurrent reads can
+/// clone the inner `Arc` cheaply without racing the writer.
+pub type PresenceTouchGate = Arc<
+    dyn Fn(
+            a3chat_core::id::ConversationId,
+            UserId,
+            bool,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// F-11 / B-27 — WeChat-style 2-minute recall window. A sender can
 /// retract a message within this many seconds of `timestamp`. After
 /// the window closes the recall RPC returns `AppError::Forbidden` so
@@ -116,6 +137,7 @@ impl ChatService {
             moderation: None,
             mute_gate: Arc::new(std::sync::Mutex::new(None)),
             blocklist_gate: Arc::new(std::sync::Mutex::new(None)),
+            presence_touch_gate: Arc::new(std::sync::Mutex::new(None)),
             #[cfg(feature = "iroh")]
             iroh_docs_chat: Arc::new(RwLock::new(None)),
         }
@@ -163,6 +185,22 @@ impl ChatService {
             let gate_for_task = gate.clone();
             tokio::spawn(async move {
                 *gate_arc.lock().expect("blocklist_gate mutex poisoned") = Some(gate_for_task);
+            });
+        }
+        self
+    }
+
+    /// Install the presence touch gate. After a message is sent,
+    /// this gate is called to update the sender's `last_seen` and
+    /// `is_online` in the group membership table.
+    pub fn with_presence_touch_gate(mut self, gate: PresenceTouchGate) -> Self {
+        if let Some(slot) = Arc::get_mut(&mut self.presence_touch_gate) {
+            *slot.get_mut().expect("presence_touch_gate mutex poisoned") = Some(gate);
+        } else {
+            let gate_arc = self.presence_touch_gate.clone();
+            let gate_for_task = gate.clone();
+            tokio::spawn(async move {
+                *gate_arc.lock().expect("presence_touch_gate mutex poisoned") = Some(gate_for_task);
             });
         }
         self
@@ -217,7 +255,7 @@ impl ChatService {
         limit: u32,
     ) -> AppResult<Vec<ChatMessage>> {
         // Primary: authoritative SQLite read.
-        let sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
+        let mut sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
 
         #[cfg(feature = "iroh")]
         if let Some(docs_chat) = self.iroh_docs_chat.read().await.as_ref() {
@@ -357,6 +395,28 @@ impl ChatService {
                 conversation_id: envelope.conversation_id.clone(),
                 message: stored.message.clone(),
             });
+
+        // Touch presence: update sender's last_seen and is_online for group messages.
+        // This runs after the message is persisted so we don't delay the RPC response.
+        if matches!(
+            envelope.conversation_id.kind_hint(),
+            a3chat_core::id::ConversationKindHint::Group
+        ) {
+            let gate_opt = self
+                .presence_touch_gate
+                .lock()
+                .expect("presence_touch_gate mutex poisoned")
+                .clone();
+            if let Some(f) = gate_opt {
+                f(
+                    envelope.conversation_id.clone(),
+                    owner.clone(),
+                    true,
+                )
+                .await;
+            }
+        }
+
         Ok(stored)
     }
 

@@ -1,6 +1,7 @@
 //! Server-pushed events — wrapped as JSON-RPC `notifications` over
 //! the SSE endpoint `/rpc/stream`.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::channel::{FeedItem, PublicAccount};
@@ -49,6 +50,9 @@ pub const NOTIFICATION_KIND_GROUP_DISSOLVED: &str = "group.dissolved";
 pub const NOTIFICATION_KIND_GROUP_ROLE_CHANGED: &str = "group.member.role.changed";
 pub const NOTIFICATION_KIND_GROUP_MUTE_CHANGED: &str = "group.mute.changed";
 pub const NOTIFICATION_KIND_GROUP_NICKNAME_CHANGED: &str = "group.nickname.changed";
+pub const NOTIFICATION_KIND_GROUP_MEMBER_PRESENCE: &str = "group.member.presence";
+pub const NOTIFICATION_KIND_GROUP_TEMP_ADMIN_GRANTED: &str = "group.temp_admin.granted";
+pub const NOTIFICATION_KIND_GROUP_TEMP_ADMIN_REVOKED: &str = "group.temp_admin.revoked";
 
 // Pairing (P2P device linking)
 pub const NOTIFICATION_KIND_PAIRING_INVITATION_CREATED: &str = "pairing.invitation.created";
@@ -390,6 +394,33 @@ pub enum A3chatEvent {
         actor_user_id: UserId,
     },
 
+    /// A member's presence status changed (online/offline/last_seen updated).
+    /// Published when a member sends a message or updates their presence.
+    GroupMemberPresenceChanged {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        target_user_id: UserId,
+        is_online: bool,
+        last_seen: Option<DateTime<Utc>>,
+    },
+
+    /// Temporary admin privileges were granted to a member.
+    GroupTempAdminGranted {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        target_user_id: UserId,
+        granted_by: UserId,
+        expires_at: DateTime<Utc>,
+    },
+
+    /// Temporary admin privileges were revoked from a member.
+    GroupTempAdminRevoked {
+        user_id: UserId,
+        conversation_id: ConversationId,
+        target_user_id: UserId,
+        revoked_by: UserId,
+    },
+
     /// Per-member mute state changed inside a group. `is_muted =
     /// false` means the mute was lifted.
     GroupMuteChanged {
@@ -550,6 +581,9 @@ impl A3chatEvent {
             A3chatEvent::GroupMuteChanged { .. } => NOTIFICATION_KIND_GROUP_MUTE_CHANGED,
             A3chatEvent::GroupMuteAllChanged { .. } => NOTIFICATION_KIND_GROUP_MUTE_CHANGED,
             A3chatEvent::GroupNicknameChanged { .. } => NOTIFICATION_KIND_GROUP_NICKNAME_CHANGED,
+            A3chatEvent::GroupMemberPresenceChanged { .. } => NOTIFICATION_KIND_GROUP_MEMBER_PRESENCE,
+            A3chatEvent::GroupTempAdminGranted { .. } => NOTIFICATION_KIND_GROUP_TEMP_ADMIN_GRANTED,
+            A3chatEvent::GroupTempAdminRevoked { .. } => NOTIFICATION_KIND_GROUP_TEMP_ADMIN_REVOKED,
             A3chatEvent::PairingInvitationCreated { .. } => NOTIFICATION_KIND_PAIRING_INVITATION_CREATED,
             A3chatEvent::PairingTrustedDeviceAdded { .. } => NOTIFICATION_KIND_PAIRING_TRUSTED_ADDED,
             A3chatEvent::PairingTrustedDeviceRevoked { .. } => NOTIFICATION_KIND_PAIRING_TRUSTED_REVOKED,

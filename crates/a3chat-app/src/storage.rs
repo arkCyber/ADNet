@@ -2089,7 +2089,8 @@ fn init_schema(conn: &rusqlite::Connection) -> AppResult<()> {
             created_at_unix   INTEGER NOT NULL,
             expires_at_unix   INTEGER NOT NULL,
             responded_at_unix INTEGER,
-            message           TEXT
+            message           TEXT,
+            sync_ticket       TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_group_invitations_invitee
             ON group_invitations(invitee_id, status);

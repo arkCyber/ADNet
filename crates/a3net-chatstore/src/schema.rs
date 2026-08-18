@@ -37,7 +37,7 @@ use crate::error::{ChatStoreError, Result};
 
 /// Current schema version. Bump on every schema change and add a
 /// migration step in [`migrate_to`].
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// All `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
 /// statements bundled together so the bootstrap path is a single
@@ -129,13 +129,16 @@ pub(super) const CREATE_STATEMENTS: &[&str] = &[
         last_sequence  INTEGER NOT NULL DEFAULT 0
     )",
     "CREATE TABLE IF NOT EXISTS group_members (
-        id              TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL,
-        user_id         TEXT NOT NULL,
-        joined_at       TEXT NOT NULL,
-        role            TEXT NOT NULL DEFAULT 'member',
+        id                  TEXT PRIMARY KEY,
+        conversation_id     TEXT NOT NULL,
+        user_id             TEXT NOT NULL,
+        joined_at           TEXT NOT NULL,
+        role                TEXT NOT NULL DEFAULT 'member',
+        last_seen           TEXT,
+        is_online           INTEGER NOT NULL DEFAULT 0,
+        temp_admin_until    TEXT,
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id)         REFERENCES users(id)         ON DELETE CASCADE,
         UNIQUE(conversation_id, user_id)
     )",
     "CREATE TABLE IF NOT EXISTS messages (
@@ -370,6 +373,18 @@ fn migrate_to(conn: &rusqlite::Transaction<'_>, target: u32) -> rusqlite::Result
             try_add_column(conn, "conversations", "announcement", "TEXT")?;
             try_add_column(conn, "conversations", "is_private", "INTEGER NOT NULL DEFAULT 1")?;
             try_add_column(conn, "conversations", "is_dissolved", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        5 => {
+            // Add presence tracking columns to `group_members`:
+            // - last_seen: RFC3339 timestamp of last activity
+            // - is_online: cached online status (default false)
+            // - temp_admin_until: optional RFC3339 for temporary admin expiry
+            //
+            // These columns are added with safe defaults so existing
+            // rows remain valid. The try_add_column helper is idempotent.
+            try_add_column(conn, "group_members", "last_seen", "TEXT")?;
+            try_add_column(conn, "group_members", "is_online", "INTEGER NOT NULL DEFAULT 0")?;
+            try_add_column(conn, "group_members", "temp_admin_until", "TEXT")?;
         }
         _ => {
             // Unknown future version. Should be unreachable because
