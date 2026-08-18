@@ -1146,8 +1146,9 @@ pub async fn dispatch(
             // behalf of a user.
             match svc.get_comment(&comment.comment_id)? {
                 Some(existing) => {
-                    if existing.author_id != owner.as_str()
-                        && existing.author_id != comment.author_id
+                    let existing_author = existing.author_id.clone();
+                    if existing_author != owner.as_str()
+                        && existing_author != comment.author_id
                     {
                         return Err(A3chatError::PermissionDenied(format!(
                             "comment {} not owned by {}",
@@ -1156,14 +1157,14 @@ pub async fn dispatch(
                         )));
                     }
                     if comment.author_id.is_empty() {
-                        comment.author_id = existing.author_id;
+                        comment.author_id = existing_author.clone();
                     }
                     // SR-MOMENTS-2 (strict): if the caller is
                     // neither the comment author nor the post
                     // author, reject. Without this a non-owner
                     // could impersonate by setting `author_id`.
                     let caller = owner.as_str();
-                    if caller != existing.author_id
+                    if caller != existing_author
                         && !svc
                             .get_post(&existing.post_id)?
                             .map(|p| p.author_id == caller)
