@@ -1138,7 +1138,12 @@ pub async fn dispatch(
             .map_err(|e| invalid_input(&format!("bad comment payload: {e}")))?;
             // SR-MOMENTS-2 — ownership check at the dispatcher.
             // The service layer trusts the caller; we enforce here.
-            // `get_comment` is the cheapest ownership probe.
+            // `get_comment` is the cheapest ownership probe. We
+            // reject when **neither** the caller (chat owner)
+            // **nor** the supplied author_id matches the comment's
+            // author — the second arm lets a moderator / owner
+            // tool that knows the canonical author id edit on
+            // behalf of a user.
             match svc.get_comment(&comment.comment_id)? {
                 Some(existing) => {
                     if existing.author_id != owner.as_str()
@@ -1152,6 +1157,23 @@ pub async fn dispatch(
                     }
                     if comment.author_id.is_empty() {
                         comment.author_id = existing.author_id;
+                    }
+                    // SR-MOMENTS-2 (strict): if the caller is
+                    // neither the comment author nor the post
+                    // author, reject. Without this a non-owner
+                    // could impersonate by setting `author_id`.
+                    let caller = owner.as_str();
+                    if caller != existing.author_id
+                        && !svc
+                            .get_post(&existing.post_id)?
+                            .map(|p| p.author_id == caller)
+                            .unwrap_or(false)
+                    {
+                        return Err(A3chatError::PermissionDenied(format!(
+                            "comment {} not editable by {}",
+                            comment.comment_id,
+                            caller
+                        )));
                     }
                 }
                 None => {

@@ -117,6 +117,12 @@ pub struct InMemoryBackend {
     pub reactions: Mutex<HashMap<(String, String, ReactionType), SocialReaction>>,
     /// `follower_id -> following_ids`
     pub follows: Mutex<HashMap<String, Vec<String>>>,
+    /// `(target_id, target_type, sharer_id) -> share`
+    pub shares: Mutex<HashMap<(String, String, String), a3net_types::social_feed::ShareRecord>>,
+    /// `(target_id, target_type, reporter_id) -> report`
+    pub reports: Mutex<HashMap<(String, String, String), a3net_types::social_feed::ReportRecord>>,
+    /// `owner_id -> blocked_id -> block`
+    pub blocklist: Mutex<HashMap<(String, String), a3net_types::social_feed::BlockRecord>>,
 }
 
 impl InMemoryBackend {
@@ -741,9 +747,15 @@ impl SocialFeedIpcService {
         block.validate().map_err(|e| e.to_string())?;
         match &self.store {
             BackingStore::Sqlite(s) => s.save_block(&block).map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Err(
-                "memory backend does not implement blocklist; use SQLite".into()
-            ),
+            BackingStore::Memory(m) => {
+                let mut guard = m.blocklist.lock().map_err(|e| format!("lock: {e}"))?;
+                let key = (block.owner_id.clone(), block.blocked_user_id.clone());
+                if guard.contains_key(&key) {
+                    return Ok(false);
+                }
+                guard.insert(key, block);
+                Ok(true)
+            }
         }
     }
 
@@ -756,23 +768,35 @@ impl SocialFeedIpcService {
             BackingStore::Sqlite(s) => s
                 .delete_block(owner_id, blocked_user_id)
                 .map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Err(
-                "memory backend does not implement blocklist; use SQLite".into()
-            ),
+            BackingStore::Memory(m) => {
+                let mut guard = m.blocklist.lock().map_err(|e| format!("lock: {e}"))?;
+                let key = (owner_id.to_string(), blocked_user_id.to_string());
+                Ok(guard.remove(&key).is_some())
+            }
         }
     }
 
     pub fn is_blocked(&self, owner_id: &str, candidate_id: &str) -> std::result::Result<bool, String> {
         match &self.store {
             BackingStore::Sqlite(s) => s.is_blocked(owner_id, candidate_id).map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Ok(false),
+            BackingStore::Memory(m) => {
+                let guard = m.blocklist.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard.contains_key(&(owner_id.to_string(), candidate_id.to_string())))
+            }
         }
     }
 
     pub fn list_blocklist(&self, owner_id: &str) -> std::result::Result<Vec<String>, String> {
         match &self.store {
             BackingStore::Sqlite(s) => s.list_blocklist(owner_id).map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Ok(Vec::new()),
+            BackingStore::Memory(m) => {
+                let guard = m.blocklist.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard
+                    .iter()
+                    .filter(|((o, _), _)| o == owner_id)
+                    .map(|((_, b), _)| b.clone())
+                    .collect())
+            }
         }
     }
 
@@ -785,9 +809,19 @@ impl SocialFeedIpcService {
         share.validate().map_err(|e| e.to_string())?;
         match &self.store {
             BackingStore::Sqlite(s) => s.save_share(&share).map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Err(
-                "memory backend does not implement share storage; use SQLite".into()
-            ),
+            BackingStore::Memory(m) => {
+                let mut guard = m.shares.lock().map_err(|e| format!("lock: {e}"))?;
+                let key = (
+                    share.target_id.clone(),
+                    share.target_type.as_str().to_string(),
+                    share.sharer_id.clone(),
+                );
+                if guard.contains_key(&key) {
+                    return Ok(false);
+                }
+                guard.insert(key, share);
+                Ok(true)
+            }
         }
     }
 
@@ -800,7 +834,16 @@ impl SocialFeedIpcService {
             BackingStore::Sqlite(s) => s
                 .list_post_shares(target_id, target_type)
                 .map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Ok(Vec::new()),
+            BackingStore::Memory(m) => {
+                let guard = m.shares.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard
+                    .iter()
+                    .filter(|((tid, ty, _), _)| {
+                        tid == target_id && ty == target_type.as_str()
+                    })
+                    .map(|(_, v)| v.clone())
+                    .collect())
+            }
         }
     }
 
@@ -813,7 +856,15 @@ impl SocialFeedIpcService {
             BackingStore::Sqlite(s) => s
                 .count_shares(target_id, target_type)
                 .map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Ok(0),
+            BackingStore::Memory(m) => {
+                let guard = m.shares.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard
+                    .iter()
+                    .filter(|((tid, ty, _), _)| {
+                        tid == target_id && ty == target_type.as_str()
+                    })
+                    .count() as u32)
+            }
         }
     }
 
@@ -826,9 +877,19 @@ impl SocialFeedIpcService {
         report.validate().map_err(|e| e.to_string())?;
         match &self.store {
             BackingStore::Sqlite(s) => s.save_report(&report).map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Err(
-                "memory backend does not implement report storage; use SQLite".into()
-            ),
+            BackingStore::Memory(m) => {
+                let mut guard = m.reports.lock().map_err(|e| format!("lock: {e}"))?;
+                let key = (
+                    report.target_id.clone(),
+                    report.target_type.as_str().to_string(),
+                    report.reporter_id.clone(),
+                );
+                if guard.contains_key(&key) {
+                    return Ok(false);
+                }
+                guard.insert(key, report);
+                Ok(true)
+            }
         }
     }
 
@@ -841,7 +902,16 @@ impl SocialFeedIpcService {
             BackingStore::Sqlite(s) => s
                 .list_target_reports(target_id, target_type)
                 .map_err(|e| e.to_string()),
-            BackingStore::Memory(_) => Ok(Vec::new()),
+            BackingStore::Memory(m) => {
+                let guard = m.reports.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard
+                    .iter()
+                    .filter(|((tid, ty, _), _)| {
+                        tid == target_id && ty == target_type.as_str()
+                    })
+                    .map(|(_, v)| v.clone())
+                    .collect())
+            }
         }
     }
 

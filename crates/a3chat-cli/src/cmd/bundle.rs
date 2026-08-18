@@ -35,6 +35,10 @@ pub struct ExportBundleArgs {
     /// Output path for the bundle JSON. `-` writes to stdout.
     #[arg(long, short = 'o')]
     pub out: PathBuf,
+    /// Passphrase used to encrypt the bundle. The daemon refuses to
+    /// export without one (B-20). At least 8 chars recommended.
+    #[arg(long, short = 'p', env = "A3CHAT_BUNDLE_PASSPHRASE")]
+    pub passphrase: String,
 }
 
 #[derive(Debug, Args)]
@@ -42,18 +46,35 @@ pub struct ImportBundleArgs {
     /// Input path to a bundle JSON.
     #[arg(long, short = 'i')]
     pub input: PathBuf,
+    /// Passphrase used at export time. Must match or AEAD
+    /// verification fails (B-20).
+    #[arg(long, short = 'p', env = "A3CHAT_BUNDLE_PASSPHRASE")]
+    pub passphrase: String,
 }
 
 pub async fn run(cmd: BundleCmd, cfg: &CliConfig, client: &HttpRpcClient) -> CliResult<()> {
     match cmd {
-        BundleCmd::Export(args) => export(cfg, client, &args.out).await,
-        BundleCmd::Import(args) => import(client, &args.input).await,
+        BundleCmd::Export(args) => export(cfg, client, &args.out, &args.passphrase).await,
+        BundleCmd::Import(args) => import(client, &args.input, &args.passphrase).await,
     }
 }
 
-async fn export(cfg: &CliConfig, client: &HttpRpcClient, out: &PathBuf) -> CliResult<()> {
+async fn export(
+    cfg: &CliConfig,
+    client: &HttpRpcClient,
+    out: &PathBuf,
+    passphrase: &str,
+) -> CliResult<()> {
+    if passphrase.is_empty() {
+        return Err(crate::error::CliError::Usage(
+            "bundle export requires --passphrase".into(),
+        ));
+    }
     let v: serde_json::Value = client
-        .call("a3chat.e2e.bundle.export", serde_json::json!({}))
+        .call(
+            "a3chat.e2e.bundle.export",
+            serde_json::json!({ "passphrase": passphrase }),
+        )
         .await?;
     if out.as_os_str() == "-" {
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
@@ -74,7 +95,16 @@ async fn export(cfg: &CliConfig, client: &HttpRpcClient, out: &PathBuf) -> CliRe
     Ok(())
 }
 
-async fn import(client: &HttpRpcClient, input: &PathBuf) -> CliResult<()> {
+async fn import(
+    client: &HttpRpcClient,
+    input: &PathBuf,
+    passphrase: &str,
+) -> CliResult<()> {
+    if passphrase.is_empty() {
+        return Err(crate::error::CliError::Usage(
+            "bundle import requires --passphrase".into(),
+        ));
+    }
     let body = std::fs::read(input)?;
     // Delegate the wire-format / version check to the canonical
     // a3chat-app::Bundle so the CLI and the daemon cannot drift on
@@ -91,7 +121,10 @@ async fn import(client: &HttpRpcClient, input: &PathBuf) -> CliResult<()> {
     let raw: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|e| crate::error::CliError::Internal(format!("re-encode: {e}")))?;
     let v: serde_json::Value = client
-        .call("a3chat.e2e.bundle.import", serde_json::json!({ "bundle": raw }))
+        .call(
+            "a3chat.e2e.bundle.import",
+            serde_json::json!({ "bundle": raw, "passphrase": passphrase }),
+        )
         .await?;
     println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
     Ok(())

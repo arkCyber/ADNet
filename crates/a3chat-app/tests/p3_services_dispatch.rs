@@ -713,18 +713,26 @@ async fn e2e_handshake_rejects_missing_peer() {
 #[tokio::test]
 async fn e2e_bundle_export_import_roundtrip() {
     let (app, _dir, owner) = boot().await;
-    // export — the dispatcher returns the Bundle directly.
+    // export — the dispatcher returns the Bundle directly. B-20
+    // now requires a non-empty `passphrase` in the params.
     let bundle = app
-        .dispatch("a3chat.e2e.bundle.export", &owner, serde_json::json!({}))
+        .dispatch(
+            "a3chat.e2e.bundle.export",
+            &owner,
+            serde_json::json!({ "passphrase": "test-passphrase-1234" }),
+        )
         .await
         .expect("export");
     assert!(bundle.is_object());
     assert!(bundle["version"].is_u64());
 
     // import: the dispatcher takes the bundle as the *root* params,
-    // not wrapped in `{ "bundle": ... }`.
+    // not wrapped in `{ "bundle": ... }`. The passphrase is
+    // stripped before the Bundle is deserialised (B-20).
+    let mut bundle_with_pp = bundle.clone();
+    bundle_with_pp["passphrase"] = serde_json::json!("test-passphrase-1234");
     let r = app
-        .dispatch("a3chat.e2e.bundle.import", &owner, bundle)
+        .dispatch("a3chat.e2e.bundle.import", &owner, bundle_with_pp)
         .await
         .expect("import");
     // ImportSummary counters — all zero on an empty store.

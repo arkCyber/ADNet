@@ -11,6 +11,7 @@
 
 pub mod app;
 pub mod bot_framework;
+pub mod channel_service;
 pub mod channel_storage;
 pub mod chat_reaction_service;
 pub mod chat_service;
@@ -43,6 +44,7 @@ pub mod sync_service;
 
 pub use app::{A3chatApp, A3chatAppBridge, bridge_for_iroh_docs};
 pub use bot_framework::{BotConfig, BotRole, BotSession, ChatBot, ReplyGenerator};
+pub use channel_service::{ChannelService, ChannelServiceConfig};
 pub use channel_storage::{ChannelStorage, ChannelStorageConfig};
 pub use chat_reaction_service::{ChatReactionService, ReactionSummary};
 pub use chat_service::ChatService;

@@ -870,7 +870,11 @@ pub unsafe extern "C" fn a3net_ffi_user_upsert_profile(
         let payload = bytes_to_string(payload_ptr, payload_len)?;
         let profile: a3net_userstore::UserProfile = serde_json::from_str(&payload)
             .map_err(|e| AdnetFfiError::Json(e.to_string()))?;
-        futures::executor::block_on(store.put_profile(profile))
+        // `UserStore::put_profile` is synchronous; no `async`
+        // wrapper needed. We still funnel through `block_on`
+        // because the surrounding FFI function is `extern "C"`
+        // and cannot itself be `async`.
+        futures::executor::block_on(async { store.put_profile(profile) })
             .map_err(|e| AdnetFfiError::Node(e.to_string()))
     })();
     match result {
@@ -888,7 +892,7 @@ pub unsafe extern "C" fn a3net_ffi_user_list_profiles(
 ) -> AdnetFfiStatus {
     let result = (|| -> Result<Vec<a3net_userstore::UserProfile>, AdnetFfiError> {
         let store = open_userstore(data_dir_ptr, data_dir_len)?;
-        futures::executor::block_on(store.list_profiles())
+        futures::executor::block_on(async { store.list_profiles() })
             .map_err(|e| AdnetFfiError::Node(e.to_string()))
     })();
     match result {
@@ -911,7 +915,7 @@ pub unsafe extern "C" fn a3net_ffi_user_get_profile(
     let result = (|| -> Result<Option<a3net_userstore::UserProfile>, AdnetFfiError> {
         let user_id = bytes_to_nonempty_string(user_id_ptr, user_id_len, "userId")?;
         let store = open_userstore(data_dir_ptr, data_dir_len)?;
-        futures::executor::block_on(store.get_profile(&user_id))
+        futures::executor::block_on(async { store.get_profile(&user_id) })
             .map_err(|e| AdnetFfiError::Node(e.to_string()))
     })();
     match result {
@@ -934,7 +938,7 @@ pub unsafe extern "C" fn a3net_ffi_user_ensure_digit(
     let result = (|| -> Result<String, AdnetFfiError> {
         let user_id = bytes_to_nonempty_string(user_id_ptr, user_id_len, "userId")?;
         let store = open_userstore(data_dir_ptr, data_dir_len)?;
-        futures::executor::block_on(store.ensure_user_digit(&user_id))
+        futures::executor::block_on(async { store.ensure_user_digit(&user_id) })
             .map_err(|e| AdnetFfiError::Node(e.to_string()))
     })();
     match result {

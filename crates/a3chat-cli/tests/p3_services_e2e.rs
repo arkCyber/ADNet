@@ -439,7 +439,10 @@ async fn e2e_bundle_export_returns_envelope() {
     let (_dir, h, cfg) = boot_daemon().await;
     let c = client(&cfg);
     let v: serde_json::Value = c
-        .call(A3chatRpcMethod::E2E_BUNDLE_EXPORT, serde_json::json!({}))
+        .call(
+            A3chatRpcMethod::E2E_BUNDLE_EXPORT,
+            serde_json::json!({ "passphrase": "test-passphrase-12345" }),
+        )
         .await
         .expect("export");
     // Bundle envelope: { version, owner, exported_at_unix, kdf_params,

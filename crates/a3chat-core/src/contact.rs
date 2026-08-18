@@ -312,6 +312,8 @@ mod tests {
             status: ContactRequestStatus::Accepted,
             created_at: chrono::Utc::now(),
             responded_at: None,
+            signature_b64: None,
+            sender_public_key_hex: None,
         };
         assert!(req.validate().is_err());
     }
@@ -327,6 +329,8 @@ mod tests {
             status: ContactRequestStatus::Accepted,
             created_at: chrono::Utc::now(),
             responded_at: Some(chrono::Utc::now()),
+            signature_b64: None,
+            sender_public_key_hex: None,
         };
         assert!(req.validate().is_ok());
     }
