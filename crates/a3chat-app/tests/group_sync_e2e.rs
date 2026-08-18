@@ -81,7 +81,7 @@ async fn group_sync_join_and_get_ticket() {
     let (storage_dir, storage) = fresh_storage(owner.as_str());
 
     let bus = NotificationBus::new(64);
-    let _sync_service = GroupSyncService::new(storage, bridge.clone(), bus);
+    let _sync_service = GroupSyncService::new(owner, storage, bridge.clone(), bus);
 
     // Get the ticket - this should work since the conversation is open
     // Note: We can't fully test join_group without a real DocTicket from a previous creator
@@ -148,7 +148,7 @@ async fn sync_state_tracking() {
     let (storage_dir, storage) = fresh_storage(owner.as_str());
 
     let bus = NotificationBus::new(64);
-    let sync_service = GroupSyncService::new(storage.clone(), bridge.clone(), bus);
+    let sync_service = GroupSyncService::new(owner, storage.clone(), bridge.clone(), bus);
 
     // Open conversation
     bridge.open_conversation(conv_id.as_str()).await.expect("open");

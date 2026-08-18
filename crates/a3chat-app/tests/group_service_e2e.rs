@@ -857,6 +857,42 @@ async fn member_cannot_perform_admin_actions() {
     assert!(matches!(err, a3chat_app::error::AppError::Domain(_)));
 }
 
+// ── Presence Tracking Edge Cases ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn touch_member_updates_presence_in_list_members() {
+    let (svc, _dir, ids) = boot().await;
+    let op = svc
+        .create(
+            &ids.alice(),
+            CreateGroupRequest {
+                name: "g".into(),
+                description: "".into(),
+                avatar_url: None,
+                is_private: false,
+            },
+        )
+        .await
+        .unwrap();
+    let cid = op.group.conversation_id;
+    svc.add_member(&ids.alice(), &cid, &ids.bob()).await.unwrap();
+
+    // Initial state
+    let bob_before = svc.list_members(&cid).await.unwrap()
+        .into_iter().find(|m| m.user_id == ids.bob()).unwrap();
+    assert!(!bob_before.is_online);
+    assert!(bob_before.last_seen.is_none());
+
+    // Touch member
+    svc.touch_member(&cid, &ids.bob(), true).await.unwrap();
+
+    // Verify updated in list
+    let bob_after = svc.list_members(&cid).await.unwrap()
+        .into_iter().find(|m| m.user_id == ids.bob()).unwrap();
+    assert!(bob_after.is_online);
+    assert!(bob_after.last_seen.is_some());
+}
+
 // ── Edge Cases ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
