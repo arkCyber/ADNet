@@ -655,4 +655,46 @@ mod tests {
         let upper = "ABCDEF0123456789".repeat(4);
         assert!(validate_hex_id("h", &upper, 64).is_ok());
     }
+
+    #[test]
+    fn validate_url_accepts_valid_schemes() {
+        assert!(validate_url("f", "https://example.com/avatar.png").is_ok());
+        assert!(validate_url("f", "http://example.com/avatar.png").is_ok());
+        // data URL with image content
+        assert!(validate_url("f", "data:image/png;base64,SGVsbG8=").is_ok());
+        // IP address as host
+        assert!(validate_url("f", "https://127.0.0.1/avatar.png").is_ok());
+        // Port number
+        assert!(validate_url("f", "https://cdn.example.com:8443/img.png").is_ok());
+        // Path with query params
+        assert!(validate_url("f", "https://example.com/c/1?size=large").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_invalid_schemes() {
+        // No scheme at all
+        assert!(validate_url("f", "example.com/avatar.png").is_err());
+        // Unsupported schemes
+        assert!(validate_url("f", "ftp://example.com/avatar.png").is_err());
+        assert!(validate_url("f", "file:///path/to/avatar.png").is_err());
+        assert!(validate_url("f", "javascript:alert(1)").is_err());
+        assert!(validate_url("f", "data:text/html,<h1>").is_err()); // data:text not allowed
+    }
+
+    #[test]
+    fn validate_url_rejects_no_host() {
+        // Scheme present but no host (https:// alone is invalid)
+        assert!(validate_url("f", "https://").is_err());
+        // Trailing slash only is also rejected
+        assert!(validate_url("f", "https:///").is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_length_and_null() {
+        // Too long
+        let long = format!("https://example.com/{}", "x".repeat(300));
+        assert!(validate_url("f", &long).is_err());
+        // NUL byte
+        assert!(validate_url("f", "https://example.com/avatar\x00.png").is_err());
+    }
 }

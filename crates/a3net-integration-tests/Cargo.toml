@@ -36,6 +36,13 @@ a3net-identity = { workspace = true }
 a3net-types = { workspace = true }
 a3net-simulator = { workspace = true }
 
+# iroh for DERP testing
+iroh = { version = "=1.0.3", default-features = false, features = ["tls-ring"] }
+iroh-net = { version = "=1.0.3", default-features = false }
+iroh-docs = { version = "=0.101.0", default-features = false }
+iroh-blobs = { version = "=0.103.0", default-features = false }
+iroh-gossip = { version = "=0.101.0", default-features = false, features = ["net"] }
+
 # Test dependencies
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
