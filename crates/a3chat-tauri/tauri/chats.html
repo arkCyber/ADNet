@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>a3chat — Chats</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      background: #0e1116;
+      color: #e6e6e6;
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      grid-template-rows: 36px 1fr 22px;
+      grid-template-areas:
+        "topbar topbar"
+        "sidebar main"
+        "status status";
+      height: 100vh;
+    }
+    #topbar {
+      grid-area: topbar;
+      background: #1a1f29;
+      border-bottom: 1px solid #2a3340;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      gap: 12px;
+      font-size: 12px;
+    }
+    #status { grid-area: status; background: #1a1f29; border-top: 1px solid #2a3340; padding: 0 12px; font-size: 11px; opacity: 0.7; display: flex; align-items: center; }
+    #sidebar { grid-area: sidebar; background: #131820; border-right: 1px solid #2a3340; padding: 8px 0; overflow-y: auto; }
+    .node { padding: 6px 12px; font-size: 12px; cursor: pointer; }
+    .node:hover { background: #1a1f29; }
+    .node.active { background: #2563eb; color: #fff; }
+    .node .badge { float: right; background: #ef4444; padding: 1px 6px; border-radius: 8px; font-size: 10px; }
+    #main { grid-area: main; padding: 12px; overflow-y: auto; }
+    .menu { display: flex; gap: 8px; }
+    .menu button { font-size: 11px; padding: 2px 8px; background: #2a3340; color: #e6e6e6; border: none; border-radius: 3px; cursor: pointer; }
+    .menu button:hover { background: #3a4350; }
+    .menu button:disabled { opacity: 0.4; cursor: not-allowed; }
+    pre { white-space: pre-wrap; font-size: 11px; opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <div class="menu" id="menu"></div>
+    <span id="who"></span>
+  </div>
+  <div id="sidebar"></div>
+  <div id="main">
+    <h3>Welcome</h3>
+    <p>Select a conversation from the sidebar, or use the menu above to send a command.</p>
+    <pre id="last-result"></pre>
+  </div>
+  <div id="status">…</div>
+  <script type="module">
+    import { invoke } from "https://esm.sh/@tauri-apps/api";
+    const sidebar = document.getElementById("sidebar");
+    const who = document.getElementById("who");
+    const status = document.getElementById("status");
+    const menuEl = document.getElementById("menu");
+    const lastResult = document.getElementById("last-result");
+
+    async function refresh() {
+      try {
+        const session = await invoke("session_info");
+        who.textContent = `logged in as ${session.owner}`;
+      } catch (e) {
+        who.textContent = "not logged in";
+        return;
+      }
+      try {
+        const tree = await invoke("sidebar_tree");
+        sidebar.innerHTML = "";
+        for (const n of tree) {
+          const div = document.createElement("div");
+          div.className = "node";
+          div.textContent = n.label;
+          if (n.badge) {
+            const b = document.createElement("span");
+            b.className = "badge";
+            b.textContent = String(n.badge);
+            div.appendChild(b);
+          }
+          sidebar.appendChild(div);
+        }
+      } catch (e) {
+        status.textContent = "sidebar: " + (e && e.message);
+      }
+    }
+
+    async function renderMenu() {
+      try {
+        const menus = await invoke("menu_bar");
+        menuEl.innerHTML = "";
+        for (const menu of menus) {
+          for (const item of menu.items) {
+            const b = document.createElement("button");
+            b.textContent = item.label;
+            b.disabled = !item.enabled;
+            b.addEventListener("click", () => runMenu(item.id));
+            menuEl.appendChild(b);
+          }
+        }
+      } catch (e) {
+        status.textContent = "menu: " + (e && e.message);
+      }
+    }
+
+    async function runMenu(id) {
+      status.textContent = `→ ${id}`;
+      try {
+        let result = null;
+        switch (id) {
+          case "file.logout":
+            await invoke("logout");
+            break;
+          case "tools.doctor":
+            result = await invoke("doctor");
+            break;
+          case "view.profile":
+            const p = await invoke("profile_get");
+            result = p;
+            break;
+          case "view.contacts":
+            result = await invoke("contact_list");
+            break;
+          case "view.media":
+            result = await invoke("media_health");
+            break;
+          case "view.stream":
+            result = await invoke("stream_list");
+            break;
+          case "view.groups":
+            result = await invoke("chat_conversation_list");
+            break;
+          case "view.chats":
+            result = await invoke("chat_conversation_list");
+            break;
+          default:
+            status.textContent = `${id}: not wired yet`;
+            return;
+        }
+        if (result) {
+          lastResult.textContent = JSON.stringify(result, null, 2);
+        }
+      } catch (e) {
+        status.textContent = `${id} failed: ` + (e && e.message);
+      }
+    }
+
+    renderMenu();
+    refresh();
+  </script>
+</body>
+</html>
