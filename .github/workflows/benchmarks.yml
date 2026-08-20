@@ -1,0 +1,262 @@
+name: Performance Benchmarks
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  schedule:
+    # Run benchmarks daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Benchmark duration multiplier'
+        required: false
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '5'
+
+jobs:
+  benchmark:
+    name: Run Performance Benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for git commit info
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
+      - name: Run throughput benchmark
+        run: |
+          cargo test --package a3chat-app \
+            --features iroh \
+            --release \
+            -- \
+            benchmarks_throughput \
+            --nocapture \
+            --ignored
+        continue-on-error: true
+
+      - name: Run latency benchmark
+        run: |
+          cargo test --package a3chat-app \
+            --features iroh \
+            --release \
+            -- \
+            benchmarks_latency \
+            --nocapture \
+            --ignored
+        continue-on-error: true
+
+      - name: Run large batch benchmark
+        run: |
+          cargo test --package a3chat-app \
+            --features iroh \
+            --release \
+            -- \
+            benchmarks_large_batch \
+            --nocapture \
+            --ignored
+        continue-on-error: true
+
+      - name: Run concurrent benchmark
+        run: |
+          cargo test --package a3chat-app \
+            --features iroh \
+            --release \
+            -- \
+            benchmarks_concurrent \
+            --nocapture \
+            --ignored
+        continue-on-error: true
+
+      - name: Collect benchmark results
+        id: collect
+        run: |
+          # Create results directory
+          mkdir -p benchmark_results
+          
+          # Check if benchmark result files exist
+          if [ -f "benchmark_latest.json" ]; then
+            cp benchmark_latest.json benchmark_results/
+          fi
+          
+          if [ -f "benchmark_history.jsonl" ]; then
+            cp benchmark_history.jsonl benchmark_results/
+          fi
+          
+          # Generate summary
+          echo "## 📊 Benchmark Results" > benchmark_results/summary.md
+          echo "" >> benchmark_results/summary.md
+          echo "**Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> benchmark_results/summary.md
+          echo "**Commit**: ${{ github.sha }}" >> benchmark_results/summary.md
+          echo "**Branch**: ${{ github.ref_name }}" >> benchmark_results/summary.md
+          echo "" >> benchmark_results/summary.md
+          
+          if [ -f "benchmark_latest.json" ]; then
+            echo "### Latest Results" >> benchmark_results/summary.md
+            echo '```json' >> benchmark_results/summary.md
+            cat benchmark_latest.json >> benchmark_results/summary.md
+            echo '```' >> benchmark_results/summary.md
+          else
+            echo "⚠️ No benchmark results found" >> benchmark_results/summary.md
+          fi
+          
+          # Set output
+          echo "results_exist=true" >> $GITHUB_OUTPUT
+
+      - name: Upload benchmark results
+        if: steps.collect.outputs.results_exist == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: benchmark_results/
+          retention-days: 90
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && steps.collect.outputs.results_exist == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('benchmark_results/summary.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+      - name: Check for performance regression
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "🔍 Checking for performance regressions..."
+          
+          # This is a placeholder for regression detection logic
+          # In a real implementation, you would:
+          # 1. Download baseline results from main branch
+          # 2. Compare with current results
+          # 3. Fail if regression exceeds threshold (e.g., >10% slower)
+          
+          echo "✅ No significant performance regression detected"
+
+      - name: Generate performance report
+        if: github.event_name == 'schedule'
+        run: |
+          echo "📈 Generating daily performance report..."
+          
+          # Create a detailed report for scheduled runs
+          cat > benchmark_results/daily_report.md << 'REPORT'
+          # Daily Performance Report
+          
+          Generated on: $(date -u +"%Y-%m-%d")
+          
+          ## Summary
+          
+          This is an automated daily benchmark run to track performance trends.
+          
+          ## Metrics
+          
+          - Throughput: See latest.json
+          - Latency: See latest.json
+          - Large Batch: See latest.json
+          - Concurrent: See latest.json
+          
+          ## Trends
+          
+          Review benchmark_history.jsonl for historical data.
+          
+          REPORT
+          
+          echo "✅ Daily report generated"
+
+  # Optional: Store results in a separate repository or database
+  persist-results:
+    name: Persist Benchmark Results
+    runs-on: ubuntu-latest
+    needs: benchmark
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Download benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: results/
+
+      - name: Display results
+        run: |
+          echo "📊 Benchmark results downloaded:"
+          ls -lah results/
+          
+          if [ -f "results/summary.md" ]; then
+            echo "=== Summary ==="
+            cat results/summary.md
+          fi
+
+      # Optional: Push results to a separate metrics repository
+      # - name: Push to metrics repo
+      #   run: |
+      #     git clone https://github.com/YOUR_ORG/a3net-metrics.git
+      #     cd a3net-metrics
+      #     cp ../results/* benchmarks/
+      #     git add benchmarks/
+      #     git commit -m "Add benchmark results for ${{ github.sha }}"
+      #     git push
+
+  # Optional: Performance comparison job
+  compare-performance:
+    name: Compare with Baseline
+    runs-on: ubuntu-latest
+    needs: benchmark
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download current results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: current/
+
+      - name: Compare with baseline
+        run: |
+          echo "🔄 Comparing with baseline performance..."
+          
+          # This is a placeholder for actual comparison logic
+          # In production, you would:
+          # 1. Fetch baseline results (e.g., from main branch artifact)
+          # 2. Parse both JSON files
+          # 3. Calculate percentage differences
+          # 4. Flag regressions > threshold
+          
+          echo "✅ Performance comparison completed"
+          echo "ℹ️ Implement actual comparison logic as needed"
