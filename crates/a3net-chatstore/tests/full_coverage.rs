@@ -131,9 +131,14 @@ fn error_from_std_try_lock_is_lock_variant() {
 #[test]
 fn schema_version_constant_matches_documented() {
     // The crate re-exports `SCHEMA_VERSION` from the public surface.
-    // The migration ladder is `migrate_to(1)`, `migrate_to(2)`, and
-    // `migrate_to(3)` (chat_trust table).
-    assert_eq!(SCHEMA_VERSION, 3);
+    // The migration ladder is:
+    // - migrate_to(1): Initial schema
+    // - migrate_to(2): Add edit-tracking columns to messages
+    // - migrate_to(3): Add chat_trust table
+    // - migrate_to(4): Add group-metadata columns on conversations
+    // - migrate_to(5): Add presence columns to group_members (last_seen, is_online, temp_admin_until)
+    // - migrate_to(6): Add avatar_url column to conversations
+    assert_eq!(SCHEMA_VERSION, 6);
 }
 
 #[test]
@@ -948,7 +953,7 @@ async fn im_send_message_one_on_one_with_no_receiver_is_allowed() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let m = mgr
@@ -968,7 +973,7 @@ async fn im_send_message_rejects_negative_timestamp_via_edited_at() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let msg = mgr
@@ -1025,7 +1030,7 @@ async fn im_get_messages_uses_default_limit_when_none() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     for i in 0..150 {
@@ -1068,7 +1073,7 @@ async fn im_prune_messages_before_with_zero_cutoff_keeps_all() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     mgr.send_message(&conv.id, &alice.id, None, "x", None)
@@ -1323,7 +1328,7 @@ async fn im_get_messages_for_sync_has_more_when_more_remain() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     for i in 0..5 {
@@ -1412,7 +1417,7 @@ async fn im_get_compressed_messages_for_sync_returns_blob() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     for i in 0..3 {
@@ -1541,7 +1546,7 @@ async fn im_create_conversation_rejects_oversize_title() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let err = mgr
-        .create_conversation(ChatType::Group, &"a".repeat(257))
+        .create_conversation(ChatType::Group, &"a".repeat(257), false)
         .await
         .unwrap_err();
     assert!(matches!(err, ChatStoreError::Validation(_)));
@@ -1553,7 +1558,7 @@ async fn im_create_conversation_increments_message_count_after_send() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     assert_eq!(conv.message_count, 0);
@@ -1572,7 +1577,7 @@ async fn im_add_group_member_rejects_bad_role() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::Group, "team")
+        .create_conversation(ChatType::Group, "team", false)
         .await
         .unwrap();
     let err = mgr
@@ -1623,7 +1628,7 @@ async fn im_send_message_rejects_bad_sender_id() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let err = mgr
@@ -1639,7 +1644,7 @@ async fn im_send_message_rejects_bad_receiver_id() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let err = mgr
@@ -1655,7 +1660,7 @@ async fn im_send_message_rejects_bad_reply_to() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let err = mgr
@@ -1682,7 +1687,7 @@ async fn im_edit_message_rejects_empty_content() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let msg = mgr
@@ -1705,7 +1710,7 @@ async fn im_edit_message_on_message_without_sequence_returns_invalid() {
     let mgr = ImManager::new(dir.path().join("hub.db")).unwrap();
     let alice = mgr.create_user("alice", "Alice").await.unwrap();
     let conv = mgr
-        .create_conversation(ChatType::OneOnOne, "self")
+        .create_conversation(ChatType::OneOnOne, "self", false)
         .await
         .unwrap();
     let msg = mgr

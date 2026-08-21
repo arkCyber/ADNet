@@ -37,7 +37,7 @@ use crate::error::{ChatStoreError, Result};
 
 /// Current schema version. Bump on every schema change and add a
 /// migration step in [`migrate_to`].
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// All `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`
 /// statements bundled together so the bootstrap path is a single
@@ -119,19 +119,26 @@ pub(super) const CREATE_STATEMENTS: &[&str] = &[
         id             TEXT PRIMARY KEY,
         chat_type      TEXT NOT NULL,
         title          TEXT NOT NULL,
+        description    TEXT,
+        announcement   TEXT,
+        is_private     INTEGER NOT NULL DEFAULT 1,
+        is_dissolved   INTEGER NOT NULL DEFAULT 0,
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL,
         message_count  INTEGER NOT NULL DEFAULT 0,
         last_sequence  INTEGER NOT NULL DEFAULT 0
     )",
     "CREATE TABLE IF NOT EXISTS group_members (
-        id              TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL,
-        user_id         TEXT NOT NULL,
-        joined_at       TEXT NOT NULL,
-        role            TEXT NOT NULL DEFAULT 'member',
+        id                  TEXT PRIMARY KEY,
+        conversation_id     TEXT NOT NULL,
+        user_id             TEXT NOT NULL,
+        joined_at           TEXT NOT NULL,
+        role                TEXT NOT NULL DEFAULT 'member',
+        last_seen           TEXT,
+        is_online           INTEGER NOT NULL DEFAULT 0,
+        temp_admin_until    TEXT,
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id)         REFERENCES users(id)         ON DELETE CASCADE,
         UNIQUE(conversation_id, user_id)
     )",
     "CREATE TABLE IF NOT EXISTS messages (
@@ -231,8 +238,65 @@ pub(super) const INDEX_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_messages_conv_sequence    ON messages(conversation_id, sequence)",
     "CREATE INDEX IF NOT EXISTS idx_group_members_conv        ON group_members(conversation_id)",
     "CREATE INDEX IF NOT EXISTS idx_group_members_user        ON group_members(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_group_members_temp_admin  ON group_members(temp_admin_until)
+        WHERE temp_admin_until IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_user_sequences_user       ON user_sequences(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_hub_receipts_message      ON hub_message_receipts(message_id)",
+    // ---- link bookmarks (per-user URL archive) -----------------------------
+    "CREATE TABLE IF NOT EXISTS link_bookmarks (
+        bookmark_id      TEXT NOT NULL,
+        owner_id         TEXT NOT NULL,
+        url              TEXT NOT NULL,
+        title            TEXT NOT NULL,
+        description      TEXT,
+        favicon_hash     TEXT,
+        folder           TEXT NOT NULL DEFAULT '/',
+        tags_json        TEXT NOT NULL DEFAULT '[]',
+        is_pinned        INTEGER NOT NULL DEFAULT 0,
+        is_archived      INTEGER NOT NULL DEFAULT 0,
+        snapshot_text    TEXT,
+        source           TEXT NOT NULL DEFAULT 'manual',
+        created_at_unix  INTEGER NOT NULL,
+        updated_at_unix  INTEGER NOT NULL,
+        last_visited_unix INTEGER,
+        visit_count      INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (owner_id, bookmark_id)
+     )",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner        ON link_bookmarks(owner_id)",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_url    ON link_bookmarks(owner_id, url)",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_folder ON link_bookmarks(owner_id, folder)",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_pinned ON link_bookmarks(owner_id, is_pinned)",
+    "CREATE INDEX IF NOT EXISTS idx_link_bookmarks_owner_archived ON link_bookmarks(owner_id, is_archived)",
+    // FTS5 virtual table for full-text search on direct messages.
+    // DO-178C §6.1: FTS5 provides O(1) lookup vs O(n) LIKE scans.
+    "CREATE VIRTUAL TABLE IF NOT EXISTS direct_messages_fts USING fts5(
+        message_id,
+        content,
+        content='direct_messages',
+        content_rowid='rowid'
+    )",
+    // Triggers to keep FTS5 in sync with direct_messages table.
+    // DO-178C §6.1: Ensures FTS index stays consistent with source data.
+    "CREATE TRIGGER IF NOT EXISTS direct_messages_fts_insert
+     AFTER INSERT ON direct_messages WHEN NEW.content IS NOT NULL
+     BEGIN
+         INSERT INTO direct_messages_fts(rowid, message_id, content)
+         VALUES (NEW.rowid, NEW.message_id, NEW.content);
+     END",
+    "CREATE TRIGGER IF NOT EXISTS direct_messages_fts_delete
+     AFTER DELETE ON direct_messages WHEN OLD.content IS NOT NULL
+     BEGIN
+         INSERT INTO direct_messages_fts(direct_messages_fts, rowid, message_id, content)
+         VALUES('delete', OLD.rowid, OLD.message_id, OLD.content);
+     END",
+    "CREATE TRIGGER IF NOT EXISTS direct_messages_fts_update
+     AFTER UPDATE ON direct_messages WHEN NEW.content IS NOT NULL
+     BEGIN
+         INSERT INTO direct_messages_fts(direct_messages_fts, rowid, message_id, content)
+         VALUES('delete', OLD.rowid, OLD.message_id, OLD.content);
+         INSERT INTO direct_messages_fts(rowid, message_id, content)
+         VALUES (NEW.rowid, NEW.message_id, NEW.content);
+     END",
 ];
 
 /// The `schema_version` table is created before everything else so
@@ -331,6 +395,42 @@ fn migrate_to(conn: &rusqlite::Transaction<'_>, target: u32) -> rusqlite::Result
                  CREATE INDEX IF NOT EXISTS idx_chat_trust_owner
                      ON chat_trust(owner_user_id, level DESC);",
             )?;
+        }
+        4 => {
+            // Add group-metadata columns to `conversations`.
+            // Each try_add_column call is idempotent: it silently succeeds
+            // if the column already exists (safe for fresh v4 DBs and
+            // for re-runs of the migration on already-upgraded DBs).
+            try_add_column(conn, "conversations", "description", "TEXT")?;
+            try_add_column(conn, "conversations", "announcement", "TEXT")?;
+            try_add_column(conn, "conversations", "is_private", "INTEGER NOT NULL DEFAULT 1")?;
+            try_add_column(conn, "conversations", "is_dissolved", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        5 => {
+            // Add presence tracking columns to `group_members`:
+            // - last_seen: RFC3339 timestamp of last activity
+            // - is_online: cached online status (default false)
+            // - temp_admin_until: optional RFC3339 for temporary admin expiry
+            //
+            // These columns are added with safe defaults so existing
+            // rows remain valid. The try_add_column helper is idempotent.
+            try_add_column(conn, "group_members", "last_seen", "TEXT")?;
+            try_add_column(conn, "group_members", "is_online", "INTEGER NOT NULL DEFAULT 0")?;
+            try_add_column(conn, "group_members", "temp_admin_until", "TEXT")?;
+
+            // Add partial index for efficient temp admin expiry queries
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_group_members_temp_admin
+                 ON group_members(temp_admin_until)
+                 WHERE temp_admin_until IS NOT NULL",
+                [],
+            )?;
+        }
+        6 => {
+            // Add avatar_url column to conversations table.
+            // This enables group avatar updates (previously returned Domain error).
+            // The try_add_column helper is idempotent.
+            try_add_column(conn, "conversations", "avatar_url", "TEXT")?;
         }
         _ => {
             // Unknown future version. Should be unreachable because

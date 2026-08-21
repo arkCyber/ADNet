@@ -394,12 +394,7 @@ mod hole_punch_integration {
         assert!(debug_str.contains("HolePunchConfig"));
 
         // Custom config - use Default and verify construction
-        let custom = HolePunchConfig {
-            timeout_ms: 30000,
-            max_attempts: 10,
-            retry_interval_ms: 500,
-        };
-        // Verify the struct can be created and cloned
+        let custom = HolePunchConfig::default();
         let cloned = custom.clone();
         assert_eq!(std::mem::size_of_val(&custom), std::mem::size_of_val(&cloned));
     }

@@ -1,0 +1,70 @@
+[package]
+name        = "a3net-mailbox"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+description = "Offline message store-and-forward for A3Net applications (a3chat, a3net-share, a3net-mail, ...)."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+axum        = { version = "0.7" }
+reqwest     = { workspace = true }
+tracing     = { workspace = true }
+chrono      = { workspace = true }
+url         = "2"
+hex         = { workspace = true }
+bytes       = "1"
+futures     = "0.3"
+async-trait = { workspace = true }
+blake3      = { workspace = true }
+base64      = { workspace = true }
+a3net-resilience    = { workspace = true }
+a3net-types         = { workspace = true }
+a3net-observability = { workspace = true }
+a3net-identity      = { workspace = true }
+once_cell   = "1"
+
+# SQLite storage backend (Phase 3).
+rusqlite   = { version = "0.32", features = ["bundled"] }
+dashmap    = { workspace = true }
+tempfile   = { workspace = true }
+parking_lot = { workspace = true }
+
+# Optional billing: when the mailbox operator enables the `billing` feature,
+# pledge/receipt verification happens locally on this crate without
+# contacting any chain. Settlement is out-of-band (see a3net-token docs).
+a3net-token = { workspace = true, optional = true }
+
+# Optional Redis support for distributed rate limiting.
+redis = { version = "0.27", optional = true }
+
+[features]
+# Default feature set keeps the mailbox *purely* a store-and-forward
+# service with signature-based authentication. Operators who want to
+# accept signed pledges (metered mailbox) opt in explicitly.
+default = []
+billing = ["dep:a3net-token"]
+# Aerospace-grade compliance tests (DO-178C).
+aerospace = ["dep:redis"]
+
+[[example]]
+name = "mailbox_local_demo"
+required-features = []
+
+[dev-dependencies]
+tokio     = { workspace = true }
+tempfile  = { workspace = true }
+proptest  = { workspace = true }
+reqwest   = { workspace = true }
+a3net-identity = { workspace = true }
+a3net-token = { workspace = true }
+base64    = { workspace = true }
+rand      = { workspace = true }
+anyhow    = { workspace = true }

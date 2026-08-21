@@ -10,26 +10,40 @@ dependencies = [
  "a3chat-crypto",
  "a3net-blobstore",
  "a3net-chatstore",
+ "a3net-gossip",
+ "a3net-identity",
+ "a3net-ipc",
  "a3net-moderation",
+ "a3net-news",
+ "a3net-pairing",
  "a3net-reputation",
  "a3net-roster",
+ "a3net-socialfeed",
  "a3net-types",
  "a3net-userstore",
  "async-stream",
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "chacha20poly1305",
  "chrono",
  "dashmap 6.2.1",
+ "ed25519-dalek 2.2.0",
  "futures",
  "hex",
+ "iroh",
+ "iroh-blobs",
+ "iroh-docs",
+ "iroh-gossip",
  "parking_lot",
+ "rand 0.8.7",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
  "uuid",
  "zstd",
 ]
@@ -41,6 +55,9 @@ dependencies = [
  "a3chat-app",
  "a3chat-core",
  "a3chat-rpc",
+ "a3net-blobstore",
+ "a3net-chatstore",
+ "a3net-qr",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -50,6 +67,10 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "hex",
+ "iroh",
+ "iroh-blobs",
+ "iroh-docs",
+ "iroh-gossip",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -58,6 +79,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
@@ -69,6 +91,7 @@ name = "a3chat-core"
 version = "0.1.0"
 dependencies = [
  "a3net-error",
+ "a3net-roster",
  "a3net-types",
  "async-trait",
  "blake3",
@@ -151,6 +174,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "parking_lot",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -301,6 +325,7 @@ dependencies = [
 name = "a3net-chatstore"
 version = "0.1.0"
 dependencies = [
+ "a3chat-core",
  "a3net-blobstore",
  "a3net-reputation",
  "a3net-types",
@@ -775,6 +800,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "a3net-mailbox"
+version = "0.1.0"
+dependencies = [
+ "a3net-identity",
+ "a3net-observability",
+ "a3net-resilience",
+ "a3net-token",
+ "a3net-types",
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "chrono",
+ "dashmap 6.2.1",
+ "futures",
+ "hex",
+ "once_cell",
+ "parking_lot",
+ "proptest",
+ "rand 0.8.7",
+ "redis",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "a3net-media"
 version = "0.1.0"
 dependencies = [
@@ -942,22 +1002,17 @@ dependencies = [
 name = "a3net-nat-traversal"
 version = "0.1.0"
 dependencies = [
- "a3net-observability",
  "anyhow",
  "async-trait",
  "chrono",
  "futures",
  "getrandom 0.2.17",
- "hmac",
- "md-5",
  "once_cell",
- "proptest",
  "quick-xml 0.37.5",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha1",
  "socket2 0.5.10",
  "tempfile",
  "thiserror 1.0.69",
@@ -1465,6 +1520,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -6469,7 +6525,6 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -10345,6 +10400,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "redis"
+version = "0.27.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09d8f99a4090c89cc489a94833c901ead69bfbf3877b4867d5482e321ee875bc"
+dependencies = [
+ "arc-swap",
+ "combine",
+ "itertools 0.13.0",
+ "itoa",
+ "num-bigint",
+ "percent-encoding",
+ "ryu",
+ "sha1_smol",
+ "socket2 0.5.10",
+ "url",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10472,8 +10545,6 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
- "rustls 0.23.43",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -10481,7 +10552,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls 0.26.4",
  "tokio-util",
  "tower",
  "tower-http",
@@ -10491,7 +10561,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.9",
 ]
 
 [[package]]

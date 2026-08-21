@@ -117,6 +117,12 @@ pub struct InMemoryBackend {
     pub reactions: Mutex<HashMap<(String, String, ReactionType), SocialReaction>>,
     /// `follower_id -> following_ids`
     pub follows: Mutex<HashMap<String, Vec<String>>>,
+    /// `(target_id, target_type, sharer_id) -> share`
+    pub shares: Mutex<HashMap<(String, String, String), a3net_types::social_feed::ShareRecord>>,
+    /// `(target_id, target_type, reporter_id) -> report`
+    pub reports: Mutex<HashMap<(String, String, String), a3net_types::social_feed::ReportRecord>>,
+    /// `owner_id -> blocked_id -> block`
+    pub blocklist: Mutex<HashMap<(String, String), a3net_types::social_feed::BlockRecord>>,
 }
 
 impl InMemoryBackend {
@@ -597,9 +603,316 @@ impl SocialFeedIpcService {
         }
     }
 
+    /// Inverse of `list_following`: every user that follows
+    /// `user_id`. Symmetric with the storage helper.
+    pub fn list_followers(&self, user_id: &str) -> std::result::Result<Vec<String>, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s.list_followers(user_id).map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let guard = m.follows.lock().map_err(|e| format!("lock: {e}"))?;
+                let mut out: Vec<String> = Vec::new();
+                for (follower, following) in guard.iter() {
+                    if following.iter().any(|x| x == user_id) {
+                        out.push(follower.clone());
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
+
     pub fn is_following(&self, follower_id: &str, following_id: &str) -> std::result::Result<bool, String> {
         self.list_following(follower_id)
             .map(|v| v.iter().any(|x| x == following_id))
+    }
+
+    // ── Comment lifecycle (v2) ─────────────────────────────
+
+    pub fn update_comment(&self, mut comment: SocialComment) -> std::result::Result<SocialComment, String> {
+        if comment.comment_id.is_empty() {
+            return Err("comment_id is required".into());
+        }
+        comment.updated_at = Self::now();
+        comment.is_edited = true;
+        comment.edited_at = Some(comment.updated_at);
+        self.gate(&comment, "comment")?;
+        match &self.store {
+            BackingStore::Sqlite(s) => s.update_comment(&comment).map_err(|e| e.to_string())?,
+            BackingStore::Memory(m) => {
+                let mut guard = m
+                    .comments
+                    .lock()
+                    .map_err(|e| format!("lock: {e}"))?;
+                let mut found = false;
+                for list in guard.values_mut() {
+                    for c in list.iter_mut() {
+                        if c.comment_id == comment.comment_id {
+                            *c = comment.clone();
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found { break; }
+                }
+                if !found {
+                    return Err(format!("comment not found: {}", comment.comment_id));
+                }
+            }
+        }
+        Ok(comment)
+    }
+
+    pub fn delete_comment(&self, comment_id: &str) -> std::result::Result<bool, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s.delete_comment(comment_id).map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let mut guard = m
+                    .comments
+                    .lock()
+                    .map_err(|e| format!("lock: {e}"))?;
+                let mut removed = false;
+                guard.retain(|_post_id, list| {
+                    let before = list.len();
+                    list.retain(|c| c.comment_id != comment_id);
+                    removed |= list.len() != before;
+                    true
+                });
+                // Reactions on comments
+                if removed {
+                    let mut rxs = m.reactions.lock().map_err(|e| format!("lock: {e}"))?;
+                    rxs.retain(|(tid, _, _), _| tid != comment_id);
+                }
+                Ok(removed)
+            }
+        }
+    }
+
+    pub fn get_comment(&self, comment_id: &str) -> std::result::Result<Option<SocialComment>, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s.get_comment(comment_id).map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let guard = m
+                    .comments
+                    .lock()
+                    .map_err(|e| format!("lock: {e}"))?;
+                for list in guard.values() {
+                    for c in list {
+                        if c.comment_id == comment_id {
+                            return Ok(Some(c.clone()));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Delete a single user's reaction on a target. Symmetric with
+    /// `react` (toggle semantics).
+    pub fn delete_reaction(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::invariants::ReactionTarget,
+        user_id: &str,
+    ) -> std::result::Result<bool, String> {
+        self.gate(&SocialReaction {
+            reaction_id: format!("probe:{}:{}:{}", target_id, user_id, target_type.as_str()),
+            target_id: target_id.into(),
+            target_type,
+            user_id: user_id.into(),
+            reaction_type: ReactionType::Like,
+            created_at: 0,
+        }, "reaction")?;
+        match &self.store {
+            BackingStore::Sqlite(s) => s
+                .delete_reaction(target_id, target_type, user_id)
+                .map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let mut guard = m
+                    .reactions
+                    .lock()
+                    .map_err(|e| format!("lock: {e}"))?;
+                let before = guard.len();
+                guard.retain(|(tid, uid, _), _| {
+                    !(tid == target_id && uid == user_id)
+                });
+                Ok(guard.len() != before)
+            }
+        }
+    }
+
+    // ── Blocklist (v2) ─────────────────────────────────────────
+
+    pub fn save_block(&self, block: a3net_types::social_feed::BlockRecord) -> std::result::Result<bool, String> {
+        block.validate().map_err(|e| e.to_string())?;
+        match &self.store {
+            BackingStore::Sqlite(s) => s.save_block(&block).map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let mut guard = m.blocklist.lock().map_err(|e| format!("lock: {e}"))?;
+                let key = (block.owner_id.clone(), block.blocked_user_id.clone());
+                if guard.contains_key(&key) {
+                    return Ok(false);
+                }
+                guard.insert(key, block);
+                Ok(true)
+            }
+        }
+    }
+
+    pub fn delete_block(
+        &self,
+        owner_id: &str,
+        blocked_user_id: &str,
+    ) -> std::result::Result<bool, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s
+                .delete_block(owner_id, blocked_user_id)
+                .map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let mut guard = m.blocklist.lock().map_err(|e| format!("lock: {e}"))?;
+                let key = (owner_id.to_string(), blocked_user_id.to_string());
+                Ok(guard.remove(&key).is_some())
+            }
+        }
+    }
+
+    pub fn is_blocked(&self, owner_id: &str, candidate_id: &str) -> std::result::Result<bool, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s.is_blocked(owner_id, candidate_id).map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let guard = m.blocklist.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard.contains_key(&(owner_id.to_string(), candidate_id.to_string())))
+            }
+        }
+    }
+
+    pub fn list_blocklist(&self, owner_id: &str) -> std::result::Result<Vec<String>, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s.list_blocklist(owner_id).map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let guard = m.blocklist.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard
+                    .iter()
+                    .filter(|((o, _), _)| o == owner_id)
+                    .map(|((_, b), _)| b.clone())
+                    .collect())
+            }
+        }
+    }
+
+    // ── Shares (v2) ────────────────────────────────────────────
+
+    pub fn save_share(
+        &self,
+        share: a3net_types::social_feed::ShareRecord,
+    ) -> std::result::Result<bool, String> {
+        share.validate().map_err(|e| e.to_string())?;
+        match &self.store {
+            BackingStore::Sqlite(s) => s.save_share(&share).map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let mut guard = m.shares.lock().map_err(|e| format!("lock: {e}"))?;
+                let key = (
+                    share.target_id.clone(),
+                    share.target_type.as_str().to_string(),
+                    share.sharer_id.clone(),
+                );
+                if guard.contains_key(&key) {
+                    return Ok(false);
+                }
+                guard.insert(key, share);
+                Ok(true)
+            }
+        }
+    }
+
+    pub fn list_post_shares(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> std::result::Result<Vec<a3net_types::social_feed::ShareRecord>, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s
+                .list_post_shares(target_id, target_type)
+                .map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let guard = m.shares.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard
+                    .iter()
+                    .filter(|((tid, ty, _), _)| {
+                        tid == target_id && ty == target_type.as_str()
+                    })
+                    .map(|(_, v)| v.clone())
+                    .collect())
+            }
+        }
+    }
+
+    pub fn count_shares(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> std::result::Result<u32, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s
+                .count_shares(target_id, target_type)
+                .map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let guard = m.shares.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard
+                    .iter()
+                    .filter(|((tid, ty, _), _)| {
+                        tid == target_id && ty == target_type.as_str()
+                    })
+                    .count() as u32)
+            }
+        }
+    }
+
+    // ── Reports (v2) ───────────────────────────────────────────
+
+    pub fn save_report(
+        &self,
+        report: a3net_types::social_feed::ReportRecord,
+    ) -> std::result::Result<bool, String> {
+        report.validate().map_err(|e| e.to_string())?;
+        match &self.store {
+            BackingStore::Sqlite(s) => s.save_report(&report).map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let mut guard = m.reports.lock().map_err(|e| format!("lock: {e}"))?;
+                let key = (
+                    report.target_id.clone(),
+                    report.target_type.as_str().to_string(),
+                    report.reporter_id.clone(),
+                );
+                if guard.contains_key(&key) {
+                    return Ok(false);
+                }
+                guard.insert(key, report);
+                Ok(true)
+            }
+        }
+    }
+
+    pub fn list_target_reports(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> std::result::Result<Vec<a3net_types::social_feed::ReportRecord>, String> {
+        match &self.store {
+            BackingStore::Sqlite(s) => s
+                .list_target_reports(target_id, target_type)
+                .map_err(|e| e.to_string()),
+            BackingStore::Memory(m) => {
+                let guard = m.reports.lock().map_err(|e| format!("lock: {e}"))?;
+                Ok(guard
+                    .iter()
+                    .filter(|((tid, ty, _), _)| {
+                        tid == target_id && ty == target_type.as_str()
+                    })
+                    .map(|(_, v)| v.clone())
+                    .collect())
+            }
+        }
     }
 
     pub fn verify_post_integrity(&self, post: &SocialPost) -> bool {
@@ -707,6 +1020,93 @@ impl RpcHandler for SocialFeedIpcService {
                 let follower_id: String = Self::require(&params, "follower_id")?;
                 let following_id: String = Self::require(&params, "following_id")?;
                 Ok(json!({ "following": self.is_following(&follower_id, &following_id)? }))
+            }
+            "list_followers" => {
+                let user_id: String = Self::require(&params, "user_id")?;
+                Ok(json!({ "follower_ids": self.list_followers(&user_id)? }))
+            }
+            "update_comment" => {
+                let mut comment: SocialComment = Self::require(&params, "comment")?;
+                let stored = self.update_comment(comment.clone())?;
+                comment = stored;
+                Ok(json!({ "comment": comment }))
+            }
+            "delete_comment" => {
+                let comment_id: String = Self::require(&params, "comment_id")?;
+                let removed = self.delete_comment(&comment_id)?;
+                Ok(json!({ "removed": removed, "comment_id": comment_id }))
+            }
+            "get_comment" => {
+                let comment_id: String = Self::require(&params, "comment_id")?;
+                let comment = self.get_comment(&comment_id)?;
+                Ok(json!({ "comment": comment }))
+            }
+            "unreact" => {
+                let target_id: String = Self::require(&params, "target_id")?;
+                let target_type_str: String = Self::require(&params, "target_type")?;
+                let user_id: String = Self::require(&params, "user_id")?;
+                let target_type = a3net_types::invariants::ReactionTarget::from_strict(&target_type_str)
+                    .map_err(|e| format!("decode target_type: {e}"))?;
+                let removed = self.delete_reaction(&target_id, target_type, &user_id)?;
+                Ok(json!({ "removed": removed, "target_id": target_id, "user_id": user_id }))
+            }
+            "block" => {
+                let block: a3net_types::social_feed::BlockRecord =
+                    Self::require(&params, "block")?;
+                let inserted = self.save_block(block)?;
+                Ok(json!({ "inserted": inserted }))
+            }
+            "unblock" => {
+                let owner_id: String = Self::require(&params, "owner_id")?;
+                let blocked_user_id: String = Self::require(&params, "blocked_user_id")?;
+                let removed = self.delete_block(&owner_id, &blocked_user_id)?;
+                Ok(json!({ "removed": removed }))
+            }
+            "is_blocked" => {
+                let owner_id: String = Self::require(&params, "owner_id")?;
+                let candidate_id: String = Self::require(&params, "candidate_id")?;
+                let blocked = self.is_blocked(&owner_id, &candidate_id)?;
+                Ok(json!({ "blocked": blocked }))
+            }
+            "list_blocklist" => {
+                let owner_id: String = Self::require(&params, "owner_id")?;
+                Ok(json!({ "blocked_user_ids": self.list_blocklist(&owner_id)? }))
+            }
+            "share" => {
+                let share: a3net_types::social_feed::ShareRecord =
+                    Self::require(&params, "share")?;
+                let inserted = self.save_share(share)?;
+                Ok(json!({ "inserted": inserted }))
+            }
+            "list_post_shares" => {
+                let target_id: String = Self::require(&params, "target_id")?;
+                let target_type_str: String = Self::require(&params, "target_type")?;
+                let target_type = a3net_types::social_feed::ShareTarget::from_strict(&target_type_str)
+                    .map_err(|e| format!("decode target_type: {e}"))?;
+                let shares = self.list_post_shares(&target_id, target_type)?;
+                Ok(json!({ "shares": shares }))
+            }
+            "count_shares" => {
+                let target_id: String = Self::require(&params, "target_id")?;
+                let target_type_str: String = Self::require(&params, "target_type")?;
+                let target_type = a3net_types::social_feed::ShareTarget::from_strict(&target_type_str)
+                    .map_err(|e| format!("decode target_type: {e}"))?;
+                let n = self.count_shares(&target_id, target_type)?;
+                Ok(json!({ "count": n }))
+            }
+            "report" => {
+                let report: a3net_types::social_feed::ReportRecord =
+                    Self::require(&params, "report")?;
+                let inserted = self.save_report(report)?;
+                Ok(json!({ "inserted": inserted }))
+            }
+            "list_target_reports" => {
+                let target_id: String = Self::require(&params, "target_id")?;
+                let target_type_str: String = Self::require(&params, "target_type")?;
+                let target_type = a3net_types::social_feed::ShareTarget::from_strict(&target_type_str)
+                    .map_err(|e| format!("decode target_type: {e}"))?;
+                let reports = self.list_target_reports(&target_id, target_type)?;
+                Ok(json!({ "reports": reports }))
             }
             "verify_post_integrity" => {
                 let post: SocialPost = Self::require(&params, "post")?;

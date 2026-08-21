@@ -25,6 +25,7 @@ a3chat-rpc             = { workspace = true }
 
 # Async runtime
 tokio                  = { workspace = true, features = ["full"] }
+tokio-stream            = { workspace = true }
 async-trait            = { workspace = true }
 futures                = { workspace = true }
 
@@ -51,10 +52,41 @@ reqwest                = { workspace = true }
 base64                 = { workspace = true }
 uuid                   = { workspace = true }
 eventsource-stream     = "0.2"
+# QR rendering for the `contact qr-invite-render` subcommand.
+a3net-qr               = { workspace = true }
 
 # Logging / observability
 tracing                = { workspace = true }
 tracing-subscriber     = { workspace = true }
+
+# Optional iroh-docs backend for `a3chatd --enable-iroh`. Pulls in
+# iroh-docs / iroh / iroh-blobs / iroh-gossip. Off by default so the
+# CLI binary stays slim; flip on with `--features enable-iroh`.
+a3net-chatstore         = { workspace = true, optional = true }
+a3net-blobstore         = { workspace = true, optional = true }
+iroh                    = { version = "=1.0.3",   optional = true, default-features = false, features = ["tls-ring"] }
+iroh-blobs              = { version = "=0.103.0", optional = true, default-features = false, features = ["fs-store"] }
+iroh-docs               = { version = "=0.101.0", optional = true, default-features = false, features = ["fs-store"] }
+iroh-gossip             = { version = "=0.101.0", optional = true, default-features = false, features = ["net"] }
+
+[features]
+# Off by default — keeps `cargo install a3chat-cli` lean.
+default = []
+# Compile the iroh-docs + iroh-blobs bridge so `a3chatd --enable-iroh`
+# can spin up a DocsApi / IrohDocsChat at boot. Mirrors the `iroh`
+# feature on `a3net-chatstore` so the CLI, app, and chatstore all
+# agree on whether the iroh backend is present.
+enable-iroh = [
+    "a3net-blobstore/iroh",
+    "a3net-blobstore",
+    "a3net-chatstore/iroh",
+    "a3net-chatstore",
+    "a3chat-app/iroh",
+    "dep:iroh",
+    "dep:iroh-blobs",
+    "dep:iroh-docs",
+    "dep:iroh-gossip",
+]
 
 [dev-dependencies]
 tempfile               = "3"

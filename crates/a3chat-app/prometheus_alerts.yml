@@ -1,0 +1,199 @@
+# Prometheus Alert Rules for A3Chat Group Sync
+# Place this file in Prometheus's rules directory
+# https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/
+
+groups:
+  - name: a3chat_group_sync_alerts
+    rules:
+      # Phase 5c: High sync error rate
+      # Alert when sync errors exceed 5% of total syncs in the last 5 minutes
+      - alert: A3ChatGroupSyncHighErrorRate
+        expr: |
+          (
+            rate(a3chat_group_sync_errors_total[5m])
+            /
+            rate(a3chat_group_sync_messages_total[5m])
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "High group sync error rate"
+          description: |
+            Group sync error rate is {{ $value | humanizePercentage }}
+            (errors: {{ $value | printf "%.2f" }}, threshold: 5%).
+            This may indicate network issues or iroh node unavailability.
+          runbook_url: "https://docs.a3net.io/runbooks/group-sync"
+
+      # Phase 5c: Sync service unavailable
+      # Alert when no messages have been synced in 10 minutes (assuming regular activity)
+      - alert: A3ChatGroupSyncStalled
+        expr: |
+          a3chat_group_sync_active_groups > 0
+          and
+          (time() - a3chat_group_sync_last_timestamp_seconds) > 600
+        for: 5m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "Group sync appears stalled"
+          description: |
+            No sync activity detected for {{ $value | humanizeDuration }}
+            despite {{ a3chat_group_sync_active_groups }} active groups.
+            Sync service may be stuck or network connectivity issues.
+
+      # Phase 5c: Critical sync failure
+      # Alert on rapid accumulation of sync errors
+      - alert: A3ChatGroupSyncCriticalFailure
+        expr: |
+          increase(a3chat_group_sync_errors_total[1m]) > 10
+        for: 1m
+        labels:
+          severity: critical
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "Critical: Rapid sync failures"
+          description: |
+            {{ $value }} sync errors in the last minute.
+            This indicates a severe problem with the P2P sync network.
+          runbook_url: "https://docs.a3net.io/runbooks/group-sync-critical"
+
+      # Phase 5c: Sync latency degradation
+      # Alert when sync duration exceeds 5 seconds (unusual for local network)
+      - alert: A3ChatGroupSyncLatencyHigh
+        expr: |
+          a3chat_group_sync_last_duration_ms > 5000
+        for: 3m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "Group sync latency is high"
+          description: |
+            Last sync took {{ $value }}ms (threshold: 5000ms).
+            This may indicate network congestion or peer unavailability.
+
+      # Phase 5c: No active sync groups but service expected
+      # Warning when active groups drops to zero unexpectedly
+      - alert: A3ChatGroupSyncNoActiveGroups
+        expr: |
+          a3chat_group_sync_active_groups == 0
+          and
+          a3chat_uptime_secs > 300
+        for: 15m
+        labels:
+          severity: info
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "No active group sync sessions"
+          description: |
+            No groups are currently syncing despite service uptime.
+            This is normal if the user has no group chats.
+
+      # Phase 5c: Large backfill detected
+      # Indicates a long offline period or initial sync
+      - alert: A3ChatGroupSyncLargeBackfill
+        expr: |
+          a3chat_group_sync_last_backfill_size > 100
+        for: 0m
+        labels:
+          severity: info
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "Large backfill detected"
+          description: |
+            Last backfill was {{ $value }} messages.
+            This may indicate a long offline period or initial sync.
+
+      # Phase 5c: High error rate (derived metric)
+      - alert: A3ChatGroupSyncHighErrorRateDerived
+        expr: |
+          a3chat_group_sync_error_rate_percent > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "High group sync error rate (derived)"
+          description: |
+            Derived error rate is {{ $value | printf "%.2f" }}%.
+            Consider investigating sync failures.
+
+      # Phase 5c: Low throughput warning
+      - alert: A3ChatGroupSyncLowThroughput
+        expr: |
+          a3chat_group_sync_throughput_msg_per_sec < 0.1
+          and a3chat_group_sync_active_groups > 0
+          and a3chat_uptime_secs > 60
+        for: 5m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "Low sync throughput"
+          description: |
+            Sync throughput is {{ $value | printf "%.2f" }} msg/s.
+            This may indicate sync issues or network latency.
+
+      # Phase 5c: Bytes sync stalled
+      - alert: A3ChatGroupSyncBytesStalled
+        expr: |
+          a3chat_group_sync_bytes_total == 0
+          and a3chat_group_sync_active_groups > 0
+          and a3chat_uptime_secs > 300
+        for: 10m
+        labels:
+          severity: warning
+          component: group_sync
+          phase: 5c
+        annotations:
+          summary: "No bytes synced despite active groups"
+          description: |
+            Despite {{ a3chat_group_sync_active_groups }} active groups,
+            no bytes have been synced in 5+ minutes.
+
+  - name: a3chat_rpc_alerts
+    rules:
+      # High RPC error rate
+      - alert: A3ChatRpcHighErrorRate
+        expr: |
+          (
+            rate(a3chat_rpc_errors_total[5m])
+            /
+            rate(a3chat_rpc_calls_total[5m])
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: rpc
+        annotations:
+          summary: "High RPC error rate"
+          description: |
+            RPC error rate is {{ $value | humanizePercentage }}.
+            Review server logs for details.
+
+      # Slow RPC responses
+      - alert: A3ChatRpcSlowResponses
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(a3chat_method_latency_avg_us[5m])) by (le, method)
+          ) > 1000000
+        for: 5m
+        labels:
+          severity: warning
+          component: rpc
+        annotations:
+          summary: "Slow RPC responses"
+          description: |
+            P95 latency for RPC methods exceeds 1 second.
+            Affected method: {{ $labels.method }}

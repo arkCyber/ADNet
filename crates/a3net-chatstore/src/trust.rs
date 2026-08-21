@@ -289,6 +289,51 @@ impl ChatTrustStore {
         )?;
         Ok(n.max(0) as u64)
     }
+
+    /// Efficiently check if `target_user_id` is blocked by `owner_user_id`.
+    ///
+    /// DO-178C §6.1 — This is the transport-layer query that lets
+    /// gossip/bitswap quickly skip blocked peers without iterating all
+    /// records. Uses an indexed primary-key lookup (constant time).
+    pub async fn is_blocked(&self, owner_user_id: &str, target_user_id: &str) -> Result<bool> {
+        let conn = self.db.lock().await;
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM chat_trust
+                 WHERE owner_user_id = ?1 AND target_user_id = ?2 AND level = -3
+                 LIMIT 1",
+                params![owner_user_id, target_user_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
+    /// List all blocked user IDs for `owner_user_id`.
+    ///
+    /// DO-178C §6.1 — Returns the set of blocked users for audit
+    /// and UI display purposes.
+    pub async fn list_blocked(&self, owner_user_id: &str) -> Result<Vec<ChatTrustRecord>> {
+        let conn = self.db.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT owner_user_id, target_user_id, level, last_event_unix, event_count, notes
+             FROM chat_trust WHERE owner_user_id = ?1 AND level = -3
+             ORDER BY last_event_unix DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![owner_user_id], |r| {
+                Ok(ChatTrustRecord {
+                    owner_user_id: r.get(0)?,
+                    target_user_id: r.get(1)?,
+                    level: r.get(2)?,
+                    last_event_unix: r.get(3)?,
+                    event_count: r.get(4)?,
+                    notes: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 /// Apply the `chat_trust` schema to a raw connection. Exposed so
@@ -305,7 +350,7 @@ pub fn init_trust_schema(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema;
+    
     use rusqlite::Connection;
     use tempfile::tempdir;
 
@@ -394,5 +439,95 @@ mod tests {
         s.set("alice", "carol", -3, None).await.unwrap();
         s.set("alice", "dave", 1, None).await.unwrap();
         assert_eq!(s.count_blocked("alice").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn is_blocked_returns_true_for_blocked_user() {
+        let s = store_async().await;
+        s.set("alice", "bob", -3, None).await.unwrap();
+        assert!(s.is_blocked("alice", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_blocked_returns_false_for_non_blocked_user() {
+        let s = store_async().await;
+        s.set("alice", "bob", 2, None).await.unwrap();
+        assert!(!s.is_blocked("alice", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_blocked_returns_false_for_unknown_pair() {
+        let s = store_async().await;
+        assert!(!s.is_blocked("alice", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_blocked_downgrade_from_trusted_to_blocked() {
+        let s = store_async().await;
+        // First set as trusted.
+        s.set("alice", "bob", 3, None).await.unwrap();
+        assert!(!s.is_blocked("alice", "bob").await.unwrap());
+        // Then block.
+        s.set("alice", "bob", -3, None).await.unwrap();
+        assert!(s.is_blocked("alice", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_blocked_unblocks_after_clear() {
+        let s = store_async().await;
+        s.set("alice", "bob", -3, None).await.unwrap();
+        assert!(s.is_blocked("alice", "bob").await.unwrap());
+        s.clear("alice", "bob").await.unwrap();
+        assert!(!s.is_blocked("alice", "bob").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn list_blocked_returns_all_blocked_users() {
+        let s = store_async().await;
+        s.set("alice", "bob", -3, None).await.unwrap();
+        s.set("alice", "carol", -3, None).await.unwrap();
+        s.set("alice", "dave", 2, None).await.unwrap(); // not blocked
+        let blocked = s.list_blocked("alice").await.unwrap();
+        assert_eq!(blocked.len(), 2);
+        let ids: Vec<_> = blocked.iter().map(|r| r.target_user_id.clone()).collect();
+        assert!(ids.contains(&"bob".to_string()));
+        assert!(ids.contains(&"carol".to_string()));
+        assert!(!ids.contains(&"dave".to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_blocked_empty_when_no_blocked_users() {
+        let s = store_async().await;
+        s.set("alice", "bob", 2, None).await.unwrap();
+        let blocked = s.list_blocked("alice").await.unwrap();
+        assert!(blocked.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_blocked_sorted_by_most_recent() {
+        let s = store_async().await;
+        // Insert bob then carol. Both are blocked at level -3.
+        s.set("alice", "bob", -3, None).await.unwrap();
+        s.set("alice", "carol", -3, None).await.unwrap();
+        let blocked = s.list_blocked("alice").await.unwrap();
+        assert_eq!(blocked.len(), 2);
+        // Verify both blocked users are returned.
+        let ids: Vec<_> = blocked.iter().map(|r| r.target_user_id.clone()).collect();
+        assert!(ids.contains(&"bob".to_string()));
+        assert!(ids.contains(&"carol".to_string()));
+    }
+
+    #[tokio::test]
+    async fn is_blocked_cross_user_isolation() {
+        let s = store_async().await;
+        // Alice blocks Bob.
+        s.set("alice", "bob", -3, None).await.unwrap();
+        // Carol blocks Dave.
+        s.set("carol", "dave", -3, None).await.unwrap();
+        // Cross checks: Alice cannot see Carol's block.
+        assert!(s.is_blocked("alice", "bob").await.unwrap());
+        assert!(!s.is_blocked("alice", "dave").await.unwrap());
+        assert!(!s.is_blocked("carol", "bob").await.unwrap());
+        assert!(s.is_blocked("carol", "dave").await.unwrap());
     }
 }

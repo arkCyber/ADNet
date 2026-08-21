@@ -99,19 +99,26 @@ pub struct AuditSummary {
 /// in the JSON-RPC catalog but the dispatcher returns
 /// `method_not_found`. Operators calling these via the CLI get an
 /// error: this is intentional surface for the audit.
-pub const STUB_METHODS: &[&str] = &[
-    A3chatRpcMethod::MEDIA_UPLOAD_INIT,
-    A3chatRpcMethod::MEDIA_UPLOAD_CHUNK,
-    A3chatRpcMethod::MEDIA_UPLOAD_FINALIZE,
-    A3chatRpcMethod::MEDIA_DOWNLOAD_GET,
-    A3chatRpcMethod::E2E_BUNDLE_EXPORT,
-    A3chatRpcMethod::E2E_BUNDLE_IMPORT,
-    A3chatRpcMethod::STREAM_SUBSCRIBE,
-];
+///
+/// As of the F-07 surface sweep, every method in `A3chatRpcMethod::ALL`
+/// ships a real handler. This list is intentionally left empty so
+/// the audit's `summary.stub_methods` field can only ever grow (a
+/// new unwired method must be added here as a tripwire) — never
+/// shrink silently. Historically this list contained media upload /
+/// download, E2E bundle, and stream-subscribe before those services
+/// graduated from stub to production.
+pub const STUB_METHODS: &[&str] = &[];
 
 /// Methods the CLI has explicit subcommand wiring for. Anything not in
 /// this list is reachable via the `a3chat rpc <method>` fallback.
+///
+/// This list is the **single source of truth** for the
+/// `cli_support_matrix[].cli_support == Direct` classification in
+/// [`generate_report`]. Adding a subcommand must come with a row
+/// here — the unit tests in `audit_report.rs` enforce the inverse
+/// invariant (no entry here can lack a backing subcommand).
 pub const CLI_DIRECTLY_SUPPORTED: &[&str] = &[
+    // ── Conversation / Message / Sync ───────────────────────────
     A3chatRpcMethod::CHAT_CONVERSATION_LIST,
     A3chatRpcMethod::CHAT_CONVERSATION_OPEN,
     A3chatRpcMethod::CHAT_MESSAGE_SEND,
@@ -124,12 +131,108 @@ pub const CLI_DIRECTLY_SUPPORTED: &[&str] = &[
     A3chatRpcMethod::CHAT_SYNC_SNAPSHOT,
     A3chatRpcMethod::CHAT_SYNC_DELTA,
     A3chatRpcMethod::CHAT_SYNC_COMPRESSED,
-    // Profile (a3net-userstore bridge)
+    // ── Profile (a3net-userstore bridge) ────────────────────────
     A3chatRpcMethod::PROFILE_GET,
     A3chatRpcMethod::PROFILE_DIGIT_GET,
     A3chatRpcMethod::PROFILE_PUBLIC_KEY_LIST,
     A3chatRpcMethod::PROFILE_DEVICE_LIST,
     A3chatRpcMethod::PROFILE_AVATAR_SET,
+    // ── Contact (13 subcommands) ─────────────────────────────────
+    A3chatRpcMethod::CONTACT_LIST,
+    A3chatRpcMethod::CONTACT_ADD_REQUEST,
+    A3chatRpcMethod::CONTACT_ACCEPT_REQUEST,
+    A3chatRpcMethod::CONTACT_ADD,
+    A3chatRpcMethod::CONTACT_REMOVE,
+    A3chatRpcMethod::CONTACT_GET,
+    A3chatRpcMethod::CONTACT_SEARCH,
+    A3chatRpcMethod::CONTACT_TOGGLE_FAVORITE,
+    A3chatRpcMethod::CONTACT_UPDATE,
+    A3chatRpcMethod::CONTACT_BLOCK,
+    A3chatRpcMethod::CONTACT_UNBLOCK,
+    A3chatRpcMethod::CONTACT_QR_INVITE,
+    // ── Group (29 subcommands) ───────────────────────────────────
+    A3chatRpcMethod::GROUP_CREATE,
+    A3chatRpcMethod::GROUP_INVITE,
+    A3chatRpcMethod::GROUP_JOIN,
+    A3chatRpcMethod::GROUP_LEAVE,
+    A3chatRpcMethod::GROUP_LIST,
+    A3chatRpcMethod::GROUP_MEMBERS,
+    A3chatRpcMethod::GROUP_MEMBER_GET,
+    A3chatRpcMethod::GROUP_MEMBER_ADD,
+    A3chatRpcMethod::GROUP_MEMBER_REMOVE,
+    A3chatRpcMethod::GROUP_MEMBER_ROLE,
+    A3chatRpcMethod::GROUP_TRANSFER_OWNERSHIP,
+    A3chatRpcMethod::GROUP_METADATA_UPDATE,
+    A3chatRpcMethod::GROUP_ANNOUNCEMENT_SET,
+    A3chatRpcMethod::GROUP_DISSOLVE,
+    A3chatRpcMethod::GROUP_MUTE_MEMBER,
+    A3chatRpcMethod::GROUP_MUTE_ALL,
+    A3chatRpcMethod::GROUP_UNMUTE_MEMBER,
+    A3chatRpcMethod::GROUP_UNMUTE_ALL,
+    A3chatRpcMethod::GROUP_LIST_MUTED,
+    A3chatRpcMethod::GROUP_NICKNAME_SET,
+    A3chatRpcMethod::GROUP_NICKNAME_GET,
+    A3chatRpcMethod::GROUP_NICKNAME_LIST,
+    A3chatRpcMethod::GROUP_MENTION_PARSE,
+    A3chatRpcMethod::GROUP_INVITE_LIST,
+    A3chatRpcMethod::GROUP_INVITE_ACCEPT,
+    A3chatRpcMethod::GROUP_INVITE_DECLINE,
+    A3chatRpcMethod::GROUP_INVITE_REVOKE,
+    A3chatRpcMethod::GROUP_INVITE_GET,
+    // ── Moments / 朋友圈 (15 subcommands) ──────────────────────
+    A3chatRpcMethod::MOMENTS_NODE_INFO,
+    A3chatRpcMethod::MOMENTS_POST_CREATE,
+    A3chatRpcMethod::MOMENTS_POST_GET,
+    A3chatRpcMethod::MOMENTS_POST_UPDATE,
+    A3chatRpcMethod::MOMENTS_POST_DELETE,
+    A3chatRpcMethod::MOMENTS_POSTS_BY_USER,
+    A3chatRpcMethod::MOMENTS_TIMELINE,
+    A3chatRpcMethod::MOMENTS_COMMENT_ADD,
+    A3chatRpcMethod::MOMENTS_COMMENTS_LIST,
+    A3chatRpcMethod::MOMENTS_REACT,
+    A3chatRpcMethod::MOMENTS_REACTIONS_LIST,
+    A3chatRpcMethod::MOMENTS_FOLLOW,
+    A3chatRpcMethod::MOMENTS_UNFOLLOW,
+    A3chatRpcMethod::MOMENTS_FOLLOWING_LIST,
+    A3chatRpcMethod::MOMENTS_FOLLOWING_CHECK,
+    A3chatRpcMethod::MOMENTS_VERIFY_POST,
+    A3chatRpcMethod::MOMENTS_VERIFY_COMMENT,
+    A3chatRpcMethod::MOMENTS_VERIFY_REACTION,
+    // ── Link bookmarks (14 subcommands) ────────────────────────
+    A3chatRpcMethod::LINK_BOOKMARK_ADD,
+    A3chatRpcMethod::LINK_BOOKMARK_UPDATE,
+    A3chatRpcMethod::LINK_BOOKMARK_GET,
+    A3chatRpcMethod::LINK_BOOKMARK_GET_BY_URL,
+    A3chatRpcMethod::LINK_BOOKMARK_LIST,
+    A3chatRpcMethod::LINK_BOOKMARK_SEARCH,
+    A3chatRpcMethod::LINK_BOOKMARK_DELETE,
+    A3chatRpcMethod::LINK_BOOKMARK_SET_PINNED,
+    A3chatRpcMethod::LINK_BOOKMARK_SET_ARCHIVED,
+    A3chatRpcMethod::LINK_BOOKMARK_TOUCH_VISIT,
+    A3chatRpcMethod::LINK_BOOKMARK_TAGS,
+    A3chatRpcMethod::LINK_BOOKMARK_FOLDERS,
+    A3chatRpcMethod::LINK_BOOKMARK_COUNT,
+    // ── Media (5 subcommands) ───────────────────────────────────
+    A3chatRpcMethod::MEDIA_HEALTH,
+    A3chatRpcMethod::MEDIA_UPLOAD_INIT,
+    A3chatRpcMethod::MEDIA_UPLOAD_CHUNK,
+    A3chatRpcMethod::MEDIA_UPLOAD_FINALIZE,
+    A3chatRpcMethod::MEDIA_DOWNLOAD_GET,
+    // ── Moderation (5 subcommands) ──────────────────────────────
+    A3chatRpcMethod::MODERATION_CHECK_CONTENT,
+    A3chatRpcMethod::MODERATION_CHECK_ATTACHMENT,
+    A3chatRpcMethod::MODERATION_LIST_BLOCKED,
+    A3chatRpcMethod::MODERATION_SET_DENY_DEFAULT,
+    A3chatRpcMethod::MODERATION_STATS,
+    // ── Presence (2 subcommands) ────────────────────────────────
+    A3chatRpcMethod::PRESENCE_PUBLISH,
+    A3chatRpcMethod::PRESENCE_SUBSCRIBE,
+    // ── Bundle / Stream (raw RPC + dedicated subcommands) ───────
+    A3chatRpcMethod::E2E_BUNDLE_EXPORT,
+    A3chatRpcMethod::E2E_BUNDLE_IMPORT,
+    A3chatRpcMethod::STREAM_SUBSCRIBE,
+    A3chatRpcMethod::STREAM_UNSUBSCRIBE,
+    A3chatRpcMethod::STREAM_LIST,
 ];
 
 /// Generate the audit report. Pure function — given the same crate

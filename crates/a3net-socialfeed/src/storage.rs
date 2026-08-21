@@ -288,6 +288,108 @@ impl SocialFeedStorage {
         Ok(out)
     }
 
+    /// Edit an existing comment. SR-MOMENTS-2: the caller must own
+    /// the comment (checked by the service layer; the storage layer
+    /// is pure persistence). Idempotent — `is_edited` is flipped on
+    /// and `edited_at` is set to the supplied value (defaulting to
+    /// `updated_at`). Returns `NotFound` when the comment does not
+    /// exist so the dispatcher can map to a 404 error code.
+    pub fn update_comment(&self, comment: &a3net_types::social_feed::SocialComment) -> Result<()> {
+        let _ = a3net_types::invariants::validate_id("comment_id", &comment.comment_id)?;
+        let _ = a3net_types::invariants::validate_id("post_id", &comment.post_id)?;
+        // Stamp server-side bookkeeping so an upstream caller
+        // can't silently leave `is_edited=false` with an updated
+        // body.
+        let mut to_write = comment.clone();
+        to_write.is_edited = true;
+        to_write.edited_at = Some(to_write.updated_at.max(to_write.created_at));
+        to_write.validate()?;
+        let conn = self.handle();
+        let tx = conn.unchecked_transaction()?;
+        // Reject if the comment doesn't exist (or has been
+        // deleted) so the dispatcher can map to `NotFound`.
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM comments WHERE comment_id = ?1",
+            params![to_write.comment_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(SocialFeedError::not_found(format!(
+                "comment {} not found",
+                to_write.comment_id
+            )));
+        }
+        tx.execute(
+            "UPDATE comments
+             SET comment_json = ?1, updated_at = ?2
+             WHERE comment_id = ?3",
+            params![
+                serde_json::to_string(&to_write)?,
+                to_write.updated_at as i64,
+                to_write.comment_id,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Delete a comment by id. Cascades through `comment_mentions`
+    /// and `reactions` (`target_id = comment_id`) so the post-level
+    /// `list_post_comments` and `list_reactions(target)` stay
+    /// consistent. Idempotent — missing comments return `Ok(())`.
+    pub fn delete_comment(&self, comment_id: &str) -> Result<bool> {
+        let _ = a3net_types::invariants::validate_id("comment_id", comment_id)?;
+        let conn = self.handle();
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "DELETE FROM comments WHERE comment_id = ?1",
+            params![comment_id],
+        )?;
+        if n > 0 {
+            tx.execute(
+                "DELETE FROM comment_mentions WHERE comment_id = ?1",
+                params![comment_id],
+            )?;
+            tx.execute(
+                "DELETE FROM post_comments WHERE comment_id = ?1",
+                params![comment_id],
+            )?;
+            tx.execute(
+                "DELETE FROM reactions WHERE target_id = ?1 AND target_type = 'comment'",
+                params![comment_id],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        } else {
+            tx.commit()?;
+            Ok(false)
+        }
+    }
+
+    /// Read a single comment by id. Returns `Ok(None)` when missing.
+    pub fn get_comment(
+        &self,
+        comment_id: &str,
+    ) -> Result<Option<a3net_types::social_feed::SocialComment>> {
+        let _ = a3net_types::invariants::validate_id("comment_id", comment_id)?;
+        let conn = self.handle();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT comment_json FROM comments WHERE comment_id = ?1",
+                params![comment_id],
+                |row| row.get(0),
+            )
+            .ok();
+        match row {
+            None => Ok(None),
+            Some(json) => {
+                let c: a3net_types::social_feed::SocialComment = serde_json::from_str(&json)?;
+                c.validate()?;
+                Ok(Some(c))
+            }
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // Reactions
     // ─────────────────────────────────────────────────────────────────
@@ -338,6 +440,27 @@ impl SocialFeedStorage {
             out.push(r);
         }
         Ok(out)
+    }
+
+    /// Delete a single user's reaction on a target. SR-MOMENTS-3:
+    /// returns `true` when a row was actually removed, `false`
+    /// when the user had no such reaction (idempotent — same shape
+    /// as `chat_reaction_service`).
+    pub fn delete_reaction(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::invariants::ReactionTarget,
+        user_id: &str,
+    ) -> Result<bool> {
+        let _ = a3net_types::invariants::validate_id("target_id", target_id)?;
+        let _ = a3net_types::invariants::validate_id("user_id", user_id)?;
+        let conn = self.handle();
+        let n = conn.execute(
+            "DELETE FROM reactions
+             WHERE target_id = ?1 AND target_type = ?2 AND user_id = ?3",
+            params![target_id, target_type.as_str(), user_id],
+        )?;
+        Ok(n > 0)
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -395,6 +518,260 @@ impl SocialFeedStorage {
             params![follower_id, following_id],
         )?;
         Ok(())
+    }
+
+    /// List the **followers** (incoming edges) of `user_id` — the
+    /// set of accounts that follow them. SR-MOMENTS-4: symmetry
+    /// with `list_following` so a profile screen can show both
+    /// directions of the graph.
+    pub fn list_followers(&self, user_id: &str) -> Result<Vec<String>> {
+        let _ = a3net_types::invariants::validate_id("user_id", user_id)?;
+        let conn = self.handle();
+        let mut stmt = conn.prepare_cached(
+            "SELECT follower_id FROM follows WHERE following_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![user_id], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for id in rows {
+            out.push(id?);
+        }
+        Ok(out)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Shares — v2 schema
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Persist a [`ShareRecord`]. SR-MOMENTS-5: idempotent on
+    /// `(target_id, target_type, sharer_id)` so a re-share click
+    /// is a silent no-op rather than a duplicate row.
+    /// Returns `Ok(true)` when a new row was inserted, `Ok(false)`
+    /// when the user had already shared the same target.
+    pub fn save_share(&self, share: &a3net_types::social_feed::ShareRecord) -> Result<bool> {
+        share.validate()?;
+        let conn = self.handle();
+        let tx = conn.unchecked_transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO post_shares
+             (share_id, target_id, target_type, sharer_id, sharer_name,
+              comment, created_at, integrity_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                share.share_id,
+                share.target_id,
+                share.target_type.as_str(),
+                share.sharer_id,
+                share.sharer_name,
+                share.comment,
+                share.created_at as i64,
+                share.integrity_hash.clone().unwrap_or_default(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(inserted > 0)
+    }
+
+    pub fn list_post_shares(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> Result<Vec<a3net_types::social_feed::ShareRecord>> {
+        let _ = a3net_types::invariants::validate_id("target_id", target_id)?;
+        let conn = self.handle();
+        let mut stmt = conn.prepare_cached(
+            "SELECT share_id, target_id, target_type, sharer_id, sharer_name,
+                    comment, created_at, integrity_hash
+             FROM post_shares
+             WHERE target_id = ?1 AND target_type = ?2
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![target_id, target_type.as_str()], |row| {
+            Ok(a3net_types::social_feed::ShareRecord {
+                share_id: row.get(0)?,
+                target_id: row.get(1)?,
+                target_type: a3net_types::social_feed::ShareTarget::from_strict(
+                    row.get::<_, String>(2)?.as_str(),
+                )
+                .unwrap_or(a3net_types::social_feed::ShareTarget::Post),
+                sharer_id: row.get(3)?,
+                sharer_name: row.get(4)?,
+                comment: row.get(5)?,
+                created_at: row.get::<_, i64>(6)? as u64,
+                integrity_hash: row.get(7)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let r = r?;
+            if r.verify_integrity() {
+                out.push(r);
+            } else {
+                tracing::warn!(share_id = %r.share_id, "dropping share with invalid integrity hash");
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn count_shares(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> Result<u32> {
+        let _ = a3net_types::invariants::validate_id("target_id", target_id)?;
+        let conn = self.handle();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM post_shares
+             WHERE target_id = ?1 AND target_type = ?2",
+            params![target_id, target_type.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Reports — v2 schema
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Persist a [`ReportRecord`]. SR-MOMENTS-6: idempotent on
+    /// `(target_id, target_type, reporter_id)` so a single user
+    /// can't flood moderation with duplicate reports; returns
+    /// `Ok(false)` when the same reporter had already filed the
+    /// same reason.
+    pub fn save_report(&self, report: &a3net_types::social_feed::ReportRecord) -> Result<bool> {
+        report.validate()?;
+        let conn = self.handle();
+        let tx = conn.unchecked_transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO post_reports
+             (report_id, target_id, target_type, reporter_id, reason, notes, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                report.report_id,
+                report.target_id,
+                report.target_type.as_str(),
+                report.reporter_id,
+                report.reason.as_str(),
+                report.notes,
+                report.created_at as i64,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(inserted > 0)
+    }
+
+    pub fn list_target_reports(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> Result<Vec<a3net_types::social_feed::ReportRecord>> {
+        let _ = a3net_types::invariants::validate_id("target_id", target_id)?;
+        let conn = self.handle();
+        let mut stmt = conn.prepare_cached(
+            "SELECT report_id, target_id, target_type, reporter_id, reason, notes, created_at
+             FROM post_reports
+             WHERE target_id = ?1 AND target_type = ?2
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![target_id, target_type.as_str()], |row| {
+            let reason_str: String = row.get(4)?;
+            let reason = match a3net_types::social_feed::ReportReason::from_strict(&reason_str) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(target_id = %target_id, "invalid ReportReason in row: {e}");
+                    // Fall back to `Other` so a single corrupt row
+                    // doesn't fail the whole `list_target_reports`.
+                    a3net_types::social_feed::ReportReason::Other
+                }
+            };
+            Ok(a3net_types::social_feed::ReportRecord {
+                report_id: row.get(0)?,
+                target_id: row.get(1)?,
+                target_type: a3net_types::social_feed::ShareTarget::from_strict(
+                    row.get::<_, String>(2)?.as_str(),
+                )
+                .unwrap_or(a3net_types::social_feed::ShareTarget::Post),
+                reporter_id: row.get(3)?,
+                reason,
+                notes: row.get(5)?,
+                created_at: row.get::<_, i64>(6)? as u64,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Blocklist — v2 schema
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Persist a [`BlockRecord`]. Idempotent — re-blocking the same
+    /// user is a no-op.
+    pub fn save_block(&self, block: &a3net_types::social_feed::BlockRecord) -> Result<bool> {
+        block.validate()?;
+        let conn = self.handle();
+        let tx = conn.unchecked_transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO blocklist
+             (owner_id, blocked_user_id, created_at, reason)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                block.owner_id,
+                block.blocked_user_id,
+                block.created_at as i64,
+                block.reason.clone(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(inserted > 0)
+    }
+
+    /// Remove a block. Idempotent — returns `Ok(false)` when the
+    /// pair wasn't present.
+    pub fn delete_block(&self, owner_id: &str, blocked_user_id: &str) -> Result<bool> {
+        let _ = a3net_types::invariants::validate_id("owner_id", owner_id)?;
+        let _ = a3net_types::invariants::validate_id("blocked_user_id", blocked_user_id)?;
+        let conn = self.handle();
+        let n = conn.execute(
+            "DELETE FROM blocklist
+             WHERE owner_id = ?1 AND blocked_user_id = ?2",
+            params![owner_id, blocked_user_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn is_blocked(&self, owner_id: &str, candidate_id: &str) -> Result<bool> {
+        let _ = a3net_types::invariants::validate_id("owner_id", owner_id)?;
+        let _ = a3net_types::invariants::validate_id("candidate_id", candidate_id)?;
+        let conn = self.handle();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM blocklist
+             WHERE owner_id = ?1 AND blocked_user_id = ?2",
+            params![owner_id, candidate_id],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// All `blocked_user_id`s that `owner_id` has blocked. Used by
+    /// the timeline's `ForViewer` filter and by the share /
+    /// report / blocklist Tauri screens.
+    pub fn list_blocklist(&self, owner_id: &str) -> Result<Vec<String>> {
+        let _ = a3net_types::invariants::validate_id("owner_id", owner_id)?;
+        let conn = self.handle();
+        let mut stmt = conn.prepare_cached(
+            "SELECT blocked_user_id FROM blocklist
+             WHERE owner_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![owner_id], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for id in rows {
+            out.push(id?);
+        }
+        Ok(out)
     }
 }
 

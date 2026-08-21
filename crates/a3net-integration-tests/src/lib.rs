@@ -21,6 +21,13 @@ pub mod chaos;
 #[cfg(feature = "legacy_tests")]
 pub mod multi_node;
 
+/// Phase 5d: Group Sync E2E tests.
+#[cfg(feature = "chaos_tests")]
+pub mod phase5d;
+
+#[cfg(test)]
+pub mod test_utils;
+
 #[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]

@@ -36,9 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         typing_indicators_enabled: true,
         experimental_json: "{}".into(),
     };
-    store.put_profile(alice).await?;
+    store.put_profile(alice)?;
 
-    let got = store.get_profile("alice").await?.expect("alice");
+    let got = store.get_profile("alice")?.expect("alice");
     println!(
         "alice: display={} bio={} theme={}",
         got.display_name, got.bio, got.preferences.theme
@@ -51,8 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         theme: "light".into(),
         ..got.preferences.clone()
     };
-    store.put_preferences("alice", new_prefs).await?;
-    let after = store.get_profile("alice").await?.expect("alice");
+    store.put_preferences("alice", new_prefs)?;
+    let after = store.get_profile("alice")?.expect("alice");
     println!("alice theme after patch: {}", after.preferences.theme);
     assert_eq!(after.preferences.theme, "light");
     assert_eq!(after.bio, "test user");
@@ -63,11 +63,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_id: "alice".into(),
         algorithm: PublicKeyAlgorithm::Ed25519.as_str().to_string(),
         key_material: "MCowBQYDK2VwAyEARAMPLEKEY".into(),
+        label: "primary".into(),
         created_at: 0,
         revoked_at: None,
     };
-    store.put_public_key(key).await?;
-    let keys = store.list_public_keys("alice").await?;
+    store.put_public_key(key)?;
+    let keys = store.list_public_keys("alice")?;
     println!("alice has {} public key(s)", keys.len());
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].parsed_algorithm(), PublicKeyAlgorithm::Ed25519);
@@ -83,17 +84,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         paired_at: 0,
         revoked_at: None,
     };
-    store.put_device(device).await?;
-    let devices = store.list_devices("alice").await?;
+    store.put_device(device)?;
+    let devices = store.list_devices("alice")?;
     println!("alice has {} device(s)", devices.len());
     assert_eq!(devices.len(), 1);
     assert_eq!(devices[0].parsed_class(), DeviceClass::Desktop);
 
     // 5. Derive the canonical 12-digit Exodus ID.
-    let digit = store.ensure_user_digit("alice").await?;
+    let digit = store.ensure_user_digit("alice")?;
     println!("alice 12-digit id: {digit}");
     assert_eq!(digit.len(), 12);
-    let again = store.resolve_user_digit("alice").await?.expect("digit");
+    let again = store.resolve_user_digit("alice")?.expect("digit");
     assert_eq!(again, digit);
     println!("ok");
     Ok(())

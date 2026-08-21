@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::A3chatError;
 use crate::id::{ConversationId, MessageId, UserId, validate_id};
 use crate::validation::{
-    MAX_CONTENT_LEN, validate_attachments, validate_content, validate_hex, validate_sequence,
+    MAX_CONTENT_LEN, validate_attachments, validate_content, validate_hex, validate_name,
+    validate_sequence,
 };
 
 /// Re-export of `validation::MAX_PREVIEW_LEN` for ergonomic `use`
@@ -37,8 +38,14 @@ pub fn truncate_preview(s: &str, max: usize) -> String {
     out
 }
 
-/// Maximum per-sender sequence number. Matches `a3net_types::group_chat::MAX_SEQUENCE`.
-pub const MAX_SEQUENCE: u32 = 9999;
+/// Maximum per-sender sequence number. Matches
+/// `a3net_types::group_chat::MAX_SEQUENCE` (currently 9999).
+/// Audit issue #20 considered raising this — see
+/// `docs/AUDIT_A3CHAT_VS_WECHAT.md` for the rationale but the
+/// constants must stay in sync because the storage layer and the
+/// hub share them at the wire boundary. Future work will lift
+/// both simultaneously.
+pub const MAX_SEQUENCE: u32 = 9_999;
 
 /// Wire shape of a single message body. `Plain` is used for
 /// self-notifications / system messages; `Encrypted` is the default
@@ -128,6 +135,17 @@ pub enum MessageType {
     System,
     /// Call signalling / push-to-talk marker. Body is opaque.
     Call,
+    /// F-15 — geolocation share (latitude/longitude/accuracy). Body
+    /// is `MessageBody::Plain { content: "geo:..." }` so the existing
+    /// plaintext body remains the authoritative envelope. The UI
+    /// additionally writes the typed fields to the message JSON when
+    /// building outbound cards.
+    Location,
+    /// F-16 — shared contact card (WeChat 名片). Same convention as
+    /// `Location`: the existing plaintext body carries a `card:`
+    /// description, while the message JSON may also include the
+    /// typed contact record for the receiving client.
+    ContactCard,
 }
 
 impl MessageType {
@@ -140,6 +158,8 @@ impl MessageType {
             MessageType::Video => "video",
             MessageType::System => "system",
             MessageType::Call => "call",
+            MessageType::Location => "location",
+            MessageType::ContactCard => "contact_card",
         }
     }
 
@@ -152,6 +172,8 @@ impl MessageType {
             "video" => MessageType::Video,
             "system" => MessageType::System,
             "call" => MessageType::Call,
+            "location" => MessageType::Location,
+            "contact_card" => MessageType::ContactCard,
             // Forward-compat: unknown kinds deserialize as None; the
             // strict path is `parse_strict`.
             _ => return None,
@@ -170,6 +192,85 @@ pub struct Attachment {
     pub file_name: String,
     pub file_size: u64,
     pub thumbnail_hash: Option<String>,
+}
+
+/// F-15 — typed payload for a shared location. Both fields use
+/// micro-degrees so a f64-equality test stays exact across hops. The
+/// label is optional (e.g. "Café du Coin"); an empty string means
+/// "show the raw coordinates".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LocationPayload {
+    /// Latitude in decimal degrees, WGS84 (positive = north).
+    pub latitude: f64,
+    /// Longitude in decimal degrees, WGS84 (positive = east).
+    pub longitude: f64,
+    /// Optional accuracy in metres. `None` when unknown.
+    pub accuracy_meters: Option<f32>,
+    /// Optional place label (free-form).
+    pub label: Option<String>,
+    /// Source of the fix — `gps`, `network`, `manual`.
+    pub source: LocationSource,
+}
+
+impl LocationPayload {
+    pub fn validate(&self) -> Result<(), A3chatError> {
+        if !(-90.0..=90.0).contains(&self.latitude) || !(-180.0..=180.0).contains(&self.longitude) {
+            return Err(A3chatError::InvalidInput(format!(
+                "location payload: out-of-range lat={} lon={}",
+                self.latitude, self.longitude
+            )));
+        }
+        if let Some(label) = &self.label {
+            validate_content("location.label", label)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocationSource {
+    Gps,
+    Network,
+    Manual,
+}
+
+/// F-16 — typed payload for a shared contact card ("名片"). The
+/// represented user is identified by their `peer_node_id`; display
+/// fields are optional because the UI typically resolves them via
+/// the contact service anyway.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContactCardPayload {
+    pub peer_node_id: String,
+    pub display_name: Option<String>,
+    pub note: Option<String>,
+    /// E.164 phone number, e.g. `+8613800138000`. Optional.
+    pub phone: Option<String>,
+    /// Tag line shown under the name on the card preview.
+    pub tagline: Option<String>,
+}
+
+impl ContactCardPayload {
+    pub fn validate(&self) -> Result<(), A3chatError> {
+        validate_id("contact_card.peer_node_id", &self.peer_node_id)?;
+        if let Some(n) = &self.display_name {
+            validate_name("contact_card.display_name", n)?;
+        }
+        if let Some(n) = &self.note {
+            validate_content("contact_card.note", n)?;
+        }
+        if let Some(p) = &self.phone {
+            if p.is_empty() || p.len() > 32 {
+                return Err(A3chatError::InvalidInput(format!(
+                    "contact_card.phone: bad length {}",
+                    p.len()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Attachment {
@@ -191,6 +292,76 @@ impl Attachment {
             )));
         }
         Ok(())
+    }
+}
+
+// ============================================================================
+// Message Reactions (表情回应)
+// ============================================================================
+
+/// Supported reaction emoji types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionType {
+    Like,       // 👍
+    Love,       // ❤️
+    Laugh,      // 😂
+    Wow,        // 😮
+    Sad,        // 😢
+    Angry,      // 😠
+}
+
+impl ReactionType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReactionType::Like => "like",
+            ReactionType::Love => "love",
+            ReactionType::Laugh => "laugh",
+            ReactionType::Wow => "wow",
+            ReactionType::Sad => "sad",
+            ReactionType::Angry => "angry",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "like" => Some(ReactionType::Like),
+            "love" => Some(ReactionType::Love),
+            "laugh" => Some(ReactionType::Laugh),
+            "wow" => Some(ReactionType::Wow),
+            "sad" => Some(ReactionType::Sad),
+            "angry" => Some(ReactionType::Angry),
+            _ => None,
+        }
+    }
+}
+
+/// A reaction on a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MessageReaction {
+    pub reaction_id: String,
+    pub message_id: MessageId,
+    pub user_id: UserId,
+    pub reaction_type: ReactionType,
+    pub created_at: DateTime<Utc>,
+}
+
+impl MessageReaction {
+    pub fn new(message_id: MessageId, user_id: UserId, reaction_type: ReactionType) -> Self {
+        let reaction_id = crate::id::generate_message_id(&format!(
+            "{}:{}:{}",
+            message_id.as_str(),
+            user_id.as_str(),
+            reaction_type.as_str()
+        )).into_string();
+        Self {
+            reaction_id,
+            message_id,
+            user_id,
+            reaction_type,
+            created_at: Utc::now(),
+        }
     }
 }
 
@@ -604,5 +775,103 @@ mod tests {
         let s = "x".repeat(20);
         let p = truncate_preview(&s, 5);
         assert_eq!(p, "xxxxx…");
+    }
+
+    // F-15 — LocationPayload validation.
+    #[test]
+    fn location_payload_accepts_valid_coordinates() {
+        let p = LocationPayload {
+            latitude: 31.2304,
+            longitude: 121.4737,
+            accuracy_meters: Some(5.0),
+            label: Some("Bund".into()),
+            source: LocationSource::Gps,
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn location_payload_rejects_out_of_range_lat() {
+        let p = LocationPayload {
+            latitude: 91.0,
+            longitude: 0.0,
+            accuracy_meters: None,
+            label: None,
+            source: LocationSource::Manual,
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn location_payload_rejects_out_of_range_lon() {
+        let p = LocationPayload {
+            latitude: 0.0,
+            longitude: 181.0,
+            accuracy_meters: None,
+            label: None,
+            source: LocationSource::Network,
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn location_payload_rejects_dangerous_label() {
+        let p = LocationPayload {
+            latitude: 0.0,
+            longitude: 0.0,
+            accuracy_meters: None,
+            label: Some("bad\u{0001}label".into()),
+            source: LocationSource::Manual,
+        };
+        assert!(p.validate().is_err());
+    }
+
+    // F-16 — ContactCardPayload validation.
+    #[test]
+    fn contact_card_payload_accepts_minimal() {
+        let p = ContactCardPayload {
+            peer_node_id: "node-abc123".into(),
+            display_name: None,
+            note: None,
+            phone: None,
+            tagline: None,
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn contact_card_payload_rejects_empty_peer_node_id() {
+        let p = ContactCardPayload {
+            peer_node_id: "".into(),
+            display_name: None,
+            note: None,
+            phone: None,
+            tagline: None,
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn contact_card_payload_rejects_bad_phone_length() {
+        let p = ContactCardPayload {
+            peer_node_id: "node-abc123".into(),
+            display_name: Some("Alice".into()),
+            note: None,
+            phone: Some("".into()),
+            tagline: None,
+        };
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn message_type_includes_location_and_contact_card() {
+        // Round-trip every discriminant.
+        for (mt, s) in [
+            (MessageType::Location, "location"),
+            (MessageType::ContactCard, "contact_card"),
+        ] {
+            assert_eq!(mt.as_str(), s);
+            assert_eq!(MessageType::parse(s), Some(mt));
+        }
     }
 }

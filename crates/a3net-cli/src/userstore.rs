@@ -46,12 +46,12 @@ pub async fn run(cmd: &super::cli::UserCmd, data_dir: &Path) -> Result<()> {
                 bail!("profile.userId must be non-empty");
             }
             let id = profile.user_id.clone();
-            store.put_profile(profile).await?;
+            store.put_profile(profile)?;
             println!("upserted profile {id}");
         }
         super::cli::UserCmd::Show { user_id, json } => {
             let id = validate_cli_user_id(user_id)?;
-            let p = store.get_profile(&id).await?;
+            let p = store.get_profile(&id)?;
             match p {
                 Some(p) => {
                     if *json {
@@ -75,7 +75,7 @@ pub async fn run(cmd: &super::cli::UserCmd, data_dir: &Path) -> Result<()> {
             }
         }
         super::cli::UserCmd::List { json } => {
-            let profiles = store.list_profiles().await?;
+            let profiles = store.list_profiles()?;
             if *json {
                 println!("{}", serde_json::to_string_pretty(&profiles)?);
             } else {
@@ -104,12 +104,12 @@ pub async fn run(cmd: &super::cli::UserCmd, data_dir: &Path) -> Result<()> {
                     return Ok(());
                 }
             }
-            let removed = store.delete_profile(&id).await?;
+            let removed = store.delete_profile(&id)?;
             println!("deleted user {id} ({removed} rows cleared)");
         }
         super::cli::UserCmd::Digit { user_id } => {
             let id = validate_cli_user_id(user_id)?;
-            let digit = store.ensure_user_digit(&id).await?;
+            let digit = store.ensure_user_digit(&id)?;
             println!("{id} -> {digit}");
         }
         super::cli::UserCmd::Info => {

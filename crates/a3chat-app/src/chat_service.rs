@@ -4,26 +4,219 @@
 
 use std::sync::Arc;
 
-use a3chat_core::conversation::{ConversationKind, ConversationMeta, ConversationRecord};
+use a3chat_core::conversation::{ConversationMeta, ConversationRecord};
 use a3chat_core::error::A3chatError;
 use a3chat_core::id::{ConversationId, MessageId, UserId};
 use a3chat_core::message::{ChatMessage, MessageBody, MessageEnvelope};
 use a3chat_core::rpc::A3chatRpcMethod;
 
 use crate::error::{AppError, AppResult};
+use crate::moderation_service::ModerationService;
 use crate::notification_bus::NotificationBus;
 use crate::storage::{ChatStorage, StoredMessage};
+
+#[cfg(feature = "iroh")]
+use tokio::sync::RwLock;
+
+#[cfg(feature = "iroh")]
+use a3net_chatstore::IrohDocsChat;
 
 /// The chat service. Cloning is cheap (`Arc`-wrapped state).
 #[derive(Clone)]
 pub struct ChatService {
     storage: ChatStorage,
     bus: NotificationBus,
+    moderation: Option<ModerationService>,
+    /// Phase 5b/5c: optional iroh-docs bridge for dual-write.
+    /// Stored behind an `RwLock` so it can be injected after
+    /// construction via [`ChatService::with_iroh_docs_chat`].
+    #[cfg(feature = "iroh")]
+    iroh_docs_chat: Arc<RwLock<Option<Arc<IrohDocsChat>>>>,
+    /// GB-22 — async mute gate. When `Some`, every outbound
+    /// `send_message` consults it for group conversations and
+    /// short-circuits with [`AppError::Forbidden`] when the gate
+    /// returns `true`. The hook is wired in `A3chatApp::new`
+    /// (`chat.with_mute_gate(group.mute_gate)`) so chat and
+    /// group remain loosely coupled.
+    ///
+    /// The closure is stored behind `Arc` so concurrent
+    /// `send_message` calls can read the gate without racing the
+    /// writer and without an `Arc::get_mut` dance.
+    mute_gate: Arc<std::sync::Mutex<Option<MuteGate>>>,
+    /// F-25 / B-7 — blocklist gate. When `Some`, every
+    /// `send_message` consults it for the receiver and rejects
+    /// with [`AppError::Forbidden`] when the receiver is on the
+    /// owner's blocklist. The gate is wired in `A3chatApp::new`
+    /// (`chat.with_blocklist_gate(contact.is_blocked_gate)`) so
+    /// chat and contact remain loosely coupled and the chat
+    /// service never imports `ContactService` directly (that would
+    /// be a circular dependency).
+    blocklist_gate: Arc<std::sync::Mutex<Option<BlocklistGate>>>,
+    /// Presence touch gate. When `Some`, every `send_message` calls it
+    /// to update the sender's `last_seen` and `is_online` in the
+    /// group membership table.
+    presence_touch_gate: Arc<std::sync::Mutex<Option<PresenceTouchGate>>>,
 }
+
+/// Async predicate for GB-22. `(conversation_id, sender) -> true`
+/// means the sender is currently muted in this conversation and the
+/// outbound message must be rejected.
+///
+/// `MuteGate` is `Arc<dyn Fn(...)> + Send + Sync` so it is sized,
+/// cheaply cloneable, and storable under [`ChatService::mute_gate`]
+/// (`Arc<Mutex<Option<Arc<MuteGate>>>>`). Callers wrap their
+/// closure in `Arc::new` before handing it to
+/// [`ChatService::with_mute_gate`].
+///
+/// The returned future only needs `Send` (not `Sync`) — it is
+/// held inside an async function which moves it across `.await`
+/// points without ever being shared. `Sync` would force every
+/// awaited future to also be `Sync`, which leaks a `Sync`
+/// requirement into every async trait object the closure might
+/// call (e.g. `RosterStore::get_contact` inside the blocklist
+/// gate). See [`BlocklistGate`] for the same reasoning applied to
+/// the blocklist predicate.
+pub type MuteGate = Arc<
+    dyn Fn(
+            ConversationId,
+            UserId,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = bool> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// F-25 / B-7 — async blocklist check. `(owner, peer) -> true`
+/// means `owner` has `peer` on their blocklist and the outbound
+/// message must be rejected with [`AppError::Forbidden`].
+///
+/// Like [`MuteGate`], this is a `Send + Sync` `dyn Fn` trait object
+/// so callers can `Arc::new(...)` their closure without an extra
+/// `Box::new`. Stored behind `Arc<Mutex<Option<...>>>` so concurrent
+/// reads can clone the inner `Arc` cheaply without racing the writer.
+///
+/// The returned future only needs `Send` (not `Sync`) — it is held
+/// inside an async function which moves it across `.await` points
+/// without ever being shared. `Sync` would force every awaited
+/// future to also be `Sync`, which leaks a `Sync` requirement into
+/// every async trait object the closure might call (e.g.
+/// `RosterStore::get_contact`).
+pub type BlocklistGate = Arc<
+    dyn Fn(UserId, UserId) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Presence touch gate — called after a message is sent to update
+/// the sender's `last_seen` and `is_online` in group membership.
+///
+/// `(conversation_id, sender, is_online) -> future`
+///
+/// Stored behind `Arc<Mutex<Option<...>>>` so concurrent reads can
+/// clone the inner `Arc` cheaply without racing the writer.
+pub type PresenceTouchGate = Arc<
+    dyn Fn(
+            a3chat_core::id::ConversationId,
+            UserId,
+            bool,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// F-11 / B-27 — WeChat-style 2-minute recall window. A sender can
+/// retract a message within this many seconds of `timestamp`. After
+/// the window closes the recall RPC returns `AppError::Forbidden` so
+/// the UI can show "撤回超过 2 分钟，不允许撤回" without any client
+/// clock check.
+pub const RECALL_WINDOW_SECS: i64 = 120;
+
+/// Maximum number of results returned by search. Prevents unbounded
+/// queries that could lock the database.
+pub const MAX_SEARCH_RESULTS: u32 = 1000;
 
 impl ChatService {
     pub fn new(storage: ChatStorage, bus: NotificationBus) -> Self {
-        Self { storage, bus }
+        Self {
+            storage,
+            bus,
+            moderation: None,
+            mute_gate: Arc::new(std::sync::Mutex::new(None)),
+            blocklist_gate: Arc::new(std::sync::Mutex::new(None)),
+            presence_touch_gate: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(feature = "iroh")]
+            iroh_docs_chat: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Attach a moderation policy. When attached, every
+    /// `send_message` runs the body through the policy before the
+    /// SQLite write — a denied message is rejected with
+    /// `AppError::Forbidden` and never reaches the bus.
+    pub fn with_moderation(mut self, moderation: ModerationService) -> Self {
+        self.moderation = Some(moderation);
+        self
+    }
+
+    /// GB-22 — attach a group-mute gate. Returns `self` so
+    /// callers can chain `.with_moderation(...).with_mute_gate(...)`
+    /// during bootstrap.
+    ///
+    /// The gate is consulted in [`ChatService::send_message`] only
+    /// for conversations whose [`ConversationId::kind_hint`] is
+    /// `Group`; DMs bypass the check entirely.
+    pub fn with_mute_gate(mut self, gate: MuteGate) -> Self {
+        // `MuteGate = Arc<dyn Fn(...)>` — the caller hands us an
+        // `Arc` wrapping the trait object. Install it under the
+        // mutex (or take the `Arc::get_mut` fast path).
+        if let Some(slot) = Arc::get_mut(&mut self.mute_gate) {
+            // `slot: &mut Mutex<Option<MuteGate>>` — go through
+            // the Mutex API so we hit the proper write path.
+            *slot.get_mut().expect("mute_gate mutex poisoned") = Some(gate);
+        } else {
+            let gate_arc = self.mute_gate.clone();
+            tokio::spawn(async move {
+                *gate_arc.lock().expect("mute_gate mutex poisoned") = Some(gate);
+            });
+        }
+        self
+    }
+
+    /// F-25 / B-7 — install the blocklist gate.
+    pub fn with_blocklist_gate(mut self, gate: BlocklistGate) -> Self {
+        if let Some(slot) = Arc::get_mut(&mut self.blocklist_gate) {
+            *slot.get_mut().expect("blocklist_gate mutex poisoned") = Some(gate);
+        } else {
+            let gate_arc = self.blocklist_gate.clone();
+            let gate_for_task = gate.clone();
+            tokio::spawn(async move {
+                *gate_arc.lock().expect("blocklist_gate mutex poisoned") = Some(gate_for_task);
+            });
+        }
+        self
+    }
+
+    /// Install the presence touch gate. After a message is sent,
+    /// this gate is called to update the sender's `last_seen` and
+    /// `is_online` in the group membership table.
+    pub fn with_presence_touch_gate(mut self, gate: PresenceTouchGate) -> Self {
+        if let Some(slot) = Arc::get_mut(&mut self.presence_touch_gate) {
+            *slot.get_mut().expect("presence_touch_gate mutex poisoned") = Some(gate);
+        } else {
+            let gate_arc = self.presence_touch_gate.clone();
+            let gate_for_task = gate.clone();
+            tokio::spawn(async move {
+                *gate_arc.lock().expect("presence_touch_gate mutex poisoned") = Some(gate_for_task);
+            });
+        }
+        self
+    }
+
+    /// Phase 5c: attach an `IrohDocsChat` for dual-write.
+    /// Call this after construction (typically from `A3chatApp::new`).
+    #[cfg(feature = "iroh")]
+    pub async fn with_iroh_docs_chat(&self, chat: Arc<IrohDocsChat>) {
+        self.iroh_docs_chat.write().await.replace(chat);
     }
 
     pub fn storage(&self) -> &ChatStorage {
@@ -50,6 +243,62 @@ impl ChatService {
         self.storage.open_conversation(owner, conversation_id).await
     }
 
+    /// `a3chat.chat.message.list` — messages for `conversation_id`.
+    ///
+    /// Phase 5c: when `iroh_docs_chat` is attached, this merges
+    /// messages from SQLite (source of truth for local state) with
+    /// messages from iroh-docs (remote peers' writes not yet synced
+    /// to our SQLite). The merge is by `(sender_id, sequence)`:
+    /// SQLite rows are kept, iroh rows fill gaps from senders we
+    /// haven't synced yet. The result is sorted by sequence ascending.
+    ///
+    /// If the iroh fetch fails, SQLite results are returned unchanged
+    /// (best-effort — we do not fail the RPC on iroh unavailability).
+    pub async fn list_messages(
+        &self,
+        owner: &UserId,
+        conversation_id: &ConversationId,
+        limit: u32,
+    ) -> AppResult<Vec<ChatMessage>> {
+        // Primary: authoritative SQLite read.
+        let mut sqlite_msgs = self.storage.list_messages(owner, conversation_id, limit).await?;
+
+        #[cfg(feature = "iroh")]
+        if let Some(docs_chat) = self.iroh_docs_chat.read().await.as_ref() {
+            let conv_id = conversation_id.as_str();
+            // Take the max sequence we already have from SQLite as the
+            // cursor — iroh returns only newer messages from that point.
+            let after_seq = sqlite_msgs.last().map(|m| m.sequence);
+            let limit_usize = limit as usize;
+            match docs_chat.get_messages(conv_id, after_seq, limit_usize).await {
+                Ok(iroh_msgs) => {
+                    let converted: Vec<ChatMessage> = iroh_msgs
+                        .into_iter()
+                        .filter_map(|m| crate::storage::iroh_message_to_chat_message(m, conversation_id))
+                        .collect();
+                    // Merge: deduplicate by (sender_id, sequence), preferring SQLite rows.
+                    // SQLite is authoritative for all locally-written messages; iroh rows
+                    // are only merged in for remote peers not yet synced to SQLite.
+                    let sqlite_keys: std::collections::HashSet<_> = sqlite_msgs
+                        .iter()
+                        .map(|m| (m.sender_id.as_str().to_string(), m.sequence))
+                        .collect();
+                    let new_from_iroh: Vec<ChatMessage> = converted
+                        .into_iter()
+                        .filter(|m| !sqlite_keys.contains(&(m.sender_id.as_str().to_string(), m.sequence)))
+                        .collect();
+                    sqlite_msgs.extend(new_from_iroh);
+                    sqlite_msgs.sort_by_key(|m| m.sequence);
+                }
+                Err(e) => {
+                    tracing::warn!(conv = %conv_id, "iroh-docs list_messages failed: {e}");
+                }
+            }
+        }
+
+        Ok(sqlite_msgs)
+    }
+
     /// `a3chat.chat.message.send` — save the envelope + emit a
     /// `chat.message.received` notification to the bus.
     pub async fn send_message(
@@ -58,18 +307,121 @@ impl ChatService {
         envelope: &MessageEnvelope,
     ) -> AppResult<StoredMessage> {
         envelope.validate()?;
+        // F-25 / B-7 — blocklist gate. When the local owner has the
+        // receiver on their blocklist, refuse to send the message
+        // (and never let it land in storage). This mirrors WeChat
+        // semantics ("你已将对方屏蔽，无法发送消息"). System messages
+        // bypass the gate so moderation/system cues still propagate.
+        //
+        // The gate is an Arc<dyn Fn> so we clone the Arc out of the
+        // slot lock before any await to keep the slot mutex-free for
+        // concurrent callers.
+        if !matches!(
+            envelope.message_type,
+            a3chat_core::message::MessageType::System
+        ) {
+            let gate_opt = self
+                .blocklist_gate
+                .lock()
+                .expect("blocklist_gate mutex poisoned")
+                .clone();
+            if let Some(f) = gate_opt {
+                if f(owner.clone(), envelope.receiver_id.clone()).await {
+                    return Err(AppError::Forbidden(format!(
+                        "user is on {}'s blocklist",
+                        owner.as_str()
+                    )));
+                }
+            }
+        }
+        // Content moderation gate. Only run the policy on
+        // plaintext bodies (`MessageBody::Plain`), since encrypted
+        // bodies are opaque to the moderator (the receiving device
+        // runs the same gate after decryption). System messages
+        // (`MessageType::System`) bypass the gate so server-emitted
+        // moderation cues always reach the user.
+        if let Some(m) = &self.moderation {
+            if !matches!(envelope.message_type, a3chat_core::message::MessageType::System) {
+                if let MessageBody::Plain { content } = &envelope.body {
+                    let decision = m.check_content(owner, content);
+                    if !decision.is_allowed() {
+                        return Err(AppError::Forbidden(format!(
+                            "moderation denied message: {}",
+                            decision.reason
+                        )));
+                    }
+                }
+            }
+        }
+        // GB-22 — group mute gate. Only consulted for group
+        // conversations (`ConversationKindHint::Group`). A muted
+        // sender returns Forbidden, mirroring WeChat semantics
+        // ("你已被禁言"). System messages bypass the gate.
+        if matches!(
+            envelope.conversation_id.kind_hint(),
+            a3chat_core::id::ConversationKindHint::Group
+        ) && !matches!(
+            envelope.message_type,
+            a3chat_core::message::MessageType::System
+        ) {
+            // Clone the `MuteGate` (an `Arc<dyn Fn...>`) out under
+            // the lock so the inner `.await` runs without holding
+            // it. The `Arc::clone` keeps the trait object alive
+            // and lets callers re-enter the gate concurrently.
+            let gate_opt = self.mute_gate.lock().expect("mute_gate mutex poisoned").clone();
+            if let Some(f) = gate_opt {
+                if f(envelope.conversation_id.clone(), owner.clone()).await {
+                    return Err(AppError::Forbidden("you are muted in this group".into()));
+                }
+            }
+        }
         // `save_outbound` is atomic: message insert + conversation
         // meta upsert + sender read-receipt all happen in one
         // SQLite transaction, so a crash mid-flight can no longer
         // leave a stranded message row whose conversation was never
         // updated.
         let stored = self.storage.save_outbound(owner, envelope).await?;
+
+        // Phase 5b dual-write: mirror the message to iroh-docs.
+        // This is best-effort — SQLite is the authoritative store and
+        // we do not fail the RPC if iroh is slow or unavailable.
+        #[cfg(feature = "iroh")]
+        if let Some(docs_chat) = self.iroh_docs_chat.read().await.as_ref() {
+            let im_msg = crate::storage::im_message_from_chat_message(&stored);
+            let conv_id = envelope.conversation_id.as_str().to_string();
+            let author = docs_chat.default_author();
+            if let Err(e) = docs_chat.append_message_as(author, &conv_id, im_msg).await {
+                tracing::warn!(conv = %conv_id, "iroh-docs dual-write failed: {e}");
+            }
+        }
+
         self.bus
             .publish(a3chat_core::event::A3chatEvent::ChatMessageReceived {
                 user_id: envelope.receiver_id.clone(),
                 conversation_id: envelope.conversation_id.clone(),
                 message: stored.message.clone(),
             });
+
+        // Touch presence: update sender's last_seen and is_online for group messages.
+        // This runs as a fire-and-forget task to avoid delaying the RPC response.
+        if matches!(
+            envelope.conversation_id.kind_hint(),
+            a3chat_core::id::ConversationKindHint::Group
+        ) {
+            let gate_opt = self
+                .presence_touch_gate
+                .lock()
+                .expect("presence_touch_gate mutex poisoned")
+                .clone();
+            let cid = envelope.conversation_id.clone();
+            let sender = owner.clone();
+            if let Some(f) = gate_opt {
+                tokio::spawn(async move {
+                    f(cid, sender, true).await;
+                });
+            }
+        }
+
         Ok(stored)
     }
 
@@ -118,6 +470,18 @@ impl ChatService {
             return Err(AppError::Forbidden(
                 "only the sender can recall a message".into(),
             ));
+        }
+        // F-11 / B-27 — WeChat enforces a 2-minute recall window. We
+        // use the message's own `timestamp` (the wall-clock second the
+        // sender claims to have hit "send"). If the clock is wildly
+        // wrong the request is rejected; clients should sync NTP.
+        let now = chrono::Utc::now().timestamp();
+        let age_secs = now.saturating_sub(m.timestamp);
+        if age_secs > RECALL_WINDOW_SECS {
+            return Err(AppError::Forbidden(format!(
+                "recall window expired: message is {age_secs}s old, \
+                 max {RECALL_WINDOW_SECS}s"
+            )));
         }
         self.storage.recall_message(owner, message_id).await?;
         let updated = self
@@ -217,6 +581,8 @@ impl ChatService {
         if needle.is_empty() {
             return Err(AppError::Domain("search needle is empty".into()));
         }
+        // Cap limit to prevent unbounded queries
+        let limit = limit.min(MAX_SEARCH_RESULTS);
         self.storage
             .search_messages(crate::storage::SearchQuery {
                 owner,
@@ -274,6 +640,21 @@ pub async fn dispatch(
                 .map_err(A3chatError::from)?
                 .ok_or_else(|| A3chatError::NotFound(format!("conversation {id} not found")))?;
             serde_json::to_value(r).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::CHAT_CONVERSATION_CREATE_DIRECT => {
+            let peer: UserId = serde_json::from_value(
+                params
+                    .get("peer_user_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("peer_user_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let meta = svc
+                .storage()
+                .create_direct_conversation(owner, &peer)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(meta).map_err(A3chatError::from)
         }
         A3chatRpcMethod::CHAT_MESSAGE_SEND => {
             let env: MessageEnvelope = serde_json::from_value(params).map_err(A3chatError::from)?;
@@ -387,6 +768,172 @@ pub async fn dispatch(
                 .map_err(A3chatError::from)?;
             serde_json::to_value(hits).map_err(A3chatError::from)
         }
+        A3chatRpcMethod::CHAT_THREAD_LIST => {
+            let root_id: MessageId = serde_json::from_value(
+                params
+                    .get("root_message_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("root_message_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let limit: u32 = params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.min(1000) as u32)
+                .unwrap_or(100);
+            let replies = svc
+                .storage()
+                .list_thread_replies(owner, &root_id, limit)
+                .await
+                .map_err(A3chatError::from)?;
+            serde_json::to_value(replies).map_err(A3chatError::from)
+        }
+        A3chatRpcMethod::CHAT_THREAD_GET => {
+            let root_id: MessageId = serde_json::from_value(
+                params
+                    .get("root_message_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("root_message_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let root = svc
+                .storage()
+                .get_message(owner, &root_id)
+                .await
+                .map_err(A3chatError::from)?
+                .ok_or_else(|| A3chatError::NotFound(format!("root {} not found", root_id.as_str())))?;
+            let replies = svc
+                .storage()
+                .list_thread_replies(owner, &root_id, 1000)
+                .await
+                .map_err(A3chatError::from)?;
+            Ok(serde_json::json!({
+                "root": root,
+                "replies": replies,
+                "reply_count": replies.len(),
+            }))
+        }
+        A3chatRpcMethod::CHAT_TAP => {
+            let conversation_id: ConversationId = serde_json::from_value(
+                params
+                    .get("conversation_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("conversation_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let target: Option<UserId> = params
+                .get("target_user_id")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            svc.bus.publish(a3chat_core::event::A3chatEvent::ChatTap {
+                user_id: owner.clone(),
+                conversation_id: conversation_id.clone(),
+                target_user_id: target.clone(),
+                actor_user_id: owner.clone(),
+            });
+            Ok(serde_json::json!({
+                "ok": true,
+                "conversation_id": conversation_id,
+                "target_user_id": target,
+            }))
+        }
+        A3chatRpcMethod::CHAT_MESSAGE_SEND_LOCATION => {
+            // F-15 — share a location card. The typed payload is
+            // validated (range check on lat/lon + content check on
+            // the label) and then embedded as a JSON document so the
+            // receiver's UI can render a map preview. The message
+            // type discriminator is `Location` so the UI doesn't
+            // mistake it for a normal text bubble.
+            let conversation_id: ConversationId = serde_json::from_value(
+                params.get("conversation_id").cloned().ok_or_else(|| {
+                    A3chatError::InvalidInput("conversation_id missing".into())
+                })?,
+            )
+            .map_err(A3chatError::from)?;
+            let payload: a3chat_core::message::LocationPayload =
+                serde_json::from_value(
+                    params
+                        .get("location")
+                        .cloned()
+                        .ok_or_else(|| A3chatError::InvalidInput("location missing".into()))?,
+                )
+                .map_err(A3chatError::from)?;
+            payload
+                .validate()
+                .map_err(|e| A3chatError::InvalidInput(e.to_string()))?;
+            let receiver_id: UserId = serde_json::from_value(
+                params
+                    .get("receiver_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("receiver_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let body_json = serde_json::to_string(&payload).map_err(A3chatError::from)?;
+            let envelope = MessageEnvelope {
+                conversation_id: conversation_id.clone(),
+                receiver_id: receiver_id.clone(),
+                message_type: a3chat_core::message::MessageType::Location,
+                body: MessageBody::Plain { content: body_json },
+                attachments: vec![],
+                reply_to: None,
+                sequence: 0,
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+            let stored = svc.send_message(owner, &envelope).await.map_err(A3chatError::from)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "message_id": stored.message.message_id,
+                "conversation_id": conversation_id,
+                "message_type": "location",
+            }))
+        }
+        A3chatRpcMethod::CHAT_MESSAGE_SEND_CONTACT_CARD => {
+            // F-16 — share a contact card. Same shape as the
+            // location RPC but with a ContactCardPayload.
+            let conversation_id: ConversationId = serde_json::from_value(
+                params.get("conversation_id").cloned().ok_or_else(|| {
+                    A3chatError::InvalidInput("conversation_id missing".into())
+                })?,
+            )
+            .map_err(A3chatError::from)?;
+            let payload: a3chat_core::message::ContactCardPayload =
+                serde_json::from_value(
+                    params
+                        .get("contact_card")
+                        .cloned()
+                        .ok_or_else(|| {
+                            A3chatError::InvalidInput("contact_card missing".into())
+                        })?,
+                )
+                .map_err(A3chatError::from)?;
+            payload
+                .validate()
+                .map_err(|e| A3chatError::InvalidInput(e.to_string()))?;
+            let receiver_id: UserId = serde_json::from_value(
+                params
+                    .get("receiver_id")
+                    .cloned()
+                    .ok_or_else(|| A3chatError::InvalidInput("receiver_id missing".into()))?,
+            )
+            .map_err(A3chatError::from)?;
+            let body_json = serde_json::to_string(&payload).map_err(A3chatError::from)?;
+            let envelope = MessageEnvelope {
+                conversation_id: conversation_id.clone(),
+                receiver_id: receiver_id.clone(),
+                message_type: a3chat_core::message::MessageType::ContactCard,
+                body: MessageBody::Plain { content: body_json },
+                attachments: vec![],
+                reply_to: None,
+                sequence: 0,
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+            let stored = svc.send_message(owner, &envelope).await.map_err(A3chatError::from)?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "message_id": stored.message.message_id,
+                "conversation_id": conversation_id,
+                "message_type": "contact_card",
+            }))
+        }
         _ => Err(A3chatError::Internal(format!(
             "ChatService does not handle {method}"
         ))),
@@ -429,7 +976,7 @@ mod tests {
             attachments: vec![],
             reply_to: None,
             sequence: 1,
-            timestamp: 1_700_000_000,
+            timestamp: chrono::Utc::now().timestamp(),
         }
     }
 

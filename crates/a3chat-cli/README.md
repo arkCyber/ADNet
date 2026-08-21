@@ -13,6 +13,17 @@ Commands:
   conversation  Conversation commands
   message       Message commands
   sync          Sync (multi-device) commands
+  profile       Profile / public-key / device commands
+  chat          Interactive multi-turn conversation session (slash commands + SSE)
+  contact       Contact commands (friend / blocklist / QR-invite)
+  group         Group commands (create / invite / membership / mute / nickname)
+  moments       Moments commands (朋友圈 — post / comment / reaction / follow)
+  link          Link bookmark commands (favorites / folders / search)
+  media         Media commands (blob upload / download / health)
+  moderation    Moderation commands (content / attachment policy gate)
+  presence      Presence commands (publish / subscribe)
+  bundle        Bundle commands (export / import E2E state bundle)
+  stream        Stream commands (subscribe / unsubscribe / list event streams)
   trace         Subscribe to the daemon SSE event stream
   rpc           Raw JSON-RPC fallback — call any a3chat.* method
   audit         Static / live audit of the a3chat API surface
@@ -33,8 +44,8 @@ terminals. `a3chat-cli` fills that gap with:
    detect schema drift before a release.
 2. **Doctor** — three-call health probe (conversation.list, with retry)
    that surfaces the daemon's error class.
-3. **Conversation / Message / Sync** — operator-friendly wrappers for
-   every `a3chat.chat.*` RPC method.
+3. **Conversation / Message / Sync / Profile** — operator-friendly wrappers for
+   every `a3chat.chat.*` / `a3chat.profile.*` RPC method.
 4. **Config** — TOML-driven, deterministic, env-overridable.
 
 ## DO-178C mappings
@@ -80,19 +91,160 @@ Reports each probe's outcome as `ok` / `transient` / `fail`.
 - `sync delta --cursors '<json>' [--out file]` — incremental delta.
 - `sync compressed --out file` — base64-decoded zstd snapshot.
 
+### `profile`
+| Subcommand | RPC method | Notes |
+|---|---|---|
+| `profile get` | `a3chat.profile.get` | `--dry-run` prints the envelope |
+| `profile digit` | `a3chat.profile.digit_get` | 12-digit ID; exits non-zero on malformed reply |
+| `profile keys` | `a3chat.profile.public_key_list` | — |
+| `profile devices` | `a3chat.profile.device_list` | — |
+| `profile set-avatar --blob-hash <hex> --mime <m> --size <n>` | `a3chat.profile.avatar_set` | Validates `blob_hash` (1..=128 hex) + `size != 0` && `size <= 10 MiB` |
+
+> `profile` is the only wrapper surface that includes explicit input
+> validation; the daemon trusts the operator.
+
+### `chat` — interactive conversation session
+
+```bash
+a3chat chat --conversation-id dm:alice:bob         # join an existing DM
+a3chat chat --to <user_id>                         # open or create the DM
+a3chat chat --history 100                          # replay 100 msgs on open
+a3chat chat --idle-timeout-secs 60                 # auto-quit after 60s idle
+a3chat chat --dry-run                              # echo resolved options, no RPC
+```
+
+Inside the session, stdin is read line-by-line; non-empty lines
+become `a3chat.chat.message.send`. Lines beginning with `/` are
+slash-commands:
+
+| Slash command            | Effect                                          |
+|--------------------------|-------------------------------------------------|
+| `/help`                  | print the in-session command list               |
+| `/quit`, `/exit`         | leave the session                               |
+| `/history [n]`           | re-play the last `n` (default 50) messages     |
+| `/recall <msg-id>`       | recall a message you sent                       |
+| `/ack <msg-id>`          | acknowledge a received message                  |
+| `/edit <msg-id> <txt>`   | edit a message body                             |
+| `/delete <msg-id>`       | delete a message locally                        |
+| `/search <needle>`       | search the conversation                         |
+| `/typing`                | emit a typing indicator to the peer             |
+| `/status`                | print session stats (msgs sent/received)        |
+
+### `contact`
+
+| Subcommand                              | RPC method                              | Notes |
+|-----------------------------------------|-----------------------------------------|-------|
+| `contact list`                          | `a3chat.contact.list`                   | — |
+| `contact add --to <id> --message "…"`   | `a3chat.contact.add_request`            | message ≤ 256 chars |
+| `contact add-direct --user-id … --display-name …` | `a3chat.contact.add`            | — |
+| `contact accept --request-id …`         | `a3chat.contact.accept_request`         | — |
+| `contact block --user-id …`             | `a3chat.contact.block`                  | — |
+| `contact unblock --user-id …`           | `a3chat.contact.unblock`                | — |
+| `contact remove --user-id …`            | `a3chat.contact.remove`                 | — |
+| `contact get --user-id …`               | `a3chat.contact.get`                    | — |
+| `contact search --query …`              | `a3chat.contact.search`                 | — |
+| `contact toggle-favorite --user-id …`   | `a3chat.contact.toggle_favorite`        | — |
+| `contact update --user-id … --display-name …` | `a3chat.contact.update`          | — |
+| `contact qr-invite`                     | `a3chat.contact.qr_invite`              | returns base64 payload |
+| `contact qr-invite-render [--output qr.svg] [--caption "…"]` | `a3chat.contact.qr_invite` | writes SVG to `--output` |
+
+### `group`
+
+29 subcommands covering lifecycle, membership, invitation, mute,
+nickname, and mention-parsing. Full dispatch in
+`crates/a3chat-cli/src/cmd/group.rs`. Examples:
+
+```bash
+a3chat group create --name team-a --description "core team" --is-private=true
+a3chat group invite --conversation-id <cid> --invitee-id <user> --group-name team-a --inviter-name alice
+a3chat group members --conversation-id <cid>
+a3chat group role --conversation-id <cid> --user-id <u> --role admin
+a3chat group mute-member --conversation-id <cid> --user-id <u> --indefinite
+a3chat group mention-parse --body "ping @alice" --nicknames "<alice_uid>:alice"
+```
+
+### `moments`
+
+15 subcommands for the 朋友圈 surface:
+
+```bash
+a3chat moments node-info
+a3chat moments post --text "Hello world" --visibility public
+a3chat moments posts-by --user-id <u>
+a3chat moments timeline --limit 50
+a3chat moments comment --post-id <p> --text "nice!"
+a3chat moments react --target-id <p> --reaction-type like
+a3chat moments follow --who <u>
+a3chat moments verify-post --post-id <p>
+```
+
+### `link`
+
+14 bookmark / favorite subcommands:
+
+```bash
+a3chat link add https://example.com --title "Example" --tags rust,docs
+a3chat link list --folder work --limit 100
+a3chat link search "rust async"
+a3chat link pin <bookmark_id>
+a3chat link touch <bookmark_id>
+```
+
+### `media`
+
+```bash
+a3chat media health
+TOKEN=$(a3chat media upload-init --mime image/png | jq -r .token)
+a3chat media upload-chunk --token "$TOKEN" --file chunk1.bin
+a3chat media upload-finalize --token "$TOKEN" --filename photo.png
+a3chat media download-get --hash <blake3_hex> --out ./photo.png
+```
+
+### `moderation`
+
+```bash
+a3chat moderation check-content --text "<utf-8 text>"
+a3chat moderation check-attachment --hash <blake3_hex>
+a3chat moderation list-blocked
+a3chat moderation set-deny-default --on=true
+a3chat moderation stats
+```
+
+### `presence`
+
+```bash
+a3chat presence publish --status online --message "at desk"
+a3chat presence subscribe --peers <uid1>,<uid2>
+```
+
+### `bundle`
+
+```bash
+a3chat bundle export --out backup.a3b          # AEAD-encrypted state bundle
+a3chat bundle import --in backup.a3b           # decrypt + merge on this node
+```
+
+### `stream`
+
+```bash
+a3chat stream subscribe --topic "*"            # acquire a handle
+a3chat stream list                             # show every active subscription
+a3chat stream unsubscribe --handle-id <id>     # release
+```
+
 ### `audit`
 Pure offline report. Outputs:
 
 ```json
 {
   "summary": {
-    "total_methods": 34,
+    "total_methods": 39,
     "total_errors": 8,
     "total_invariants": 7,
     "passed": 7,
     "failed": 0,
-    "cli_supported": 11,
-    "cli_unsupported": 23
+    "cli_supported": 12,
+    "cli_unsupported": 27
   },
   "method_inventory": [...],
   "error_inventory": [...],
@@ -236,29 +388,28 @@ All fields are optional; CLI flags always win.
 
 ## Test summary
 
-`cargo test -p a3chat-cli` runs **71 tests** across six suites:
+`a3chat-cli` itself runs **48 unit tests** across:
 
-- **Unit (48)** — `config`, `rpc_client`, `output`, `audit_report`,
-  `error`, `repl`, `completions` (determinism, retry
-  classification, code mapping, schema invariants, suggestion
-  coverage).
-- **E2E (`e2e_rpc` — 5)** — boots a real `a3chat-rpc` daemon on a
-  random loopback port, exercises the full `send → list → open →
-  ack` loop, verifies retry-on-transient and skip-retry-on-permanent
-  semantics.
-- **E2E (`e2e_advanced` — 5)** — verifies `call_raw_with_meta`
-  metadata, the SSE stream contract (publish an event, receive it
-  over HTTP), and live audit probe outcomes (`implemented` vs
-  `stub_no_handler`).
-- **Property (`property_output` — 4)** — Plain key-order
-  stability, table shape contract, JSON round-trip, formatter
-  consistency.
-- **Property (`property_backoff` — 4)** — backoff monotonicity,
-  cap, zero-attempt, overflow safety.
-- **Property (`property_config` — 5)** — owner hex validation,
-  URL validation, defaults.
+- `config` / `rpc_client` / `output` / `audit_report` / `error` /
+  `repl` / `completions` (determinism, retry classification, code
+  mapping, schema invariants, suggestion coverage).
 
-All `a3chat-*` crates combined: **378 tests pass, 0 failures**.
+End-to-end (`e2e_rpc` / `e2e_advanced`) and property suites
+(`property_output` / `property_backoff` / `property_config`) live
+alongside via `cargo test -p a3chat-cli`.
+
+Across all `a3chat-*` crates:
+
+| Crate | Tests |
+|---|---|
+| `a3chat-app` | 177 |
+| `a3chat-rpc` | 73 |
+| `a3chat-cli` | 48 |
+| `a3chat-core` | 85 |
+| `a3chat-crypto` | 42 |
+| **Total** | **425** |
+
+All pass, 0 failures (last verified: 2026-08-16).
 
 ---
 
@@ -324,22 +475,22 @@ across runs):
   "workspace_invariants": [
     {
       "name": "methods_a3chat_prefix",
-      "value": "40 of 40 methods prefixed",
+      "value": "39 of 39 methods prefixed",
       "ok": true,
       "note": "every method in A3chatRpcMethod::ALL must start with 'a3chat.'"
     }
   ],
   "summary": {
-    "total_methods": 40,
+    "total_methods": 39,
     "total_errors": 8,
     "total_invariants": 7,
     "total_workspace_invariants": 6,
     "passed": 13,
     "failed": 0,
     "cli_supported": 12,
-    "cli_unsupported": 28,
+    "cli_unsupported": 27,
     "stub_methods": 7,
-    "real_handlers": 33
+    "real_handlers": 32
   }
 }
 ```
@@ -347,3 +498,7 @@ across runs):
 Stub methods are explicitly enumerated in
 `audit_report::STUB_METHODS`. If you ship a handler for one of
 them, remove it from that list to keep `cli_support` accurate.
+
+## License
+
+MIT OR Apache-2.0

@@ -13,6 +13,7 @@ use crate::error::{RosterError, RosterResult};
 use crate::group::ContactGroup;
 use crate::mapping::DigitMapping;
 use crate::model::Contact;
+use crate::request::PersistedContactRequest;
 use crate::settings::FriendRequestSetting;
 use crate::store::{RosterStore, RosterStoreInfo};
 
@@ -30,6 +31,7 @@ pub struct InMemoryRosterStore {
     digit_to_node: Shard<HashMap<String, String>>,
     node_to_digit: Shard<HashMap<String, String>>,
     friend_request_settings: Shard<HashMap<String, FriendRequestSetting>>,
+    contact_requests: Shard<HashMap<String, PersistedContactRequest>>,
 }
 
 impl InMemoryRosterStore {
@@ -173,6 +175,42 @@ impl RosterStore for InMemoryRosterStore {
     ) -> RosterResult<Option<FriendRequestSetting>> {
         let g = Self::lock(&self.friend_request_settings)?;
         Ok(g.get(user_id).cloned())
+    }
+
+    async fn put_contact_request(
+        &self,
+        request: PersistedContactRequest,
+    ) -> RosterResult<()> {
+        let mut g = Self::lock(&self.contact_requests)?;
+        g.insert(request.request_id.clone(), request);
+        Ok(())
+    }
+
+    async fn get_contact_request(
+        &self,
+        request_id: &str,
+    ) -> RosterResult<Option<PersistedContactRequest>> {
+        let g = Self::lock(&self.contact_requests)?;
+        Ok(g.get(request_id).cloned())
+    }
+
+    async fn delete_contact_request(
+        &self,
+        request_id: &str,
+    ) -> RosterResult<Option<PersistedContactRequest>> {
+        let mut g = Self::lock(&self.contact_requests)?;
+        Ok(g.remove(request_id))
+    }
+
+    async fn list_contact_requests_for(
+        &self,
+        user_id: &str,
+    ) -> RosterResult<Vec<PersistedContactRequest>> {
+        let g = Self::lock(&self.contact_requests)?;
+        Ok(g.values()
+            .filter(|r| r.to_user_id == user_id)
+            .cloned()
+            .collect())
     }
 }
 

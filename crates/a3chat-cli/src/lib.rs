@@ -5,13 +5,28 @@
 //!
 //! | Subcommand | Purpose |
 //! |------------|---------|
-//! | `whoami`       | Print the configured local owner identity |
-//! | `doctor`       | Probe the local daemon (HTTP /rpc/health, owner-aware) |
-//! | `conversation` | `list` / `open` conversations |
-//! | `message`      | `send` / `ack` / `recall` / `edit` / `delete` / `search` |
-//! | `sync`         | `snapshot` / `delta` / `compressed` (multi-device catch-up) |
-//! | `audit`        | Offline static audit of the a3chat API surface |
-//! | `config`       | `show` / `path` — inspect the resolved config |
+//! | `whoami`           | Print the configured local owner identity |
+//! | `doctor`           | Probe the local daemon (HTTP /rpc/health, owner-aware) |
+//! | `conversation`     | `list` / `open` conversations |
+//! | `message`          | `send` / `ack` / `recall` / `edit` / `delete` / `search` / `typing` / `forward` / `forward-merge` |
+//! | `sync`             | `snapshot` / `delta` / `compressed` (multi-device catch-up) |
+//! | `profile`          | profile / public-key / device / avatar operators |
+//! | `chat`             | interactive multi-turn conversation session (slash commands + SSE) — wraps `thread.list/get`, `chat.tap` |
+//! | `contact`          | friend / blocklist / QR-invite (13 sub-operations) |
+//! | `group`            | group creation, invitation, membership, mute, nickname (29 sub-ops) |
+//! | `moments`          | 朋友圈 post / comment / reaction / follow (15 sub-ops) |
+//! | `link`             | link bookmark / favorites (14 sub-ops) |
+//! | `media`            | blob upload / download / health |
+//! | `moderation`       | content / attachment policy gate |
+//! | `presence`         | publish / subscribe presence |
+//! | `bundle`           | export / import E2E state bundle |
+//! | `stream`           | subscribe / unsubscribe / list event streams |
+//! | `audit`            | offline static / live / full audit of the a3chat API surface |
+//! | `config`           | `show` / `path` — inspect the resolved config |
+//! | `trace`            | SSE event subscription |
+//! | `rpc`              | raw JSON-RPC fallback — call any `a3chat.*` method |
+//! | `repl`             | interactive REPL — read commands from stdin |
+//! | `completions`      | generate shell completion script |
 //!
 //! ## DO-178C mappings
 //!
@@ -32,6 +47,7 @@ pub mod audit_report;
 pub mod cmd;
 pub mod config;
 pub mod error;
+pub mod lockfile;
 pub mod output;
 pub mod rpc_client;
 
@@ -107,6 +123,35 @@ pub enum Cmd {
     /// Profile commands (a3net-userstore bridge).
     #[command(subcommand)]
     Profile(cmd::profile::ProfileCmd),
+    /// Interactive multi-turn conversation session (slash commands + SSE).
+    Chat(cmd::chat::ChatOptions),
+    /// Contact commands (friend / blocklist / QR-invite).
+    #[command(subcommand)]
+    Contact(cmd::contact::ContactCmd),
+    /// Group commands (create / invite / membership / mute / nickname).
+    #[command(subcommand)]
+    Group(cmd::group::GroupCmd),
+    /// Moments commands (朋友圈 — post / comment / reaction / follow).
+    #[command(subcommand)]
+    Moments(cmd::moments::MomentsCmd),
+    /// Link bookmark commands (favorites / folders / search).
+    #[command(subcommand)]
+    Link(cmd::link::LinkCmd),
+    /// Media commands (blob upload / download / health).
+    #[command(subcommand)]
+    Media(cmd::media::MediaCmd),
+    /// Moderation commands (content / attachment policy gate).
+    #[command(subcommand)]
+    Moderation(cmd::moderation::ModerationCmd),
+    /// Presence commands (publish / subscribe).
+    #[command(subcommand)]
+    Presence(cmd::presence::PresenceCmd),
+    /// Bundle commands (export / import E2E state bundle).
+    #[command(subcommand)]
+    Bundle(cmd::bundle::BundleCmd),
+    /// Stream commands (subscribe / unsubscribe / list event streams).
+    #[command(subcommand)]
+    Stream(cmd::stream::StreamCmd),
     /// Trace SSE events pushed by the daemon.
     #[command(subcommand)]
     Trace(cmd::trace::TraceCmd),
@@ -127,6 +172,9 @@ pub enum Cmd {
     /// Config introspection.
     #[command(subcommand)]
     Config(cmd::config::ConfigCmd),
+    /// Dump the a3chat-core JSON Schema document (or one named definition).
+    /// Pure offline — does not talk to a daemon. Useful in CI for codegen.
+    Schema(cmd::schema::SchemaArgs),
 }
 
 /// Run the parsed CLI. Returns an exit code (0 success, 1 user error,
@@ -161,14 +209,25 @@ pub async fn run(cli: Cli) -> ExitCode {
         Cmd::Doctor => cmd::doctor::run(&cfg, &client).await,
         Cmd::Conversation(c) => cmd::conversation::run(c, &cfg, &client).await,
         Cmd::Message(c) => cmd::message::run(c, &cfg, &client).await,
-            Cmd::Sync(c) => cmd::sync::run(c, &cfg, &client).await,
-            Cmd::Profile(p) => cmd::profile::run(p, &cfg, &client).await,
+        Cmd::Sync(c) => cmd::sync::run(c, &cfg, &client).await,
+        Cmd::Profile(p) => cmd::profile::run(p, &cfg, &client).await,
+        Cmd::Chat(opts) => cmd::chat::run(&cfg, &client, opts).await,
+        Cmd::Contact(c) => cmd::contact::run(c, &cfg, &client).await,
+        Cmd::Group(c) => cmd::group::run(c, &cfg, &client).await,
+        Cmd::Moments(c) => cmd::moments::run(c, &cfg, &client).await,
+        Cmd::Link(c) => cmd::link::run(c, &cfg, &client).await,
+        Cmd::Media(c) => cmd::media::run(c, &cfg, &client).await,
+        Cmd::Moderation(c) => cmd::moderation::run(c, &cfg, &client).await,
+        Cmd::Presence(c) => cmd::presence::run(c, &cfg, &client).await,
+        Cmd::Bundle(c) => cmd::bundle::run(c, &cfg, &client).await,
+        Cmd::Stream(c) => cmd::stream::run(c, &cfg, &client).await,
         Cmd::Trace(c) => cmd::trace::run(c, &cfg, &client).await,
         Cmd::Rpc(c) => cmd::rpc::run(c, &cfg, &client).await,
         Cmd::Repl => cmd::repl::run(&cfg, &client).await,
         Cmd::Completions { shell } => cmd::completions::run(shell),
         Cmd::Audit(c) => cmd::audit::run(c, &cfg, &client).await,
         Cmd::Config(c) => cmd::config::run(c, &cfg),
+        Cmd::Schema(c) => cmd::schema::run(c),
     };
 
     match result {

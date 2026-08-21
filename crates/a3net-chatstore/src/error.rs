@@ -175,6 +175,16 @@ pub enum ChatStoreError {
     /// **Recoverability:** `UserError`.
     #[error("invalid id: {0}")]
     InvalidId(String),
+
+    /// Bubbled-up from the `a3chat-core` validation helpers
+    /// (URL / id / trust level checks). Mapped to the closest
+    /// local variant so callers don't have to know about the
+    /// domain-layer type.
+    ///
+    /// **Recoverability:** `UserError` (validation rejections
+    /// always end up here).
+    #[error("validation: {0}")]
+    A3chatValidation(String),
 }
 
 impl ChatStoreError {
@@ -200,7 +210,9 @@ impl ChatStoreError {
             Self::Validation(_) | Self::Invalid(_) | Self::Constraint(_) | Self::ForeignKey(_) => {
                 ErrorClass::UserError
             }
-            Self::InvalidTrustLevel { .. } | Self::InvalidId(_) => ErrorClass::UserError,
+            Self::InvalidTrustLevel { .. }
+            | Self::InvalidId(_)
+            | Self::A3chatValidation(_) => ErrorClass::UserError,
             Self::NotFound(_) => ErrorClass::Recoverable,
             Self::Sqlite(_)
             | Self::Lock
@@ -256,6 +268,16 @@ impl From<chrono::ParseError> for ChatStoreError {
 /// record fails validation at the storage boundary.
 impl From<a3net_types::error::AdnetError> for ChatStoreError {
     fn from(e: a3net_types::error::AdnetError) -> Self {
+        ChatStoreError::Validation(e.to_string())
+    }
+}
+
+/// `a3chat_core` uses `A3chatError` for validation across the
+/// domain (link bookmarks, etc.). Bridge into [`ChatStoreError`]
+/// as a [`ChatStoreError::Validation`] so callers can `?` on
+/// `bookmark.validate()` without re-mapping every call site.
+impl From<a3chat_core::error::A3chatError> for ChatStoreError {
+    fn from(e: a3chat_core::error::A3chatError) -> Self {
         ChatStoreError::Validation(e.to_string())
     }
 }

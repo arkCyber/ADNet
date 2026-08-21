@@ -43,7 +43,7 @@ use a3chat_core::id::UserId;
 use a3chat_core::rpc::A3chatRpcMethod;
 
 use crate::dispatch::{ParsedEnvelope, RpcResponse, dispatch_rpc_call, parse_envelope};
-use crate::error::{ERR_A3CHAT_NOT_AUTHENTICATED, ERR_INVALID_PARAMS, ERR_PARSE, RpcError};
+use crate::error::{ERR_A3CHAT_NOT_AUTHENTICATED, ERR_INVALID_PARAMS, RpcError};
 use crate::metrics::{Metrics, RpcOutcome};
 use crate::sse::sse_handler;
 
@@ -71,6 +71,11 @@ pub struct RpcServerConfig {
     pub request_timeout: Duration,
     /// CORS allow-origin list. Empty = same-origin only.
     pub allowed_origins: Vec<String>,
+    /// Shared secret required by `/rpc/notify`. None = no
+    /// `/rpc/notify` calls accepted (production should always
+    /// set this; `a3chatd` generates a fresh 32-byte token at
+    /// start).
+    pub internal_token: Option<String>,
 }
 
 impl RpcServerConfig {
@@ -80,6 +85,7 @@ impl RpcServerConfig {
             log_requests: false,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             allowed_origins: Vec::new(),
+            internal_token: None,
         }
     }
 
@@ -136,6 +142,12 @@ impl RpcServerHandle {
 pub struct ServerState {
     pub app: A3chatApp,
     pub metrics: Arc<Metrics>,
+    pub request_timeout: Duration,
+    /// Shared secret required by `/rpc/notify`. Generated at
+    /// process start; only callers that already know it (e.g.
+    /// same-process in-process pusher clients) can publish
+    /// events on behalf of an owner.
+    pub internal_token: Arc<String>,
 }
 
 /// The server.
@@ -162,6 +174,20 @@ impl RpcServer {
         let state = ServerState {
             app: self.app.clone(),
             metrics: self.metrics.clone(),
+            request_timeout: self.config.request_timeout,
+            // A missing internal token means the server is
+            // configured to reject every `/rpc/notify` call. We
+            // store a sentinel non-empty value so the constant-time
+            // compare path still runs (otherwise an empty-vs-empty
+            // match would falsely authenticate). The sentinel
+            // choice is irrelevant — the constant-time `diff` is
+            // always non-zero when the supplied token is empty.
+            internal_token: Arc::new(
+                self.config
+                    .internal_token
+                    .clone()
+                    .unwrap_or_else(|| "__disabled__".to_string()),
+            ),
         };
         let cors = self.build_cors_layer();
         // `TraceLayer::new_for_http` wires the default
@@ -204,8 +230,9 @@ impl RpcServer {
         } else {
             let mut layer = CorsLayer::new().allow_methods(Any);
             for o in &self.config.allowed_origins {
-                let header: axum::http::HeaderValue =
-                    o.parse().expect("invalid origin: must be URI scheme://host[:port]");
+                let header: axum::http::HeaderValue = o
+                    .parse()
+                    .expect("invalid origin: must be URI scheme://host[:port]");
                 layer = layer.allow_origin(header);
             }
             layer
@@ -239,14 +266,12 @@ impl RpcServer {
 // -- HTTP handlers ---------------------------------------------------------
 
 fn owner_from_headers(headers: &HeaderMap) -> Result<UserId, RpcError> {
-    let value = headers
-        .get(HEADER_OWNER)
-        .ok_or_else(|| {
-            RpcError::new(
-                ERR_A3CHAT_NOT_AUTHENTICATED,
-                format!("missing {HEADER_OWNER} header"),
-            )
-        })?;
+    let value = headers.get(HEADER_OWNER).ok_or_else(|| {
+        RpcError::new(
+            ERR_A3CHAT_NOT_AUTHENTICATED,
+            format!("missing {HEADER_OWNER} header"),
+        )
+    })?;
     let s = value
         .to_str()
         .map_err(|e| RpcError::new(ERR_INVALID_PARAMS, format!("invalid owner header: {e}")))?;
@@ -257,20 +282,52 @@ fn request_id_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get(HEADER_REQUEST_ID)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .map(|s| truncate_request_id(s))
+}
+
+/// Cap the request_id field at `MAX_REQUEST_ID_LEN` bytes.
+///
+/// Audit issue #22: prior to this fix the request_id field was
+/// accepted untruncated from both the HTTP header and the JSON
+/// body. A 100 KB header value would still be carried into
+/// tracing spans and (for the body field) into the response
+/// headers, polluting log/aggregator pipelines. The cap mirrors
+/// the convention used by OpenTelemetry's `trace_id` length (16
+/// bytes / 32 hex chars) with a generous margin for UUIDs.
+const MAX_REQUEST_ID_LEN: usize = 128;
+
+fn truncate_request_id(raw: &str) -> String {
+    if raw.len() <= MAX_REQUEST_ID_LEN {
+        raw.to_string()
+    } else {
+        // Truncate on a UTF-8 char boundary; an attacker feeding
+        // half-codepoint sequences is rejected by the validation
+        // here because the header parser already accepted the
+        // raw bytes. We pick the longest prefix that ends on a
+        // char boundary at or before the cap.
+        let mut end = MAX_REQUEST_ID_LEN;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut truncated = String::with_capacity(end + 1);
+        truncated.push_str(&raw[..end]);
+        truncated.push('…');
+        truncated
+    }
 }
 
 /// Render the JSON-RPC `id` from the envelope as a `String` for
 /// the tracing-correlation field. JSON-RPC `id` may be a number,
 /// string, or null.
 fn request_id_from_body(body: &serde_json::Value) -> String {
-    match body.get("id") {
+    let raw = match body.get("id") {
         Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
         Some(v) if v.is_number() => v.to_string(),
         Some(v) if v.is_null() => "null".to_string(),
         Some(_) => "<unknown>".to_string(),
         None => "<missing>".to_string(),
-    }
+    };
+    truncate_request_id(&raw)
 }
 
 /// Generic-body span factory used by `TraceLayer::make_span_with`
@@ -287,10 +344,28 @@ fn make_span_with_body<B>(req: &axum::http::Request<B>) -> tracing::Span {
         .to_string();
     let method = req.method();
     let uri = req.uri();
+    // Audit issue #23: the trace span now carries an `owner`
+    // field that is empty at construction (because the body
+    // hasn't been read yet) and is filled in by `rpc_handler`
+    // via `Span::current().record("owner", ...)` once the
+    // owner header is decoded. tracing's `Empty` value lets
+    // the field be populated lazily.
     if request_id.is_empty() {
-        tracing::info_span!("rpc", request_id = "<missing>", %method, %uri)
+        tracing::info_span!(
+            "rpc",
+            request_id = "<missing>",
+            %method,
+            %uri,
+            owner = tracing::field::Empty,
+        )
     } else {
-        tracing::info_span!("rpc", %request_id, %method, %uri)
+        tracing::info_span!(
+            "rpc",
+            %request_id,
+            %method,
+            %uri,
+            owner = tracing::field::Empty,
+        )
     }
 }
 
@@ -299,7 +374,6 @@ async fn rpc_handler(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-
     // ── Authentication ────────────────────────────────────────────
     let owner = match owner_from_headers(&headers) {
         Ok(o) => o,
@@ -332,7 +406,7 @@ async fn rpc_handler(
         }
     };
 
-// ── Dispatch ──────────────────────────────────────────────────
+    // ── Dispatch ──────────────────────────────────────────────────
     let span = tracing::info_span!(
         "rpc_call",
         request_id = %request_id.as_deref().unwrap_or(""),
@@ -341,17 +415,19 @@ async fn rpc_handler(
     );
     let span_enter = span;
     let _enter = span_enter.enter();
+
+    // Audit issue #23: surface the owner into the outer `rpc`
+    // span so a single trace line carries the full request
+    // signature. The outer span was created with an empty
+    // `owner` field and is now populated lazily. `record` is a
+    // no-op when the field is not in the schema (e.g. in
+    // unit tests that bypass `TraceLayer`).
+    tracing::Span::current().record("owner", owner.as_str());
     match parsed {
         ParsedEnvelope::Single(req) => {
             let method_name = req.method.clone();
             let started_single = std::time::Instant::now();
-            let resp = dispatch_one(
-                &state,
-                &owner,
-                req,
-                request_id.as_deref(),
-            )
-            .await;
+            let resp = dispatch_one(&state, &owner, req, request_id.as_deref()).await;
             // ── Metrics ──────────────────────────────────────
             let elapsed_us = started_single.elapsed().as_micros() as u64;
             if let Some(err) = &resp.error {
@@ -362,7 +438,9 @@ async fn rpc_handler(
                 };
                 state.metrics.record(&method_name, outcome, elapsed_us);
             } else {
-                state.metrics.record(&method_name, RpcOutcome::Success, elapsed_us);
+                state
+                    .metrics
+                    .record(&method_name, RpcOutcome::Success, elapsed_us);
             }
             let status = if resp.error.is_some() {
                 axum::http::StatusCode::BAD_REQUEST
@@ -420,10 +498,7 @@ async fn rpc_handler(
             for r in &rows {
                 state.metrics.record(&r.method, r.outcome, r.elapsed_us);
             }
-            let replyable: Vec<bool> = rows
-                .iter()
-                .map(|r| !r.response.id.is_null())
-                .collect();
+            let replyable: Vec<bool> = rows.iter().map(|r| !r.response.id.is_null()).collect();
             let bodies: Vec<RpcResponse> = rows.into_iter().map(|r| r.response).collect();
             let all_errors = bodies.iter().all(|r| r.error.is_some());
             let mut response = if replyable.iter().all(|&x| !x) {
@@ -456,11 +531,10 @@ async fn dispatch_one(
     req: crate::dispatch::RpcRequest,
     request_id: Option<&str>,
 ) -> RpcResponse {
-    // Read the timeout back from the metrics handle's parent
-    // server through the `ServerState`. We don't carry the
-    // config through state, so derive a sensible default —
-    // override path is to set `DEFAULT_REQUEST_TIMEOUT`.
-    let timeout = DEFAULT_REQUEST_TIMEOUT;
+    // The per-request budget comes from `RpcServerConfig::request_timeout`
+    // via `ServerState`. This lets operators tune slow RPCs (e.g.
+    // `sync.snapshot`) without rebuilding the constant in code.
+    let timeout = state.request_timeout;
     let dispatch = dispatch_rpc_call(&state.app, owner, req, request_id);
     match tokio::time::timeout(timeout, dispatch).await {
         Ok(resp) => resp,
@@ -472,10 +546,7 @@ async fn dispatch_one(
             err.kind = Some(a3net_error::ErrorKind::Timeout.as_str().to_string());
             // Error code maps via From<A3chatError>; we synthesise
             // here so callers see -32603 with kind=timeout.
-            RpcResponse::failure(
-                serde_json::Value::Null,
-                err,
-            )
+            RpcResponse::failure(serde_json::Value::Null, err)
         }
     }
 }
@@ -487,29 +558,56 @@ async fn dispatch_one(
 /// the persisted message AND firing an SSE notification for the
 /// peer).
 ///
+/// DO-178C §6.4 — authentication: this endpoint is *not* callable
+/// by the same `X-A3Chat-Owner` header as `/rpc` because the
+/// upstream pushers are server-side components (iroh-docs bridge,
+/// inbound SSE re-emit, etc.) running on the same node. Instead
+/// we require a shared `X-A3Chat-Internal-Token` header that
+/// matches the `internal_token` field on `ServerState`. The
+/// token is generated at process start by `a3chatd` and shared
+/// via Unix socket credentials / IPC; the previous
+/// "fall-back to body owner" implementation was a critical auth
+/// bypass (#2 in the public audit) and has been removed.
+///
 /// Body shape:
 /// ```json
 /// { "owner": "alice-node-id", "event": { /* A3chatEvent */ } }
 /// ```
 async fn internal_notify_handler(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    // Authenticate via the same header used by `/rpc`.
-    let headers = HeaderMap::new();
-    let owner = match owner_from_headers(&headers) {
-        Ok(o) => o,
-        Err(_) => {
-            let raw = body.get("owner").and_then(|v| v.as_str()).unwrap_or("");
-            if raw.is_empty() {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "missing owner"})),
-                );
-            }
-            UserId::from(raw)
-        }
-    };
+    // ── Authentication: shared internal token ──────────────────────
+    let state_token = state.internal_token.as_str();
+    let supplied_token = headers
+        .get("x-a3chat-internal-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // Use a constant-time compare on the raw bytes.
+    let supplied_bytes = supplied_token.as_bytes();
+    let state_bytes = state_token.as_bytes();
+    let mut diff: usize = supplied_bytes.len() ^ state_bytes.len();
+    for (a, b) in supplied_bytes.iter().zip(state_bytes.iter()) {
+        diff |= usize::from(*a ^ *b);
+    }
+    if diff != 0 {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "internal notify requires X-A3Chat-Internal-Token"})),
+        );
+    }
+
+    // The owner is now strictly taken from the JSON body.
+    // (The header-based `owner_from_headers` path was the bypass.)
+    let raw = body.get("owner").and_then(|v| v.as_str()).unwrap_or("");
+    if raw.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing owner"})),
+        );
+    }
+    let owner = UserId::from(raw);
     // Validate the body shape. The bus is global — a single
     // publish reaches every receiver (filtering happens on the
     // receiver side via `subscribe_for`). We therefore just
@@ -670,10 +768,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), 4096).await.unwrap(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(res.into_body(), 4096).await.unwrap())
+                .unwrap();
         assert_eq!(body["service"], "a3chat");
         assert!(body.get("version").is_some());
     }
@@ -692,12 +789,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(res.into_body(), 8192).await.unwrap(),
-        )
-        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(res.into_body(), 8192).await.unwrap())
+                .unwrap();
         let list = body["methods"].as_array().expect("methods is array");
-        assert!(list.iter().any(|v| v == &serde_json::json!("a3chat.contact.list")));
+        assert!(
+            list.iter()
+                .any(|v| v == &serde_json::json!("a3chat.contact.list"))
+        );
     }
 
     #[tokio::test]
@@ -951,10 +1050,109 @@ mod tests {
         assert_eq!(cfg.allowed_origins, vec!["https://a3chat.local"]);
     }
 
-    // Silence unused-warning for the `ERR_PARSE` import.
+    // Silence unused-warning for the `Duration` import.
     #[test]
-    fn err_parse_constant_in_scope() {
-        assert_eq!(ERR_PARSE, -32700);
-        let _ = Duration::from_secs(1);
+    fn config_smoke() {
+        assert_eq!(Duration::from_secs(1).as_secs(), 1);
+    }
+
+    // ── /rpc/notify auth: regression test for issue #2 (audit).
+    // Before the fix, the handler trusted the body's `owner` field
+    // unconditionally when the auth header was missing, which let
+    // any unauthenticated HTTP POST publish events to any user's
+    // SSE stream. The fix introduces a shared internal token that
+    // must be supplied via `X-A3Chat-Internal-Token`. The tests
+    // below lock that behavior in.
+    #[tokio::test]
+    async fn notify_without_token_rejects_with_401() {
+        let (_d, server) = fresh_app().await;
+        let router = server.router();
+        let body = serde_json::json!({
+            "owner": "attacker",
+            "event": { "type": "noop" },
+        });
+        let res = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rpc/notify")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "missing X-A3Chat-Internal-Token must yield 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_with_wrong_token_rejects_with_401() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = A3chatApp::new(
+            StorageConfig::new(dir.path().to_path_buf()),
+            owner(),
+        )
+        .unwrap();
+        let mut cfg = RpcServerConfig::default();
+        cfg.internal_token = Some("the-correct-token".into());
+        let server = RpcServer::new(app, cfg);
+        let router = server.router();
+        let body = serde_json::json!({
+            "owner": owner().as_str(),
+            "event": { "type": "noop" },
+        });
+        let res = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rpc/notify")
+                    .header("content-type", "application/json")
+                    .header("x-a3chat-internal-token", "wrong-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn notify_with_correct_token_returns_200() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = A3chatApp::new(
+            StorageConfig::new(dir.path().to_path_buf()),
+            owner(),
+        )
+        .unwrap();
+        let mut cfg = RpcServerConfig::default();
+        cfg.internal_token = Some("the-correct-token".into());
+        let server = RpcServer::new(app, cfg);
+        let router = server.router();
+        let body = serde_json::json!({
+            "owner": owner().as_str(),
+            "event": {
+                "kind": "chat_typing",
+                "user_id": "bob",
+                "conversation_id": "dm:a:b",
+                "expires_at": 0,
+            },
+        });
+        let res = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rpc/notify")
+                    .header("content-type", "application/json")
+                    .header("x-a3chat-internal-token", "the-correct-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
     }
 }

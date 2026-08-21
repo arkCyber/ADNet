@@ -23,27 +23,54 @@
 
 use std::sync::Arc;
 
+use base64::Engine as _;
+
 use a3chat_core::error::A3chatError;
-use a3chat_core::id::UserId;use a3net_userstore::model::{
-    AvatarBlob, DeviceClass, PublicKeyAlgorithm, UserDevice, UserPreferences, UserProfile,
+use a3chat_core::id::UserId;
+use a3chat_core::rpc::A3chatRpcMethod;
+use a3net_blobstore::BlobStore;
+use a3net_userstore::model::{
+    AvatarBlob, DeviceClass, PublicKeyAlgorithm, UserDevice, UserKind, UserPreferences, UserProfile,
     UserPublicKey,
 };
 use a3net_userstore::store::UserStore;
 use a3net_userstore::sqlite::{SqliteUserStore, SqliteUserStoreConfig};
 
-use crate::error::{AppError, AppResult, app_to_domain};
+use crate::error::{AppError, AppResult};
 
-/// RPC method constants — match `a3chat-core/src/rpc.rs`.
-pub const PROFILE_GET: &str = "a3chat.profile.get";
-pub const PROFILE_PUT: &str = "a3chat.profile.put";
-pub const PROFILE_PREFERENCES_PUT: &str = "a3chat.profile.preferences_put";
-pub const PROFILE_PUBLIC_KEY_ADD: &str = "a3chat.profile.public_key_add";
-pub const PROFILE_PUBLIC_KEY_LIST: &str = "a3chat.profile.public_key_list";
-pub const PROFILE_PUBLIC_KEY_REVOKE: &str = "a3chat.profile.public_key_revoke";
-pub const PROFILE_DEVICE_REGISTER: &str = "a3chat.profile.device_register";
-pub const PROFILE_DEVICE_LIST: &str = "a3chat.profile.device_list";
-pub const PROFILE_DIGIT_GET: &str = "a3chat.profile.digit_get";
-pub const PROFILE_AVATAR_SET: &str = "a3chat.profile.avatar_set";
+/// Maximum avatar payload size (4 MiB). Mirrors the
+/// `media_service::MAX_ATTACHMENT_BYTES` envelope — keeping the two
+/// limits aligned avoids confusion at the application layer.
+pub const MAX_AVATAR_BYTES: usize = 4 * 1024 * 1024;
+
+/// MIME types accepted by [`ProfileService::upload_avatar`]. The
+/// list is intentionally small — DO-178C §6.3 *fail-safe defaults*:
+/// anything outside this set is rejected at the boundary.
+pub const ALLOWED_AVATAR_MIME_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+];
+
+/// RPC method constants — match `a3chat-core/src/rpc.rs`. We
+/// re-export the canonical strings here so callers (CLI, Tauri,
+/// tests) only need one source of truth.
+pub const PROFILE_GET: &str = A3chatRpcMethod::PROFILE_GET;
+pub const PROFILE_PUT: &str = A3chatRpcMethod::PROFILE_PUT;
+pub const PROFILE_PREFERENCES_PUT: &str = A3chatRpcMethod::PROFILE_PREFERENCES_PUT;
+pub const PROFILE_PUBLIC_KEY_ADD: &str = A3chatRpcMethod::PROFILE_PUBLIC_KEY_ADD;
+pub const PROFILE_PUBLIC_KEY_LIST: &str = A3chatRpcMethod::PROFILE_PUBLIC_KEY_LIST;
+pub const PROFILE_PUBLIC_KEY_REVOKE: &str = A3chatRpcMethod::PROFILE_PUBLIC_KEY_REVOKE;
+pub const PROFILE_PUBLIC_KEY_LABEL: &str = "a3chat.profile.public_key.label";
+pub const PROFILE_DEVICE_REGISTER: &str = A3chatRpcMethod::PROFILE_DEVICE_REGISTER;
+pub const PROFILE_DEVICE_LIST: &str = A3chatRpcMethod::PROFILE_DEVICE_LIST;
+pub const PROFILE_DIGIT_GET: &str = A3chatRpcMethod::PROFILE_DIGIT_GET;
+pub const PROFILE_AVATAR_SET: &str = A3chatRpcMethod::PROFILE_AVATAR_SET;
+pub const PROFILE_AVATAR_UPLOAD: &str = "a3chat.profile.avatar.upload";
+pub const PROFILE_AVATAR_GET: &str = "a3chat.profile.avatar.get";
+pub const PROFILE_AVATAR_REMOVE: &str = "a3chat.profile.avatar.remove";
+pub const PROFILE_KIND_GET: &str = "a3chat.profile.kind.get";
+pub const PROFILE_KIND_SET: &str = "a3chat.profile.kind.set";
 
 /// JSON-RPC dispatcher — routes `a3chat.profile.*` methods to the
 /// matching service method.
@@ -121,16 +148,81 @@ pub async fn dispatch(
             svc.upsert_profile(profile).await?;
             Ok(serde_json::json!({"ok": true}))
         }
+        PROFILE_AVATAR_UPLOAD => {
+            let args: AvatarUploadArgs = serde_json::from_value(params)
+                .map_err(|e| AppError::Internal(format!("avatar_upload parse: {e}")))?;
+            let blob = svc
+                .upload_avatar(owner, args.mime_type, args.bytes_b64)
+                .await?;
+            Ok(serde_json::to_value(blob).unwrap())
+        }
+        PROFILE_AVATAR_GET => {
+            let got = svc.get_avatar(owner).await?;
+            Ok(got
+                .map(|b| serde_json::to_value(b).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null))
+        }
+        PROFILE_AVATAR_REMOVE => {
+            svc.remove_avatar(owner).await?;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        PROFILE_KIND_GET => {
+            let k = svc.get_kind(owner).await?;
+            Ok(serde_json::to_value(k).unwrap())
+        }
+        PROFILE_KIND_SET => {
+            let args: KindSetArgs = serde_json::from_value(params)
+                .map_err(|e| AppError::Internal(format!("kind_set parse: {e}")))?;
+            svc.set_kind(owner, args.kind).await?;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        PROFILE_PUBLIC_KEY_LABEL => {
+            let args: PublicKeyLabelArgs = serde_json::from_value(params)
+                .map_err(|e| AppError::Internal(format!("public_key_label parse: {e}")))?;
+            svc.label_public_key(&args.key_id, &args.label).await?;
+            Ok(serde_json::json!({"ok": true}))
+        }
         _ => Err(AppError::Internal(format!("unknown profile method {method}"))),
     };
     r.map_err(crate::error::app_to_domain)
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct PublicKeyAddArgs {
     pub algorithm: PublicKeyAlgorithm,
     pub key_material: String,
     pub label: Option<String>,
+}
+
+/// Wire-shape for `a3chat.profile.public_key.label`.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct PublicKeyLabelArgs {
+    pub key_id: String,
+    pub label: String,
+}
+
+/// Wire-shape for `a3chat.profile.kind.set`.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct KindSetArgs {
+    pub kind: UserKind,
+}
+
+/// Wire-shape for `a3chat.profile.avatar.upload`. The actual
+/// bytes are base64-encoded over the wire — DO-178C §6.3 *no
+/// raw byte streams over JSON-RPC*.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct AvatarUploadArgs {
+    pub mime_type: String,
+    pub bytes_b64: String,
+}
+
+/// Result of `a3chat.profile.avatar.get`. The bytes are returned
+/// as base64 (same convention as the upload side) plus the
+/// content-address reference that was stored on the profile row.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AvatarBytes {
+    pub blob: AvatarBlob,
+    pub bytes_b64: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -148,30 +240,41 @@ pub struct DeviceRegisterArgs {
 pub struct ProfileConfig {
     /// Path to the userstore SQLite file.
     pub sqlite_path: std::path::PathBuf,
+    /// Path to the avatar blobstore directory.
+    pub blobstore_path: std::path::PathBuf,
 }
 
 impl ProfileConfig {
-    pub fn new(sqlite_path: impl Into<std::path::PathBuf>) -> Self {
+    pub fn new(
+        sqlite_path: impl Into<std::path::PathBuf>,
+        blobstore_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
         Self {
             sqlite_path: sqlite_path.into(),
+            blobstore_path: blobstore_path.into(),
         }
     }
 
     /// Place the profile store alongside the a3chat storage:
-    /// `<base>/profiles.sqlite`.
+    /// `<base>/profiles.sqlite` + `<base>/avatar_blobs`.
     pub fn under_base(base: &std::path::Path) -> Self {
-        Self::new(base.join("profiles.sqlite"))
+        Self::new(
+            base.join("profiles.sqlite"),
+            base.join("avatar_blobs"),
+        )
     }
 }
 
-/// Thin wrapper around [`SqliteUserStore`]. The underlying
-/// trait method calls are async on the trait but the SQLite
-/// implementation is synchronous — the wrapper runs them on
+/// Thin wrapper around [`SqliteUserStore`] + an avatar
+/// [`BlobStore`]. The underlying trait method calls are async on
+/// the trait but the SQLite / blob-store implementations are
+/// synchronous — the wrapper runs them on
 /// `tokio::task::spawn_blocking` so the RPC handlers stay
 /// non-blocking.
 #[derive(Clone)]
 pub struct ProfileService {
     store: Arc<dyn UserStore>,
+    blobs: Arc<BlobStore>,
 }
 
 impl std::fmt::Debug for ProfileService {
@@ -186,22 +289,43 @@ impl ProfileService {
             std::fs::create_dir_all(parent)
                 .map_err(|e| AppError::Storage(format!("profile dir create: {e}")))?;
         }
+        std::fs::create_dir_all(&config.blobstore_path)
+            .map_err(|e| AppError::Storage(format!("blobstore dir create: {e}")))?;
         let store = SqliteUserStore::open(SqliteUserStoreConfig::new(
             config.sqlite_path.clone(),
         ))
         .map_err(|e| AppError::Storage(format!("profile store open: {e}")))?;
+        let blobs = BlobStore::new(&config.blobstore_path)
+            .map_err(|e| AppError::Storage(format!("avatar blobstore open: {e}")))?;
         Ok(Self {
             store: Arc::new(store),
+            blobs: Arc::new(blobs),
         })
     }
 
     /// Construct from an already-opened store (test injection).
     pub fn from_store(store: Arc<dyn UserStore>) -> Self {
-        Self { store }
+        // Tests that don't care about avatars get a dummy in-memory
+        // blobstore. The e2e tests use [`ProfileService::open`]
+        // directly.
+        let tmp = tempfile::TempDir::new().expect("tempdir for test blobstore");
+        let blobs = BlobStore::new(tmp.path()).expect("test blobstore opens");
+        // Intentionally leak the tempdir — the blobs are inside it,
+        // and we don't want the directory to be removed before the
+        // store is dropped. This is fine for short-lived tests.
+        std::mem::forget(tmp);
+        Self {
+            store,
+            blobs: Arc::new(blobs),
+        }
     }
 
     fn store(&self) -> Arc<dyn UserStore> {
         Arc::clone(&self.store)
+    }
+
+    fn blobs(&self) -> Arc<BlobStore> {
+        Arc::clone(&self.blobs)
     }
 
     /// Run a sync closure that returns `UserStoreResult<T>` on the
@@ -221,21 +345,15 @@ impl ProfileService {
 
     pub async fn upsert_profile(&self, profile: UserProfile) -> AppResult<()> {
         let s = self.store();
-        self.run_blocking("profile put", move || {
-            // We can't `.await` inside a sync closure, so use
-            // a one-shot executor.
-            futures::executor::block_on(s.put_profile(profile))
-        })
-        .await
+        self.run_blocking("profile put", move || s.put_profile(profile))
+            .await
     }
 
     pub async fn get_profile(&self, user: &UserId) -> AppResult<Option<UserProfile>> {
         let s = self.store();
         let uid = user.as_str().to_string();
-        self.run_blocking("profile get", move || {
-            futures::executor::block_on(s.get_profile(&uid))
-        })
-        .await
+        self.run_blocking("profile get", move || s.get_profile(&uid))
+            .await
     }
 
     pub async fn put_preferences(
@@ -245,10 +363,8 @@ impl ProfileService {
     ) -> AppResult<()> {
         let s = self.store();
         let uid = user.as_str().to_string();
-        self.run_blocking("prefs put", move || {
-            futures::executor::block_on(s.put_preferences(&uid, prefs))
-        })
-        .await
+        self.run_blocking("prefs put", move || s.put_preferences(&uid, prefs))
+            .await
     }
 
     // ── Public keys ───────────────────────────────────────────────────
@@ -272,18 +388,13 @@ impl ProfileService {
             user_id: user.as_str().to_string(),
             algorithm: algorithm.as_str().to_string(),
             key_material,
+            label: label.unwrap_or_default(),
             created_at: chrono::Utc::now().timestamp() as u64,
             revoked_at: None,
-            // `label` was promoted to `UserDevice` only — for keys
-            // we encode it into the key_material prefix as a
-            // stable, no-schema-change workaround.
-            // TODO: replace when upstream adds a `label` field
-            // to `UserPublicKey`.
         };
-        let _ = label; // currently unused; preserved for forward compat
         let s = self.store();
         self.run_blocking("public_key put", move || {
-            futures::executor::block_on(s.put_public_key(key))
+            s.put_public_key(key)
         })
         .await?;
         Ok(key_id)
@@ -293,7 +404,7 @@ impl ProfileService {
         let s = self.store();
         let uid = user.as_str().to_string();
         self.run_blocking("public_key list", move || {
-            futures::executor::block_on(s.list_public_keys(&uid))
+            s.list_public_keys(&uid)
         })
         .await
     }
@@ -302,9 +413,44 @@ impl ProfileService {
         let s = self.store();
         let kid = key_id.to_string();
         self.run_blocking("public_key revoke", move || {
-            futures::executor::block_on(s.revoke_public_key(&kid))
+            s.revoke_public_key(&kid)
         })
         .await
+    }
+
+    /// Patch the human-readable `label` on an existing public key.
+    /// Best-effort: a non-existent `key_id` is a no-op (the FK is
+    /// enforced upstream when the key is *created*).
+    pub async fn label_public_key(&self, key_id: &str, label: &str) -> AppResult<()> {
+        let s = self.store();
+        let kid = key_id.to_string();
+        let l = label.to_string();
+        self.run_blocking("public_key label", move || {
+            s.set_public_key_label(&kid, &l)
+        })
+        .await
+    }
+
+    // ── Account kind (v2) ────────────────────────────────────────────
+
+    /// Persist the account kind for `user`. Auto-creates a minimal
+    /// profile row if none exists yet so subsequent calls (e.g.
+    /// `add_public_key`) can satisfy their FK constraints without
+    /// the caller having to seed the profile first.
+    pub async fn set_kind(&self, user: &UserId, kind: UserKind) -> AppResult<()> {
+        let s = self.store();
+        let uid = user.as_str().to_string();
+        self.run_blocking("kind set", move || s.set_kind(&uid, kind))
+            .await
+    }
+
+    /// Read the account kind. Unknown users default to
+    /// [`UserKind::Human`] — DO-178C §6.1.
+    pub async fn get_kind(&self, user: &UserId) -> AppResult<UserKind> {
+        let s = self.store();
+        let uid = user.as_str().to_string();
+        self.run_blocking("kind get", move || s.get_kind(&uid))
+            .await
     }
 
     // ── Devices ───────────────────────────────────────────────────────
@@ -330,7 +476,7 @@ impl ProfileService {
         };
         let s = self.store();
         self.run_blocking("device put", move || {
-            futures::executor::block_on(s.put_device(device))
+            s.put_device(device)
         })
         .await?;
         Ok(device_id)
@@ -340,7 +486,7 @@ impl ProfileService {
         let s = self.store();
         let uid = user.as_str().to_string();
         self.run_blocking("device list", move || {
-            futures::executor::block_on(s.list_devices(&uid))
+            s.list_devices(&uid)
         })
         .await
     }
@@ -353,7 +499,7 @@ impl ProfileService {
         let s = self.store();
         let uid = user.as_str().to_string();
         self.run_blocking("digit compute", move || {
-            futures::executor::block_on(s.ensure_user_digit(&uid))
+            s.ensure_user_digit(&uid)
         })
         .await
     }
@@ -363,9 +509,147 @@ impl ProfileService {
         let s = self.store();
         let uid = user.as_str().to_string();
         self.run_blocking("digit lookup", move || {
-            futures::executor::block_on(s.resolve_user_digit(&uid))
+            s.resolve_user_digit(&uid)
         })
         .await
+    }
+
+    // ── Avatar (BLAKE3-content-addressed blobstore) ──────────────────
+
+    /// Decode a base64 payload, write it to the avatar blobstore,
+    /// and patch the `user_profile.avatar` reference. Returns the
+    /// [`AvatarBlob`] descriptor so callers can verify the hash.
+    pub async fn upload_avatar(
+        &self,
+        user: &UserId,
+        mime_type: String,
+        bytes_b64: String,
+    ) -> AppResult<AvatarBlob> {
+        // 1. Validate MIME allow-list (boundary check — DO-178C §6.3).
+        if !ALLOWED_AVATAR_MIME_TYPES.contains(&mime_type.as_str()) {
+            return Err(AppError::Domain(format!(
+                "avatar mime_type {mime_type} not in allow-list"
+            )));
+        }
+        // 2. Decode base64 → raw bytes.
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(bytes_b64.as_bytes())
+            .map_err(|e| AppError::Domain(format!("avatar base64 decode: {e}")))?;
+        // 3. Enforce size cap at the boundary.
+        if bytes.len() > MAX_AVATAR_BYTES {
+            return Err(AppError::Domain(format!(
+                "avatar size {} exceeds cap {}",
+                bytes.len(),
+                MAX_AVATAR_BYTES
+            )));
+        }
+        // 4. Compute the BLAKE3 hash that becomes the content address.
+        let hash_hex = blake3::hash(&bytes).to_hex().to_string();
+        // 5. Write chunks to the blobstore (sync, off the runtime).
+        let blobs = self.blobs();
+        let bytes_for_blocking = bytes.clone();
+        let (hash_check, size) = tokio::task::spawn_blocking(move || {
+            blobs.put_bytes_sync(&bytes_for_blocking)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("avatar blobstore join: {e}")))?
+        .map_err(|e| AppError::Storage(format!("avatar blobstore put: {e}")))?;
+        // 6. Sanity: the hash the blobstore derived must equal ours.
+        let stored_hex = hash_check.as_hex().to_string();
+        if stored_hex != hash_hex {
+            return Err(AppError::Internal(format!(
+                "blobstore hash mismatch: expected {hash_hex}, got {stored_hex}"
+            )));
+        }
+        let blob = AvatarBlob::new(hash_hex.clone(), mime_type.clone(), size);
+        // 7. Patch the profile row, auto-creating it if necessary.
+        let s = self.store();
+        let uid = user.as_str().to_string();
+        let blob_for_db = blob.clone();
+        self.run_blocking("avatar upsert", move || {
+            let mut profile = s.get_profile(&uid)?
+                .unwrap_or_else(|| {
+                    // Re-use the user-id as a placeholder username
+                    // — DO-178C §6.1 *fail-safe*: callers can fill
+                    // in a real username later via `put_profile`.
+                    UserProfile::new(uid.clone(), uid.clone())
+                });
+            profile.avatar = Some(blob_for_db);
+            profile.updated_at = chrono::Utc::now().timestamp() as u64;
+            s.put_profile(profile)
+        })
+        .await?;
+        Ok(blob)
+    }
+
+    /// Read an avatar back as [`AvatarBytes`]. Returns `None` if no
+    /// avatar is currently bound (either the row is missing or the
+    /// blob is gone).
+    pub async fn get_avatar(&self, user: &UserId) -> AppResult<Option<AvatarBytes>> {
+        // 1. Pull the profile row to learn the avatar hash + MIME.
+        let s = self.store();
+        let uid = user.as_str().to_string();
+        let profile = self
+            .run_blocking("avatar get profile", move || s.get_profile(&uid))
+            .await?;
+        let Some(profile) = profile else {
+            return Ok(None);
+        };
+        let Some(blob) = profile.avatar else {
+            return Ok(None);
+        };
+        // 2. Reconstruct the ContentHash from the hex string and
+        //    fetch the bytes from the disk blobstore.
+        let blobs = self.blobs();
+        let hex = blob.blob_hash.clone();
+        let bytes = tokio::task::spawn_blocking(move || {
+            use a3net_types::ContentHash;
+            let h = ContentHash::from_hex(&hex)
+                .map_err(|e| format!("avatar hash hex: {e}"))?;
+            blobs.get_sync(&h).ok_or_else(|| "blob missing".to_string())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("avatar blobstore join: {e}")))?
+        .map_err(|e| AppError::Domain(format!("avatar blob: {e}")))?;
+        // 3. Re-encode as base64 for the wire shape.
+        let bytes_b64 =
+            base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(Some(AvatarBytes { blob, bytes_b64 }))
+    }
+
+    /// Drop the avatar blob and clear the profile reference. The
+    /// blob is best-effort removed (already-missing is fine); the
+    /// row patch is the authoritative part.
+    pub async fn remove_avatar(&self, user: &UserId) -> AppResult<()> {
+        // 1. Pull the profile so we know which blob to delete.
+        let s = self.store();
+        let uid = user.as_str().to_string();
+        let profile = self
+            .run_blocking("avatar get for remove", move || s.get_profile(&uid))
+            .await?;
+        let Some(profile) = profile else {
+            return Ok(());
+        };
+        if let Some(blob) = profile.avatar.as_ref() {
+            let blobs = self.blobs();
+            let hex = blob.blob_hash.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                use a3net_types::ContentHash;
+                if let Ok(h) = ContentHash::from_hex(&hex) {
+                    let _ = blobs.remove(&h);
+                }
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("avatar blobstore join: {e}")))?;
+        }
+        // 2. Clear the row reference (auto-create if needed).
+        let mut next = profile;
+        next.avatar = None;
+        next.updated_at = chrono::Utc::now().timestamp() as u64;
+        let s2 = self.store();
+        self.run_blocking("avatar remove patch", move || s2.put_profile(next))
+        .await?;
+        Ok(())
     }
 }
 
@@ -401,17 +685,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl UserStore for MockUserStore {
-        async fn put_profile(&self, p: UserProfile) -> a3net_userstore::error::UserStoreResult<()> {
+        fn put_profile(&self, p: UserProfile) -> a3net_userstore::error::UserStoreResult<()> {
             self.profiles.lock().unwrap().insert(p.user_id.clone(), p);
             Ok(())
         }
-        async fn get_profile(
+        fn get_profile(
             &self,
             uid: &str,
         ) -> a3net_userstore::error::UserStoreResult<Option<UserProfile>> {
             Ok(self.profiles.lock().unwrap().get(uid).cloned())
         }
-        async fn put_preferences(
+        fn put_preferences(
             &self,
             uid: &str,
             prefs: UserPreferences,
@@ -427,22 +711,22 @@ mod tests {
                 })
             }
         }
-        async fn list_profiles(
+        fn list_profiles(
             &self,
         ) -> a3net_userstore::error::UserStoreResult<Vec<UserProfile>> {
             Ok(self.profiles.lock().unwrap().values().cloned().collect())
         }
-        async fn delete_profile(&self, uid: &str) -> a3net_userstore::error::UserStoreResult<usize> {
+        fn delete_profile(&self, uid: &str) -> a3net_userstore::error::UserStoreResult<usize> {
             Ok(if self.profiles.lock().unwrap().remove(uid).is_some() { 1 } else { 0 })
         }
-        async fn put_public_key(
+        fn put_public_key(
             &self,
             k: UserPublicKey,
         ) -> a3net_userstore::error::UserStoreResult<()> {
             self.keys.lock().unwrap().insert(k.key_id.clone(), k);
             Ok(())
         }
-        async fn revoke_public_key(
+        fn revoke_public_key(
             &self,
             kid: &str,
         ) -> a3net_userstore::error::UserStoreResult<()> {
@@ -457,7 +741,7 @@ mod tests {
                 })
             }
         }
-        async fn list_public_keys(
+        fn list_public_keys(
             &self,
             uid: &str,
         ) -> a3net_userstore::error::UserStoreResult<Vec<UserPublicKey>> {
@@ -470,14 +754,14 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        async fn put_device(
+        fn put_device(
             &self,
             d: UserDevice,
         ) -> a3net_userstore::error::UserStoreResult<()> {
             self.devices.lock().unwrap().insert(d.device_id.clone(), d);
             Ok(())
         }
-        async fn revoke_device(
+        fn revoke_device(
             &self,
             did: &str,
         ) -> a3net_userstore::error::UserStoreResult<()> {
@@ -492,7 +776,7 @@ mod tests {
                 })
             }
         }
-        async fn list_devices(
+        fn list_devices(
             &self,
             uid: &str,
         ) -> a3net_userstore::error::UserStoreResult<Vec<UserDevice>> {
@@ -505,17 +789,51 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        async fn ensure_user_digit(
+        fn ensure_user_digit(
             &self,
             uid: &str,
         ) -> a3net_userstore::error::UserStoreResult<String> {
             Ok(format!("{:012}", uid.len() % 1_000_000_000_000))
         }
-        async fn resolve_user_digit(
+        fn resolve_user_digit(
             &self,
             _uid: &str,
         ) -> a3net_userstore::error::UserStoreResult<Option<String>> {
             Ok(Some("000000000000".into()))
+        }
+        fn set_public_key_label(
+            &self,
+            key_id: &str,
+            label: &str,
+        ) -> a3net_userstore::error::UserStoreResult<()> {
+            let mut g = self.keys.lock().unwrap();
+            if let Some(k) = g.get_mut(key_id) {
+                k.label = label.to_string();
+            }
+            Ok(())
+        }
+        fn set_kind(
+            &self,
+            uid: &str,
+            kind: UserKind,
+        ) -> a3net_userstore::error::UserStoreResult<()> {
+            let mut g = self.profiles.lock().unwrap();
+            g.entry(uid.to_string())
+                .or_insert_with(|| UserProfile::new(uid, uid))
+                .kind = kind;
+            Ok(())
+        }
+        fn get_kind(
+            &self,
+            uid: &str,
+        ) -> a3net_userstore::error::UserStoreResult<UserKind> {
+            Ok(self
+                .profiles
+                .lock()
+                .unwrap()
+                .get(uid)
+                .map(|p| p.kind)
+                .unwrap_or_default())
         }
     }
 

@@ -181,8 +181,11 @@ pub fn validate_tag(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validate a URL/avatar string. Permissive: must be valid UTF-8, no
-/// NULs, bounded.
+/// Validate a URL/avatar string. Checks:
+/// - Valid UTF-8, no NUL bytes
+/// - Bounded length
+/// - Parses as a `url::Url` with a valid scheme (http/https/data)
+/// - Host is non-empty (reject `file:`, bare paths, etc.)
 pub fn validate_url(field: &str, value: &str) -> Result<()> {
     if value.len() > MAX_NAME_LEN {
         return Err(AdnetError::Validation(format!(
@@ -191,6 +194,36 @@ pub fn validate_url(field: &str, value: &str) -> Result<()> {
     }
     if value.as_bytes().contains(&0) {
         return Err(AdnetError::Validation(format!("{field}: URL contains NUL")));
+    }
+    let parsed = url::Url::parse(value).map_err(|e| {
+        AdnetError::Validation(format!("{field}: not a valid URL: {e}"))
+    })?;
+    let scheme = parsed.scheme();
+    if scheme.is_empty() {
+        return Err(AdnetError::Validation(format!(
+            "{field}: URL has no scheme (e.g. https://)"
+        )));
+    }
+    if !matches!(scheme, "http" | "https" | "data") {
+        return Err(AdnetError::Validation(format!(
+            "{field}: unsupported scheme '{scheme}' (only http/https/data allowed)"
+        )));
+    }
+    // SECURITY: data: URLs must be image/* to prevent XSS / HTML injection.
+    // `data:text/html,<h1>` would bypass host check; lock it down here.
+    if scheme == "data" {
+        let mime_prefix = "data:image/";
+        if !value.starts_with(mime_prefix) {
+            return Err(AdnetError::Validation(format!(
+                "{field}: data: URLs must be image/* (e.g. data:image/png;base64,...)"
+            )));
+        }
+    }
+    // data: URLs have no host; only require host for http/https.
+    if parsed.host().is_none() && scheme != "data" {
+        return Err(AdnetError::Validation(format!(
+            "{field}: URL has no host"
+        )));
     }
     Ok(())
 }
@@ -632,5 +665,47 @@ mod tests {
         // Mixed case OK (hex digits include A-F).
         let upper = "ABCDEF0123456789".repeat(4);
         assert!(validate_hex_id("h", &upper, 64).is_ok());
+    }
+
+    #[test]
+    fn validate_url_accepts_valid_schemes() {
+        assert!(validate_url("f", "https://example.com/avatar.png").is_ok());
+        assert!(validate_url("f", "http://example.com/avatar.png").is_ok());
+        // data URL with image content
+        assert!(validate_url("f", "data:image/png;base64,SGVsbG8=").is_ok());
+        // IP address as host
+        assert!(validate_url("f", "https://127.0.0.1/avatar.png").is_ok());
+        // Port number
+        assert!(validate_url("f", "https://cdn.example.com:8443/img.png").is_ok());
+        // Path with query params
+        assert!(validate_url("f", "https://example.com/c/1?size=large").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_invalid_schemes() {
+        // No scheme at all
+        assert!(validate_url("f", "example.com/avatar.png").is_err());
+        // Unsupported schemes
+        assert!(validate_url("f", "ftp://example.com/avatar.png").is_err());
+        assert!(validate_url("f", "file:///path/to/avatar.png").is_err());
+        assert!(validate_url("f", "javascript:alert(1)").is_err());
+        assert!(validate_url("f", "data:text/html,<h1>").is_err()); // data:text not allowed
+    }
+
+    #[test]
+    fn validate_url_rejects_no_host() {
+        // Scheme present but no host (https:// alone is invalid)
+        assert!(validate_url("f", "https://").is_err());
+        // Trailing slash only is also rejected
+        assert!(validate_url("f", "https:///").is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_length_and_null() {
+        // Too long
+        let long = format!("https://example.com/{}", "x".repeat(300));
+        assert!(validate_url("f", &long).is_err());
+        // NUL byte
+        assert!(validate_url("f", "https://example.com/avatar\x00.png").is_err());
     }
 }

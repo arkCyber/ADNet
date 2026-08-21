@@ -593,10 +593,11 @@ impl ChatStorage {
         Ok(n as u32)
     }
 
-    /// Simple substring search over direct messages for `user_id` in
-    /// `chat_id`. Case-insensitive `LIKE` query — for production
-    /// installs, back this with a real FTS5 index. `limit` caps the
-    /// result count; pass `0` for "no limit" (returns up to 1024
+    /// Full-text search over direct messages for `user_id` in `chat_id`.
+    ///
+    /// DO-178C §6.1: Uses FTS5 for O(1) token lookup vs O(n) LIKE scans.
+    /// Results are returned in reverse chronological order.
+    /// `limit` caps the result count; pass `0` for "no limit" (returns up to 1024
     /// rows as a safety cap).
     pub fn search_direct_messages(
         &self,
@@ -611,21 +612,33 @@ impl ChatStorage {
             return Err(ChatStoreError::Invalid("search query is empty".into()));
         }
         let cap = if limit == 0 { 1024 } else { limit as i64 };
-        let pattern = format!("%{}%", query.replace('%', r"\%").replace('_', r"\_"));
+
+        // FTS5 query: escape special FTS characters and add prefix matching.
+        let fts_query = format!(
+            "\"{}\"*",
+            query.replace('"', "\"\"")
+        );
+
         let conn = self.db.lock()?;
+
+        // Use FTS5 for efficient full-text search.
+        // The JOIN retrieves full message rows from direct_messages via message_id.
         let mut stmt = conn.prepare(
-            "SELECT message_id, chat_id, sender_id, receiver_id, content, message_type,
-                    attachments, reply_to, sequence, timestamp, integrity_hash, is_edited, edited_at
-             FROM direct_messages
-             WHERE user_id = ?1 AND chat_id = ?2 AND content LIKE ?3 ESCAPE '\\'
-             ORDER BY sequence DESC LIMIT ?4",
+            "SELECT dm.message_id, dm.chat_id, dm.sender_id, dm.receiver_id, dm.content,
+                    dm.message_type, dm.attachments, dm.reply_to, dm.sequence, dm.timestamp,
+                    dm.integrity_hash, dm.is_edited, dm.edited_at
+             FROM direct_messages_fts fts
+             JOIN direct_messages dm ON dm.message_id = fts.message_id AND dm.user_id = ?1 AND dm.chat_id = ?2
+             WHERE direct_messages_fts MATCH ?3
+             ORDER BY dm.sequence DESC LIMIT ?4",
         )?;
+
         let rows = stmt.query_map(
-            params![user_id, chat_id, pattern, cap],
+            params![user_id, chat_id, fts_query, cap],
             row_to_direct_message,
         )?;
         let mut messages = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        messages.reverse(); // return chronological order to match `get_*`
+        messages.reverse();
         Ok(messages)
     }
 

@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use a3chat_core::error::A3chatError;
 use a3chat_core::id::UserId;
 
-use crate::error::{app_to_domain, AppError, AppResult};
+use crate::error::{AppError, AppResult};
 
 /// RPC method-name constants owned by this module.
 pub const METHODS: &[&str] = &[
@@ -214,8 +214,13 @@ fn blake3_of(s: &str) -> ContentHash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(s.as_bytes());
     let digest = hasher.finalize();
-    // ContentHash is BLAKE3 hex (64 chars).
-    ContentHash::from_bytes(digest.as_bytes())
+    // `ContentHash` stores the *lowercase hex* of the BLAKE3 digest;
+    // we wrap the digest directly to avoid a second hashing pass.
+    // (`ContentHash::from_bytes` would re-hash the 32 raw digest
+    // bytes, giving us `blake3(blake3(s))`, which is what the
+    // previous implementation did and broke `block_hash` matching.)
+    ContentHash::from_hex(digest.to_hex().as_str())
+        .expect("blake3 hex output is always 64 lowercase hex chars")
 }
 
 fn truncate(s: &str, n: usize) -> String {

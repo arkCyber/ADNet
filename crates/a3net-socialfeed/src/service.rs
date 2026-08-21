@@ -333,6 +333,24 @@ impl SocialFeedService {
                 posts.retain(|p| p.created_at < b);
             }
         }
+        // SR-MOMENTS-7 — drop posts authored by users that the
+        // viewer has blocked. Fail-open if the blocklist can't be
+        // read (don't deny the whole timeline because of one row
+        // lookup); the failure is logged.
+        if matches!(q.scope, TimelineScope::ForViewer | TimelineScope::All) {
+            match self.inner.list_blocklist(&q.viewer_id) {
+                Ok(blocked) if !blocked.is_empty() => {
+                    let set: std::collections::HashSet<String> = blocked.into_iter().collect();
+                    posts.retain(|p| !set.contains(&p.author_id));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    viewer = %q.viewer_id,
+                    error = %e,
+                    "blocklist lookup failed; timeline returned without filter"
+                ),
+            }
+        }
         posts.sort_by_key(|p| std::cmp::Reverse(p.created_at));
         let limit = q.limit.unwrap_or(50);
         // Cursor points at the *last returned* post. The next
@@ -367,6 +385,22 @@ impl SocialFeedService {
         Ok(stored)
     }
 
+    pub fn update_comment(&self, comment: SocialComment) -> Result<SocialComment> {
+        self.inner.update_comment(comment).map_err(SocialFeedError::ipc)
+    }
+
+    pub fn delete_comment(&self, comment_id: &str) -> Result<bool> {
+        self.inner
+            .delete_comment(comment_id)
+            .map_err(SocialFeedError::ipc)
+    }
+
+    pub fn get_comment(&self, comment_id: &str) -> Result<Option<SocialComment>> {
+        self.inner
+            .get_comment(comment_id)
+            .map_err(SocialFeedError::ipc)
+    }
+
     pub fn list_post_comments(&self, post_id: &str) -> Result<Vec<SocialComment>> {
         self.inner
             .list_post_comments(post_id)
@@ -381,6 +415,20 @@ impl SocialFeedService {
             self.maybe_broadcast(Envelope::from_reaction(reaction)).await;
         }
         Ok(inserted)
+    }
+
+    /// Un-react: remove a (target, user, kind) reaction. Returns
+    /// `true` when a row was deleted. SR-MOMENTS-3 — symmetric with
+    /// `react` so the WeChat-style toggle UI works.
+    pub fn unreact(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::invariants::ReactionTarget,
+        user_id: &str,
+    ) -> Result<bool> {
+        self.inner
+            .delete_reaction(target_id, target_type, user_id)
+            .map_err(SocialFeedError::ipc)
     }
 
     pub fn list_reactions(&self, target_id: &str) -> Result<Vec<SocialReaction>> {
@@ -407,9 +455,91 @@ impl SocialFeedService {
             .map_err(SocialFeedError::ipc)
     }
 
+    /// Inverse of [`Self::list_following`]: every user that follows
+    /// `user_id`. SR-MOMENTS-4 — symmetry so a profile screen can
+    /// show both directions of the follow graph.
+    pub fn list_followers(&self, user_id: &str) -> Result<Vec<String>> {
+        self.inner.list_followers(user_id).map_err(SocialFeedError::ipc)
+    }
+
     pub fn is_following(&self, follower_id: &str, following_id: &str) -> Result<bool> {
         self.inner
             .is_following(follower_id, following_id)
+            .map_err(SocialFeedError::ipc)
+    }
+
+    // ── Shares / Reports / Blocklist (v2 schema) ─────────────
+
+    /// Persist a [`ShareRecord`]. SR-MOMENTS-5: idempotent on
+    /// `(target_id, target_type, sharer_id)`. Returns `true` when
+    /// the share was newly inserted.
+    pub fn share(&self, share: a3net_types::social_feed::ShareRecord) -> Result<bool> {
+        self.inner.save_share(share).map_err(SocialFeedError::ipc)
+    }
+
+    pub fn list_post_shares(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> Result<Vec<a3net_types::social_feed::ShareRecord>> {
+        self.inner
+            .list_post_shares(target_id, target_type)
+            .map_err(SocialFeedError::ipc)
+    }
+
+    pub fn count_shares(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> Result<u32> {
+        self.inner
+            .count_shares(target_id, target_type)
+            .map_err(SocialFeedError::ipc)
+    }
+
+    /// Persist a [`ReportRecord`]. SR-MOMENTS-6: idempotent on
+    /// `(target_id, target_type, reporter_id)`. Returns `false`
+    /// when the same reporter had already filed a report on the
+    /// same target.
+    pub fn report(&self, report: a3net_types::social_feed::ReportRecord) -> Result<bool> {
+        self.inner.save_report(report).map_err(SocialFeedError::ipc)
+    }
+
+    pub fn list_target_reports(
+        &self,
+        target_id: &str,
+        target_type: a3net_types::social_feed::ShareTarget,
+    ) -> Result<Vec<a3net_types::social_feed::ReportRecord>> {
+        self.inner
+            .list_target_reports(target_id, target_type)
+            .map_err(SocialFeedError::ipc)
+    }
+
+    /// Block a user. SR-MOMENTS-7: the timeline `ForViewer` filter
+    /// drops blocked authors' posts; `react` / `comment_post` from
+    /// a blocked user is rejected at the dispatcher.
+    pub fn block(
+        &self,
+        record: a3net_types::social_feed::BlockRecord,
+    ) -> Result<bool> {
+        self.inner.save_block(record).map_err(SocialFeedError::ipc)
+    }
+
+    pub fn unblock(&self, owner_id: &str, blocked_user_id: &str) -> Result<bool> {
+        self.inner
+            .delete_block(owner_id, blocked_user_id)
+            .map_err(SocialFeedError::ipc)
+    }
+
+    pub fn is_blocked(&self, owner_id: &str, candidate_id: &str) -> Result<bool> {
+        self.inner
+            .is_blocked(owner_id, candidate_id)
+            .map_err(SocialFeedError::ipc)
+    }
+
+    pub fn list_blocklist(&self, owner_id: &str) -> Result<Vec<String>> {
+        self.inner
+            .list_blocklist(owner_id)
             .map_err(SocialFeedError::ipc)
     }
 

@@ -16,12 +16,12 @@
 use std::sync::Arc;
 
 use a3net_blobstore::IrohBlobStore;
-use a3net_chatstore::IrohShareMode;
 use a3net_chatstore::docs_bridge::{
     DEFAULT_MESSAGE_LIMIT, DocsBridgeError, ErrorClass, IrohDocsChat, MAX_APPEND_RETRIES,
 };
 use a3net_chatstore::im::Message;
 use chrono::Utc;
+use iroh_docs::api::protocol::ShareMode;
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -83,16 +83,6 @@ async fn new_returns_default_author() {
 }
 
 #[tokio::test]
-async fn blobs_returns_reference() {
-    let (_dir, bridge) = fresh_bridge().await;
-    // `blobs()` returns a reference; two calls return references to the
-    // same underlying Arc'd store.
-    let b1 = bridge.blobs();
-    let b2 = bridge.blobs();
-    assert!(std::ptr::eq(&*b1, &*b2));
-}
-
-#[tokio::test]
 async fn api_returns_arc() {
     let (_dir, bridge) = fresh_bridge().await;
     let a = bridge.api();
@@ -110,19 +100,15 @@ async fn open_existing_returns_err_for_unknown_namespace() {
     assert!(result.is_err(), "unknown namespace must error");
 }
 
-// ─── share_with_addr_options ─────────────────────────────────────────────────
+// ─── share ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn share_with_addr_options_produces_non_empty_ticket() {
+async fn share_produces_non_empty_ticket() {
     let (_dir, bridge) = fresh_bridge().await;
-    bridge.open_conversation("conv-addr").await.expect("open");
+    bridge.open_conversation("conv-share").await.expect("open");
 
     let ticket = bridge
-        .share_with_addr_options(
-            "conv-addr",
-            IrohShareMode::Write,
-            a3net_chatstore::IrohAddrInfoOptions::RelayAndAddresses,
-        )
+        .share("conv-share", ShareMode::Write)
         .await
         .expect("share");
     assert!(!ticket.to_string().is_empty());

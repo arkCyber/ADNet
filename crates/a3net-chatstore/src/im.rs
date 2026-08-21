@@ -122,6 +122,16 @@ pub struct Conversation {
     pub id: String,
     pub chat_type: ChatType,
     pub title: String,
+    /// Group description. Empty string when the group has no description.
+    pub description: String,
+    /// Pinned announcement text. Empty string when none is set.
+    pub announcement: String,
+    /// Group avatar URL. None when the group has no custom avatar.
+    pub avatar_url: Option<String>,
+    /// True for invite-only groups.
+    pub is_private: bool,
+    /// True after the group was dissolved. Dissolved groups reject new messages.
+    pub is_dissolved: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub message_count: u32,
@@ -137,6 +147,17 @@ pub struct GroupMember {
     pub user_id: String,
     pub joined_at: DateTime<Utc>,
     pub role: String,
+    /// RFC3339 timestamp of last activity (message sent or presence update).
+    /// `None` if never seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Cached online status derived from presence service.
+    /// Updated via `update_member_presence()` when member sends messages.
+    #[serde(default)]
+    pub is_online: bool,
+    /// Optional expiry for temporary admin grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp_admin_until: Option<DateTime<Utc>>,
 }
 
 /// Single chat message (hub-canonical). `receiver_id` is `None` for
@@ -412,6 +433,7 @@ impl ImManager {
         &self,
         chat_type: ChatType,
         title: &str,
+        is_private: bool,
     ) -> Result<Conversation> {
         a3net_types::invariants::validate_name("title", title)?;
         debug!("creating conversation: {title} ({chat_type:?})");
@@ -420,12 +442,13 @@ impl ImManager {
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO conversations
-             (id, chat_type, title, created_at, updated_at, message_count, last_sequence)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)",
+             (id, chat_type, title, description, announcement, avatar_url, is_private, is_dissolved, created_at, updated_at, message_count, last_sequence)
+             VALUES (?1, ?2, ?3, '', '', NULL, ?4, 0, ?5, ?6, 0, 0)",
             params![
                 id,
                 chat_type.as_str(),
                 title,
+                is_private as i64,
                 now.to_rfc3339(),
                 now.to_rfc3339()
             ],
@@ -434,6 +457,11 @@ impl ImManager {
             id,
             chat_type,
             title: title.to_string(),
+            description: String::new(),
+            announcement: String::new(),
+            avatar_url: None,
+            is_private,
+            is_dissolved: false,
             created_at: now,
             updated_at: now,
             message_count: 0,
@@ -446,7 +474,9 @@ impl ImManager {
         a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, chat_type, title, created_at, updated_at, message_count, last_sequence
+            "SELECT id, chat_type, title, description, announcement, avatar_url,
+                    is_private, is_dissolved,
+                    created_at, updated_at, message_count, last_sequence
              FROM conversations WHERE id = ?1",
         )?;
         let conv = stmt
@@ -455,14 +485,156 @@ impl ImManager {
         Ok(conv)
     }
 
+    /// Mark a group conversation as dissolved. After dissolution the
+    /// group rejects new messages and members can no longer join.
+    /// Dissolution is idempotent — re-dissolving a dissolved group
+    /// succeeds with no-op.
+    pub async fn dissolve_conversation(&self, conversation_id: &str) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE conversations
+             SET is_dissolved = 1, updated_at = ?1
+             WHERE id = ?2 AND is_dissolved = 0",
+            params![now.to_rfc3339(), conversation_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set or clear the pinned announcement for a group. Set to empty
+    /// string to clear it. Validates the text length (≤ 1024 chars).
+    pub async fn set_group_announcement(
+        &self,
+        conversation_id: &str,
+        text: &str,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        if text.len() > 1024 {
+            return Err(ChatStoreError::Validation(format!(
+                "announcement text length {} exceeds 1024 chars",
+                text.len()
+            )));
+        }
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE conversations
+             SET announcement = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![text, now.to_rfc3339(), conversation_id],
+        )?;
+        Ok(())
+    }
+
+    /// Set or clear the group title. Empty string clears it.
+    /// Audit issue #6: this method was missing — callers like
+    /// `a3chat-app::GroupService::update_metadata` had no way to
+    /// propagate name changes through the hub. Validates the title
+    /// length (≤ 256 chars, matching `MAX_NAME_LEN`).
+    pub async fn set_group_title(
+        &self,
+        conversation_id: &str,
+        title: &str,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        if title.len() > 256 {
+            return Err(ChatStoreError::Validation(format!(
+                "group title length {} exceeds 256 chars",
+                title.len()
+            )));
+        }
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE conversations
+             SET title = ?1, updated_at = ?2
+             WHERE id = ?3 AND chat_type = 'group'",
+            params![title, now.to_rfc3339(), conversation_id],
+        )?;
+        if n == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "group conversation {conversation_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Set or clear the group description. Empty string clears it.
+    /// Audit issue #6: paired with [`set_group_title`].
+    pub async fn set_group_description(
+        &self,
+        conversation_id: &str,
+        description: &str,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        if description.len() > 1024 {
+            return Err(ChatStoreError::Validation(format!(
+                "group description length {} exceeds 1024 chars",
+                description.len()
+            )));
+        }
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE conversations
+             SET description = ?1, updated_at = ?2
+             WHERE id = ?3 AND chat_type = 'group'",
+            params![description, now.to_rfc3339(), conversation_id],
+        )?;
+        if n == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "group conversation {conversation_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Set or clear the group avatar URL.
+    /// Pass `None` to remove the avatar (revert to default).
+    /// DO-178C §6.1: URL validation runs before the SQL write.
+    pub async fn set_group_avatar_url(
+        &self,
+        conversation_id: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+
+        // Validate URL if provided
+        if let Some(url) = avatar_url {
+            if url.is_empty() {
+                return Err(ChatStoreError::Validation(
+                    "avatar_url cannot be empty string; use None to clear".into(),
+                ));
+            }
+            a3net_types::invariants::validate_url("avatar_url", url)?;
+        }
+
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let n = conn.execute(
+            "UPDATE conversations
+             SET avatar_url = ?1, updated_at = ?2
+             WHERE id = ?3 AND chat_type = 'group'",
+            params![avatar_url, now.to_rfc3339(), conversation_id],
+        )?;
+        if n == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "group conversation {conversation_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
     /// All conversations visible to `user_id` (every 1-to-1 chat
     /// plus every group the user is a member of).
     pub async fn list_user_conversations(&self, user_id: &str) -> Result<Vec<Conversation>> {
         a3net_types::invariants::validate_id("user_id", user_id)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.chat_type, c.title, c.created_at, c.updated_at,
-                    c.message_count, c.last_sequence
+            "SELECT c.id, c.chat_type, c.title, c.description, c.announcement, c.avatar_url,
+                    c.is_private, c.is_dissolved,
+                    c.created_at, c.updated_at, c.message_count, c.last_sequence
              FROM conversations c
              LEFT JOIN group_members gm
                     ON c.id = gm.conversation_id AND gm.user_id = ?1
@@ -497,19 +669,31 @@ impl ImManager {
         // Detect "already a member" so we can return the existing row.
         let existing = conn
             .query_row(
-                "SELECT id, joined_at FROM group_members
+                "SELECT id, joined_at, last_seen, is_online, temp_admin_until
+                 FROM group_members
                  WHERE conversation_id = ?1 AND user_id = ?2",
                 params![conversation_id, user_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((id, joined_at)) = existing {
+        if let Some((id, joined_at, last_seen, is_online, temp_admin_until)) = existing {
             return Ok(GroupMember {
                 id,
                 conversation_id: conversation_id.to_string(),
                 user_id: user_id.to_string(),
                 joined_at: parse_dt(joined_at)?,
                 role: role.to_string(),
+                last_seen: last_seen.and_then(|s| parse_dt(s).ok()),
+                is_online,
+                temp_admin_until: temp_admin_until.and_then(|s| parse_dt(s).ok()),
             });
         }
 
@@ -517,8 +701,8 @@ impl ImManager {
         let joined_at = Utc::now();
         conn.execute(
             "INSERT INTO group_members
-             (id, conversation_id, user_id, joined_at, role)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (id, conversation_id, user_id, joined_at, role, is_online)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
             params![id, conversation_id, user_id, joined_at.to_rfc3339(), role],
         )?;
         Ok(GroupMember {
@@ -527,6 +711,9 @@ impl ImManager {
             user_id: user_id.to_string(),
             joined_at,
             role: role.to_string(),
+            last_seen: None,
+            is_online: false,
+            temp_admin_until: None,
         })
     }
 
@@ -543,22 +730,152 @@ impl ImManager {
         Ok(removed)
     }
 
+    /// Update a member's role. Returns `Ok(())` if updated; no-op if the
+    /// user was not a member. Validates the new role string.
+    pub async fn set_group_member_role(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        new_role: &str,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        a3net_types::invariants::validate_id("user_id", user_id)?;
+        a3net_types::invariants::validate_id("role", new_role)?;
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE group_members SET role = ?1
+             WHERE conversation_id = ?2 AND user_id = ?3",
+            params![new_role, conversation_id, user_id],
+        )?;
+        if updated == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "member {user_id} not found in group {conversation_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Update last_seen and is_online for a group member.
+    /// Called when a member sends a message or updates their presence.
+    pub async fn update_member_presence(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        is_online: bool,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        a3net_types::invariants::validate_id("user_id", user_id)?;
+        let now = Utc::now();
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE group_members
+             SET last_seen = ?1, is_online = ?2
+             WHERE conversation_id = ?3 AND user_id = ?4",
+            params![now.to_rfc3339(), is_online, conversation_id, user_id],
+        )?;
+        if updated == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "member {user_id} not found in group {conversation_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Grant temporary admin status to a member until the specified time.
+    /// Returns `NotFound` if the member does not exist in the group.
+    pub async fn set_temp_admin(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        until: DateTime<Utc>,
+    ) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        a3net_types::invariants::validate_id("user_id", user_id)?;
+
+        // Reject past or immediate expiry times
+        if until <= Utc::now() {
+            return Err(ChatStoreError::Validation(
+                "temp admin expiry must be in the future".into(),
+            ));
+        }
+
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE group_members
+             SET temp_admin_until = ?1
+             WHERE conversation_id = ?2 AND user_id = ?3",
+            params![until.to_rfc3339(), conversation_id, user_id],
+        )?;
+        if updated == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "member {user_id} not found in group {conversation_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Clear temporary admin status for a member.
+    /// Returns `NotFound` if the member does not exist in the group.
+    pub async fn clear_temp_admin(&self, conversation_id: &str, user_id: &str) -> Result<()> {
+        a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
+        a3net_types::invariants::validate_id("user_id", user_id)?;
+        let conn = self.conn.lock().await;
+        let updated = conn.execute(
+            "UPDATE group_members
+             SET temp_admin_until = NULL
+             WHERE conversation_id = ?1 AND user_id = ?2",
+            params![conversation_id, user_id],
+        )?;
+        if updated == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "member {user_id} not found in group {conversation_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Clear all expired temporary admin grants across all groups.
+    /// This is intended to be called periodically (e.g., by a background task)
+    /// to clean up stale data from expired grants.
+    ///
+    /// Returns the number of expired grants that were cleared.
+    pub async fn cleanup_expired_temp_admin_grants(&self) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let cleared = conn.execute(
+            "UPDATE group_members
+             SET temp_admin_until = NULL
+             WHERE temp_admin_until IS NOT NULL
+               AND datetime(temp_admin_until) < datetime('now')",
+            [],
+        )?;
+        Ok(cleared)
+    }
+
     /// All members of a group conversation, oldest-joined first.
     pub async fn get_group_members(&self, conversation_id: &str) -> Result<Vec<GroupMember>> {
         a3net_types::invariants::validate_id("conversation_id", conversation_id)?;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT id, conversation_id, user_id, joined_at, role
+            "SELECT id, conversation_id, user_id, joined_at, role,
+                    last_seen, is_online, temp_admin_until
              FROM group_members WHERE conversation_id = ?1
              ORDER BY joined_at ASC",
         )?;
         let rows = stmt.query_map(params![conversation_id], |row| {
+            let last_seen_str: Option<String> = row.get(5)?;
+            let last_seen = last_seen_str.and_then(|s| parse_dt(s).ok());
+            let is_online: bool = row.get(6)?;
+            let temp_admin_str: Option<String> = row.get(7)?;
+            let temp_admin_until = temp_admin_str.and_then(|s| parse_dt(s).ok());
             Ok(GroupMember {
                 id: row.get(0)?,
                 conversation_id: row.get(1)?,
                 user_id: row.get(2)?,
                 joined_at: parse_dt(row.get::<_, String>(3)?)?,
                 role: row.get(4)?,
+                last_seen,
+                is_online,
+                temp_admin_until,
             })
         })?;
         let members = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1342,10 +1659,15 @@ fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         id: row.get(0)?,
         chat_type: ChatType::parse(&row.get::<_, String>(1)?),
         title: row.get(2)?,
-        created_at: parse_dt(row.get::<_, String>(3)?)?,
-        updated_at: parse_dt(row.get::<_, String>(4)?)?,
-        message_count: row.get::<_, i64>(5)? as u32,
-        last_sequence: row.get::<_, i64>(6)? as u32,
+        description: row.get(3)?,
+        announcement: row.get(4)?,
+        avatar_url: row.get(5)?,
+        is_private: row.get::<_, bool>(6)?,
+        is_dissolved: row.get::<_, bool>(7)?,
+        created_at: parse_dt(row.get::<_, String>(8)?)?,
+        updated_at: parse_dt(row.get::<_, String>(9)?)?,
+        message_count: row.get::<_, i64>(10)? as u32,
+        last_sequence: row.get::<_, i64>(11)? as u32,
     })
 }
 

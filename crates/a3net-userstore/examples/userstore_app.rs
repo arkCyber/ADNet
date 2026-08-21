@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         typing_indicators_enabled: false,
         experimental_json: "{}".into(),
     };
-    store.put_profile(bob).await?;
+    store.put_profile(bob)?;
 
     // First key (will be revoked below).
     store
@@ -39,10 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             user_id: "bob".into(),
             algorithm: PublicKeyAlgorithm::Ed25519.as_str().to_string(),
             key_material: "MCowBQYDK2VwAyEAKEY1".into(),
+            label: "primary".into(),
             created_at: 1,
             revoked_at: None,
         })
-        .await?;
+        ?;
 
     // Second key (active).
     store
@@ -51,10 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             user_id: "bob".into(),
             algorithm: PublicKeyAlgorithm::Ed25519.as_str().to_string(),
             key_material: "MCowBQYDK2VwAyEAKEY2".into(),
+            label: "rotated-2026".into(),
             created_at: 2,
             revoked_at: None,
         })
-        .await?;
+        ?;
 
     // Two paired devices.
     store
@@ -68,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             paired_at: 10,
             revoked_at: None,
         })
-        .await?;
+        ?;
     store
         .put_device(UserDevice {
             device_id: "bob-phone".into(),
@@ -80,13 +82,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             paired_at: 20,
             revoked_at: None,
         })
-        .await?;
+        ?;
 
     // Revoke the first key + the Mac device.
-    store.revoke_public_key("bob#ed25519#1").await?;
-    store.revoke_device("bob-mac").await?;
-    let keys = store.list_public_keys("bob").await?;
-    let devices = store.list_devices("bob").await?;
+    store.revoke_public_key("bob#ed25519#1")?;
+    store.revoke_device("bob-mac")?;
+    let keys = store.list_public_keys("bob")?;
+    let devices = store.list_devices("bob")?;
     let revoked_keys = keys.iter().filter(|k| k.revoked_at.is_some()).count();
     let active_keys = keys.iter().filter(|k| k.revoked_at.is_none()).count();
     println!(
@@ -98,14 +100,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(devices.len(), 2);
 
     // Pin the canonical 12-digit ID.
-    let digit1 = store.ensure_user_digit("bob").await?;
+    let digit1 = store.ensure_user_digit("bob")?;
     println!("bob 12-digit id: {digit1} (len = {})", digit1.len());
     assert_eq!(digit1.len(), 12);
 
     // Phase 2: re-open and confirm the ID is stable.
     drop(store);
     let reopened = SqliteUserStore::open(SqliteUserStoreConfig::new(&db_path))?;
-    let digit2 = reopened.resolve_user_digit("bob").await?.expect("digit");
+    let digit2 = reopened.resolve_user_digit("bob")?.expect("digit");
     println!("bob 12-digit id after re-open: {digit2}");
     assert_eq!(digit1, digit2);
 

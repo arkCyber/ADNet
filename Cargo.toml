@@ -26,6 +26,7 @@ members = [
     "crates/a3net-transport",
     "crates/a3net-ipc",
     "crates/a3net-relay",
+    "crates/a3net-mailbox",
     "crates/a3net-workspace",
     "crates/a3net-gateway",
     "crates/a3net-chatstore",
@@ -213,6 +214,7 @@ a3net-resilience        = { path = "crates/a3net-resilience" }
 a3net-transport         = { path = "crates/a3net-transport" }
 a3net-ipc               = { path = "crates/a3net-ipc" }
 a3net-relay             = { path = "crates/a3net-relay" }
+a3net-mailbox             = { path = "crates/a3net-mailbox" }
 a3net-workspace         = { path = "crates/a3net-workspace" }
 a3net-gateway           = { path = "crates/a3net-gateway" }
 a3net-node              = { path = "crates/a3net-node" }

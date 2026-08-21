@@ -35,6 +35,19 @@ impl MemberRole {
             _ => return None,
         })
     }
+    /// Rank for permission comparisons. Higher rank = more authority.
+    /// DO-178C §6.1: no panics on parse errors — unknown strings return 0.
+    pub fn rank(self) -> u8 {
+        match self {
+            MemberRole::Owner => 2,
+            MemberRole::Admin => 1,
+            MemberRole::Member => 0,
+        }
+    }
+    /// Parse from a string and return rank. Used by hub bridge code.
+    pub fn rank_from_str(s: &str) -> i32 {
+        Self::parse(s).map(|r| r.rank() as i32).unwrap_or(0)
+    }
 }
 
 /// Full group record — what `chat.conversation.open` returns for a
@@ -117,6 +130,10 @@ pub struct GroupMember {
     pub is_online: bool,
     /// Per-group nickname override (the "群昵称").
     pub nickname: Option<String>,
+    /// Expiry of a temporary admin grant. `None` means no temporary grant.
+    /// When expired, the member reverts to their base [`role`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp_admin_until: Option<DateTime<Utc>>,
 }
 
 impl GroupMember {
@@ -131,6 +148,14 @@ impl GroupMember {
         {
             return Err(A3chatError::InvalidInput(format!(
                 "last_seen {seen} < joined_at {}",
+                self.joined_at
+            )));
+        }
+        if let Some(until) = self.temp_admin_until
+            && until < self.joined_at
+        {
+            return Err(A3chatError::InvalidInput(format!(
+                "temp_admin_until {until} < joined_at {}",
                 self.joined_at
             )));
         }
@@ -176,6 +201,21 @@ pub struct GroupInvitation {
     pub status: InvitationStatus,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Phase 5c: iroh-docs sync ticket for P2P group message sync.
+    ///
+    /// Base64-encoded DocTicket that allows the invitee to join
+    /// the group's P2P sync network.
+    ///
+    /// ## TTL Considerations
+    ///
+    /// - The `expires_at` field controls invitation TTL (default: 7 days).
+    /// - The DocTicket embedded in `sync_ticket` is valid indefinitely;
+    ///   however, network access may be restricted by the ticket issuer.
+    /// - If a long-lived group needs renewed access, the invitee can:
+    ///   1. Request a new invitation with a fresh ticket
+    ///   2. Use the mailbox fallback for offline message retrieval
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_ticket: Option<String>,
 }
 
 impl GroupInvitation {
@@ -194,6 +234,28 @@ impl GroupInvitation {
                 self.expires_at, self.created_at
             )));
         }
+
+        // Phase 5c: Validate sync_ticket if present.
+        // The ticket must be within size limits and contain valid base64 characters.
+        if let Some(ref ticket) = self.sync_ticket {
+            // Size limit: 10KB max (iroh DocTickets are typically 1-5KB)
+            if ticket.len() > 10_000 {
+                return Err(A3chatError::InvalidInput(
+                    "sync_ticket exceeds maximum size".into(),
+                ));
+            }
+            // Basic URL-safe base64 character validation
+            // URL-safe base64 uses: A-Z, a-z, 0-9, -, _
+            if !ticket
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(A3chatError::InvalidInput(
+                    "sync_ticket contains invalid characters for URL-safe base64".into(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -262,6 +324,7 @@ mod tests {
             last_seen: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
             is_online: false,
             nickname: None,
+            temp_admin_until: None,
         };
         assert!(m.validate().is_err());
     }
@@ -279,6 +342,7 @@ mod tests {
             status: InvitationStatus::Pending,
             created_at: now,
             expires_at: now + chrono::Duration::seconds(60),
+            sync_ticket: None,
         };
         assert!(inv.validate().is_ok());
     }
@@ -296,6 +360,47 @@ mod tests {
             status: InvitationStatus::Pending,
             created_at: now,
             expires_at: now - chrono::Duration::seconds(1),
+            sync_ticket: None,
+        };
+        assert!(inv.validate().is_err());
+    }
+
+    /// Phase 5c: sync_ticket validation tests
+    #[test]
+    fn invitation_rejects_oversized_sync_ticket() {
+        let now = chrono::Utc::now();
+        let large_ticket = "x".repeat(10_001); // Exceeds 10KB limit
+        let inv = GroupInvitation {
+            invitation_id: "i1".into(),
+            conversation_id: ConversationId::from("grp:abc"),
+            group_name: "G".into(),
+            inviter_id: UserId::from("a"),
+            inviter_name: "A".into(),
+            invitee_id: UserId::from("b"),
+            status: InvitationStatus::Pending,
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(60),
+            sync_ticket: Some(large_ticket),
+        };
+        assert!(inv.validate().is_err());
+    }
+
+    #[test]
+    fn invitation_rejects_invalid_sync_ticket_chars() {
+        let now = chrono::Utc::now();
+        // Contains invalid characters (not URL-safe base64)
+        let invalid_ticket = "abc+/123".to_string();
+        let inv = GroupInvitation {
+            invitation_id: "i1".into(),
+            conversation_id: ConversationId::from("grp:abc"),
+            group_name: "G".into(),
+            inviter_id: UserId::from("a"),
+            inviter_name: "A".into(),
+            invitee_id: UserId::from("b"),
+            status: InvitationStatus::Pending,
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(60),
+            sync_ticket: Some(invalid_ticket),
         };
         assert!(inv.validate().is_err());
     }

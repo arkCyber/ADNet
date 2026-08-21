@@ -20,6 +20,7 @@ use crate::error::RosterResult;
 use crate::group::ContactGroup;
 use crate::mapping::DigitMapping;
 use crate::model::Contact;
+use crate::request::PersistedContactRequest;
 use crate::settings::FriendRequestSetting;
 
 /// Storage capabilities required by every roster backend.
@@ -77,6 +78,47 @@ pub trait RosterStore: Send + Sync {
         &self,
         user_id: &str,
     ) -> RosterResult<Option<FriendRequestSetting>>;
+
+    // ------- Friend requests (persistence slice) -------
+    //
+    // Friend requests are owned by the local user. `put_contact_request`
+    // is idempotent on `request_id`; `get_contact_request` returns
+    // `Ok(None)` when the row is absent; `delete_contact_request` is
+    // idempotent and returns the row that was just removed (so the
+    // caller can audit "did this accept really consume the row it
+    // claimed?"); `list_contact_requests_for` returns every request
+    // where `to_user_id == user_id` — used to power an inbox view.
+    //
+    // Implementations MUST serialise concurrent writes by the same
+    // `request_id` to last-writer-wins, NOT reject them: callers
+    // update `status` in place.
+
+    /// Insert or fully-replace a contact request keyed by `request_id`.
+    async fn put_contact_request(
+        &self,
+        request: PersistedContactRequest,
+    ) -> RosterResult<()>;
+
+    /// Fetch a contact request by id. Returns `Ok(None)` when absent.
+    async fn get_contact_request(
+        &self,
+        request_id: &str,
+    ) -> RosterResult<Option<PersistedContactRequest>>;
+
+    /// Remove a contact request by id. Returns the row that was
+    /// removed, or `Ok(None)` if it didn't exist.
+    async fn delete_contact_request(
+        &self,
+        request_id: &str,
+    ) -> RosterResult<Option<PersistedContactRequest>>;
+
+    /// List every contact request addressed to `user_id`, regardless
+    /// of status. The caller is responsible for filtering by status
+    /// (e.g. to render an inbox of pending requests).
+    async fn list_contact_requests_for(
+        &self,
+        user_id: &str,
+    ) -> RosterResult<Vec<PersistedContactRequest>>;
 }
 
 /// Information a store exposes about its backing medium. Useful for
